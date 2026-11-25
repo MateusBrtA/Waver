@@ -1,10 +1,13 @@
 const {
   app,
   BrowserWindow,
+  clipboard,
   desktopCapturer,
+  dialog,
   globalShortcut,
   ipcMain,
   Menu,
+  nativeImage,
   net,
   protocol,
   session,
@@ -120,6 +123,7 @@ if (process.platform === 'linux') {
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let pttKeyCode = null;
 let pendingScreenCapture = null;
 let activeSharedDisplayId = null;
 
@@ -593,6 +597,16 @@ function createWindow() {
   } else {
     mainWindow.loadURL('app://pulsecord/index.html');
   }
+
+  // Push-to-talk: o Chromium entrega o teclado ao iframe focado (player do YouTube) e a página
+  // deixa de ver a tecla. before-input-event vê tudo, então repassamos só a tecla do PTT.
+  mainWindow.webContents.on('before-input-event', (_e, input) => {
+    if (!pttKeyCode || input.code !== pttKeyCode) return;
+    if (input.type !== 'keyDown' && input.type !== 'keyUp') return;
+    try {
+      mainWindow.webContents.send('ptt:key', { down: input.type === 'keyDown', repeat: Boolean(input.isAutoRepeat) });
+    } catch {}
+  });
 
   mainWindow.on('close', (e) => {
     try {
@@ -1175,6 +1189,61 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
       } else {
         mainWindow.close();
       }
+    });
+    // Menu de imagem (clique direito): copiar/salvar sem esbarrar em CORS de sites externos
+    const fetchImageBytes = async (rawUrl) => {
+      const url = String(rawUrl || '');
+      if (!/^(https?:|app:|data:image\/)/i.test(url)) throw new Error('Endereço de imagem não suportado.');
+      const resp = await net.fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length > 60 * 1024 * 1024) throw new Error('Imagem grande demais.');
+      return { buf, type: resp.headers.get('content-type') || '' };
+    };
+    ipcMain.handle('image:copy', async (_e, url) => {
+      try {
+        const { buf, type } = await fetchImageBytes(url);
+        const img = nativeImage.createFromBuffer(buf);
+        if (!img.isEmpty()) {
+          clipboard.writeImage(img);
+          return { ok: true };
+        }
+        // GIF/WebP: o renderer converte para PNG e chama image:copy-png
+        return { ok: false, dataUrl: `data:${type || 'image/png'};base64,${buf.toString('base64')}` };
+      } catch (err) {
+        return { ok: false, error: err?.message || 'Falha ao copiar.' };
+      }
+    });
+    ipcMain.handle('image:copy-png', (_e, dataUrl) => {
+      try {
+        const img = nativeImage.createFromDataURL(String(dataUrl || ''));
+        if (img.isEmpty()) return { ok: false };
+        clipboard.writeImage(img);
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
+    });
+    ipcMain.handle('image:save', async (_e, url, suggestedName) => {
+      try {
+        const { buf, type } = await fetchImageBytes(url);
+        const extFromType = (type.split('/')[1] || 'png').split(';')[0].replace('jpeg', 'jpg');
+        let name = String(suggestedName || 'imagem').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'imagem';
+        if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += `.${extFromType}`;
+        const res = await dialog.showSaveDialog(mainWindow, {
+          title: 'Salvar imagem',
+          defaultPath: path.join(app.getPath('downloads'), name),
+        });
+        if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+        fs.writeFileSync(res.filePath, buf);
+        return { ok: true, filePath: res.filePath };
+      } catch (err) {
+        return { ok: false, error: err?.message || 'Falha ao salvar.' };
+      }
+    });
+
+    ipcMain.on('ptt:set-key', (_e, code) => {
+      pttKeyCode = typeof code === 'string' && code ? code : null;
     });
     ipcMain.handle('app:get-close-to-tray', () => closeToTray);
     ipcMain.handle('app:set-close-to-tray', (_e, enabled) => {

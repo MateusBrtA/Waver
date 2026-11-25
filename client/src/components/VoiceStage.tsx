@@ -3,6 +3,9 @@ import type { Socket } from 'socket.io-client';
 import {
   Activity,
   Camera,
+  Captions,
+  Check,
+  Gauge,
   CameraOff,
   Clapperboard,
   Crosshair,
@@ -60,7 +63,7 @@ import { SoundboardPanel } from './SoundboardPanel';
 import { VideoPlayerPanel } from './VideoPlayerPanel';
 import { WhiteboardPanel } from './WhiteboardPanel';
 import { PanelResizer, usePersistentWidth } from './PanelResizer';
-import { YouTubeSyncPlayer } from './YouTubeSyncPlayer';
+import { CaptionTrack, expectedVideoPosition, YouTubeSyncPlayer } from './YouTubeSyncPlayer';
 
 const VideoView: React.FC<{
   stream: MediaStream;
@@ -242,6 +245,9 @@ interface VoiceStageProps {
   onVideoPlay: (index?: number) => void;
   onVideoPause: () => void;
   onVideoSeek: (sec: number) => void;
+  onVideoRate?: (rate: number) => void;
+  /** pedido externo para focar uma transmissão (ex.: clique na miniatura da barra lateral) */
+  spotlightRequest?: { key: string; seq: number } | null;
   onVideoNext: () => void;
   onVideoPrev: () => void;
   onVideoEnded: (queueId: string) => void;
@@ -332,6 +338,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   onVideoPlay,
   onVideoPause,
   onVideoSeek,
+  onVideoRate,
+  spotlightRequest,
   onVideoNext,
   onVideoPrev,
   onVideoEnded,
@@ -353,6 +361,24 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   const [watchCurSec, setWatchCurSec] = useState(0);
   const [watchDurSec, setWatchDurSec] = useState(0);
   const [ytFallbackIds, setYtFallbackIds] = useState<Set<string>>(() => new Set());
+  const [ytEmbedBlocked, setYtEmbedBlocked] = useState<Set<string>>(() => new Set());
+  // legenda é individual: fica só neste PC
+  const [captionsOn, setCaptionsOn] = useState(() => {
+    try {
+      return localStorage.getItem('pc.videoCaptions') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [captionsLang, setCaptionsLang] = useState(() => {
+    try {
+      return localStorage.getItem('pc.videoCaptionsLang') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [captionTracks, setCaptionTracks] = useState<CaptionTrack[]>([]);
+  const [videoMenu, setVideoMenu] = useState<null | 'speed' | 'captions'>(null);
   const [pointerLocked, setPointerLocked] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [drawerWidth, setDrawerWidth] = usePersistentWidth('pc.voiceDrawerWidth', 340, 280, 560);
@@ -370,9 +396,22 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   const currentWatchVideo =
     videoState && videoState.currentIndex >= 0 ? videoState.queue[videoState.currentIndex] || null : null;
   const hasWatchVideo = Boolean(currentWatchVideo);
+  const hasDirectStream = Boolean(currentWatchVideo?.streamPath);
   const useYouTubeWatchPlayer = Boolean(
-    currentWatchVideo?.youtubeId && !ytFallbackIds.has(currentWatchVideo.queueId)
+    currentWatchVideo?.youtubeId && (!ytFallbackIds.has(currentWatchVideo.queueId) || !hasDirectStream)
   );
+  const videoRate = videoState?.rate && videoState.rate > 0 ? videoState.rate : 1;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('pc.videoCaptions', captionsOn ? '1' : '0');
+      localStorage.setItem('pc.videoCaptionsLang', captionsLang);
+    } catch {}
+  }, [captionsOn, captionsLang]);
+  useEffect(() => {
+    setCaptionTracks([]);
+    setVideoMenu(null);
+  }, [currentWatchVideo?.queueId]);
 
   // Track Pointer-Lock changes for Parsec 3D game relative aiming
   useEffect(() => {
@@ -415,28 +454,49 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     onVideoSeek(targetSec);
   };
 
+  // Volume individual do vídeo: separado da sincronização (mexer no volume não pode mexer na posição)
+  useEffect(() => {
+    if (useYouTubeWatchPlayer) return;
+    const el = watchVideoRef.current;
+    const aud = watchAudioRef.current;
+    if (!el || !currentWatchVideo) return;
+    const effectiveVol = deafened ? 0 : Math.max(0, Math.min(1, videoVolume));
+    const hasSeparateAudio = Boolean(currentWatchVideo.audioStreamPath);
+    el.muted = hasSeparateAudio;
+    el.volume = hasSeparateAudio ? 0 : effectiveVol;
+    if (aud && hasSeparateAudio) aud.volume = effectiveVol;
+  }, [videoVolume, deafened, currentWatchVideo, useYouTubeWatchPlayer]);
+
+  // Velocidade da sala
+  useEffect(() => {
+    if (useYouTubeWatchPlayer) return;
+    const el = watchVideoRef.current;
+    const aud = watchAudioRef.current;
+    if (el) el.playbackRate = videoRate;
+    if (aud) aud.playbackRate = videoRate;
+  }, [videoRate, currentWatchVideo, useYouTubeWatchPlayer]);
+
   // Sync Watch-Party HTMLVideoElement (and companion DASH <audio>) state with server VideoState
   useEffect(() => {
     if (useYouTubeWatchPlayer) return;
     const el = watchVideoRef.current;
     const aud = watchAudioRef.current;
     if (!el || !currentWatchVideo || !videoState) return;
-
-    const effectiveVol = deafened ? 0 : Math.max(0, Math.min(1, videoVolume));
     const hasSeparateAudio = Boolean(currentWatchVideo.audioStreamPath);
-    el.muted = hasSeparateAudio;
-    el.volume = hasSeparateAudio ? 0 : effectiveVol;
-    if (aud && hasSeparateAudio) {
-      aud.volume = effectiveVol;
-    }
 
     const incomingSeq = typeof videoState.seq === 'number' ? videoState.seq : -1;
     const isNewSeq = incomingSeq !== -1 && incomingSeq !== lastVideoSeqRef.current;
     if (incomingSeq !== -1) lastVideoSeqRef.current = incomingSeq;
 
-    const alignedNow = Date.now() + clockOffsetMs;
-    const latency = Math.max(0, (alignedNow - videoState.serverNow) / 1000);
-    const targetSec = videoState.isPlaying ? videoState.positionSec + Math.min(latency, 1.5) : videoState.positionSec;
+    // Antes a latência tinha teto de 1,5 s: quando o efeito rodava de novo 30 s depois (sincronia do
+    // relógio, volume), o alvo ficava 28 s atrás e o vídeo "voltava" sozinho em loop.
+    const targetSec = expectedVideoPosition(
+      videoState.positionSec,
+      videoState.serverNow,
+      clockOffsetMs,
+      videoState.isPlaying,
+      videoState.rate || 1
+    );
     const driftThreshold = isNewSeq && (videoState.lastAction === 'seek' || videoState.lastAction === 'track') ? 0.18 : 0.75;
 
     if (Number.isFinite(targetSec) && Math.abs((el.currentTime || 0) - targetSec) > driftThreshold) {
@@ -456,7 +516,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
       if (!el.paused) el.pause();
       if (aud && hasSeparateAudio && !aud.paused) aud.pause();
     }
-  }, [videoState, currentWatchVideo, videoVolume, deafened, clockOffsetMs, useYouTubeWatchPlayer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoState, currentWatchVideo, useYouTubeWatchPlayer]);
 
   const activeStreams = useMemo(() => {
     const list: Array<{
@@ -522,6 +583,20 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
       setSpotlightKey(null);
     }
   }, [activeStreams, hasWatchVideo, spotlightKey]);
+
+  // pedido de foco que chegou antes da tela (ex.: acabou de entrar na call) fica pendente até ela aparecer
+  const pendingSpotlightRef = useRef<{ key: string; seq: number } | null>(null);
+  useEffect(() => {
+    if (spotlightRequest) pendingSpotlightRef.current = spotlightRequest;
+  }, [spotlightRequest?.seq]);
+  useEffect(() => {
+    const req = pendingSpotlightRef.current;
+    if (!req) return;
+    if (activeStreams.some((s) => s.key === req.key)) {
+      setSpotlightKey(req.key);
+      pendingSpotlightRef.current = null;
+    }
+  }, [activeStreams, spotlightRequest?.seq]);
 
   const focusedWatchParty = hasWatchVideo && spotlightKey === 'watch-party';
   const focusedStream = !focusedWatchParty ? activeStreams.find((s) => s.key === spotlightKey) || null : null;
@@ -740,11 +815,11 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     <div className="flex-1 flex h-full min-w-0 bg-[#313338] pc-voice-stage relative overflow-hidden">
       <div className="flex-1 flex flex-col min-w-0 h-full relative bg-[#1e1f22]">
         {/* Top Bar (48px authentic Discord bar) */}
-        <header className="h-12 shrink-0 px-4 bg-[#2b2d31]/95 border-b border-white/10 flex items-center justify-between gap-3 z-10">
-          <div className="flex items-center gap-2.5 min-w-0">
+        <header className="@container h-12 shrink-0 px-4 bg-[#2b2d31]/95 border-b border-white/10 flex items-center justify-between gap-3 z-10">
+          <div className="flex flex-1 items-center gap-2.5 min-w-0 overflow-hidden">
             <Volume2 className="w-5 h-5 text-[#23a55a] shrink-0" />
             <h2 className="font-bold text-white text-sm sm:text-base truncate">{channelName}</h2>
-            <span className="text-xs px-2 py-0.5 rounded-full bg-[#2b2d31] text-[#b5bac1] shrink-0">
+            <span className="hidden @lg:inline text-xs px-2 py-0.5 rounded-full bg-[#2b2d31] text-[#b5bac1] shrink-0 whitespace-nowrap">
               {participants.length} na call
             </span>
 
@@ -763,7 +838,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               <button
                 type="button"
                 onClick={onReconnectAudio}
-                className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border cursor-pointer shrink-0 ${
+                className={`hidden @2xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border cursor-pointer shrink-0 whitespace-nowrap ${
                   Object.values(remotePeers).every((p) => p.connectionState === 'connected')
                     ? 'border-transparent text-[#23a55a] hover:bg-[#35373c]'
                     : 'border-transparent text-[#f0b232] hover:bg-[#35373c]'
@@ -781,7 +856,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               <button
                 type="button"
                 onClick={() => onSetDrawer(activeDrawer === 'music' ? 'none' : 'music')}
-                className="hidden xl:inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs text-[#b5bac1] hover:bg-[#35373c] hover:text-[#dbdee1] cursor-pointer truncate max-w-[220px]"
+                className="hidden @5xl:inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs text-[#b5bac1] hover:bg-[#35373c] hover:text-[#dbdee1] cursor-pointer truncate max-w-[220px]"
               >
                 <Music className="w-3.5 h-3.5 text-[#b5bac1] shrink-0" />
                 <span className="truncate">{currentMusic.title}</span>
@@ -789,7 +864,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 shrink-0">
             {isPrivateCall && onInviteToGroupCall && (
               <button
                 type="button"
@@ -798,7 +873,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                 title="Adicionar amigo ou criar chamada em grupo"
               >
                 <UserPlus className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">+ Grupo</span>
+                <span className="hidden @4xl:inline">+ Grupo</span>
               </button>
             )}
             {onOpenTrello && canTrello && (
@@ -809,7 +884,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                 title="Abrir quadro Trello / Projetos"
               >
                 <KanbanSquare className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Trello</span>
+                <span className="hidden @4xl:inline">Trello</span>
               </button>
             )}
             <button
@@ -823,7 +898,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               title="Whiteboard"
             >
               <Palette className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Whiteboard</span>
+              <span className="hidden @4xl:inline">Whiteboard</span>
             </button>
             <button
               type="button"
@@ -831,7 +906,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-[#b5bac1] hover:bg-[#35373c] hover:text-[#dbdee1] flex items-center gap-1.5 cursor-pointer"
             >
               <MessageSquare className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Chat</span>
+              <span className="hidden @4xl:inline">Chat</span>
             </button>
             <button
               type="button"
@@ -844,7 +919,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               title="Vídeos (YouTube, X, Instagram, TikTok)"
             >
               <Clapperboard className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Vídeos</span>
+              <span className="hidden @4xl:inline">Vídeos</span>
             </button>
             <button
               type="button"
@@ -856,7 +931,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               }`}
             >
               <Zap className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Soundboard</span>
+              <span className="hidden @4xl:inline">Soundboard</span>
             </button>
             <button
               type="button"
@@ -868,7 +943,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               }`}
             >
               <Music className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Músicas</span>
+              <span className="hidden @4xl:inline">Músicas</span>
             </button>
           </div>
         </header>
@@ -1146,14 +1221,31 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                   clockOffsetMs={clockOffsetMs}
                   seq={videoState?.seq || 0}
                   lastAction={videoState?.lastAction}
+                  rate={videoRate}
                   volume={videoVolume}
                   deafened={deafened}
+                  captionsOn={captionsOn}
+                  captionsLang={captionsLang}
+                  onCaptionTracks={setCaptionTracks}
                   onTimeUpdate={(cur, dur) => {
                     setWatchCurSec(cur);
                     if (dur > 0) setWatchDurSec(dur);
+                    // player só demorou para subir: tira o aviso de bloqueado
+                    if (cur > 0.5 && ytEmbedBlocked.has(currentWatchVideo.queueId)) {
+                      setYtEmbedBlocked((prev) => {
+                        const next = new Set(prev);
+                        next.delete(currentWatchVideo.queueId);
+                        return next;
+                      });
+                    }
                   }}
                   onEnded={() => onVideoEnded(currentWatchVideo.queueId)}
                   onFallbackNeeded={() => {
+                    if (!currentWatchVideo.streamPath) {
+                      // sem stream direto (YouTube bloqueou o download): avisa em vez de trocar
+                      setYtEmbedBlocked((prev) => new Set(prev).add(currentWatchVideo.queueId));
+                      return;
+                    }
                     setYtFallbackIds((prev) => {
                       const next = new Set(prev);
                       next.add(currentWatchVideo.queueId);
@@ -1167,7 +1259,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                   <video
                     ref={watchVideoRef}
                     key={currentWatchVideo.queueId}
-                    src={resolveMediaUrl(serverUrl, currentWatchVideo.streamPath)}
+                    src={resolveMediaUrl(serverUrl, currentWatchVideo.streamPath || '')}
                     playsInline
                     muted={Boolean(currentWatchVideo.audioStreamPath)}
                     autoPlay={Boolean(videoState?.isPlaying)}
@@ -1235,11 +1327,16 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                       if (aud && hasSeparateAudio) {
                         aud.volume = effectiveVol;
                       }
+                      el.playbackRate = videoRate;
+                      if (aud) aud.playbackRate = videoRate;
                       if (videoState && videoState.queue[videoState.currentIndex]?.queueId === currentWatchVideo.queueId) {
-                        const latency = Math.max(0, (Date.now() + clockOffsetMs - videoState.serverNow) / 1000);
-                        const targetSec = videoState.isPlaying
-                          ? videoState.positionSec + Math.min(latency, 1.5)
-                          : videoState.positionSec;
+                        const targetSec = expectedVideoPosition(
+                          videoState.positionSec,
+                          videoState.serverNow,
+                          clockOffsetMs,
+                          videoState.isPlaying,
+                          videoState.rate || 1
+                        );
                         if (Number.isFinite(targetSec) && targetSec > 0.25 && Math.abs((el.currentTime || 0) - targetSec) > 0.25) {
                           try {
                             el.currentTime = targetSec;
@@ -1290,35 +1387,36 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                 />
               )}
 
+              {ytEmbedBlocked.has(currentWatchVideo.queueId) && useYouTubeWatchPlayer && (
+                <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-2 bg-black/85 text-center px-6">
+                  <div className="text-sm font-semibold text-white">Este vídeo não pode ser tocado aqui</div>
+                  <p className="text-xs text-[#b5bac1] max-w-sm">
+                    O dono do vídeo bloqueou o player incorporado e o YouTube recusou o download direto.
+                    Pule para o próximo ou peça ao host para colar um cookies.txt nas configurações do servidor.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={onVideoNext}
+                    className="mt-1 px-3 h-8 rounded-[4px] bg-[#5865f2] hover:bg-[#4752c4] text-white text-xs font-semibold cursor-pointer"
+                  >
+                    Próximo vídeo
+                  </button>
+                </div>
+              )}
+
               {/* Top-left Watch-Party Info */}
-              <div className="absolute top-3 left-3 flex flex-wrap items-center gap-2 pointer-events-none z-10">
+              <div className="absolute top-3 left-3 right-3 flex items-center gap-2 pointer-events-none z-10 min-w-0">
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#ff0033] text-[11px] font-bold text-white shadow">
                   <Clapperboard className="w-3.5 h-3.5" />
                   {useYouTubeWatchPlayer ? 'YOUTUBE SYNC' : 'CINEMA SYNC'}
                 </span>
-                <span className="px-2.5 py-1 rounded-full bg-black/75 text-xs font-semibold text-white max-w-md truncate">
+                <span className="min-w-0 px-2.5 py-1 rounded-full bg-black/75 text-xs font-semibold text-white max-w-md truncate">
                   {currentWatchVideo.title} • {currentWatchVideo.author}
                 </span>
               </div>
 
               {/* Switch between Watch-Party & any Screen Shares */}
               <div className="absolute top-3 right-3 flex flex-wrap gap-1.5 z-10">
-                {currentWatchVideo.youtubeId && !ytFallbackIds.has(currentWatchVideo.queueId) && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setYtFallbackIds((prev) => {
-                        const next = new Set(prev);
-                        next.add(currentWatchVideo.queueId);
-                        return next;
-                      })
-                    }
-                    className="px-2 py-1 rounded-lg text-[10px] font-bold bg-black/75 hover:bg-black text-white/90 border border-white/15 cursor-pointer"
-                    title="Alternar para stream MP4 1080p direto"
-                  >
-                    Stream Direto 1080p
-                  </button>
-                )}
                 {totalStageCount > 1 && (
                   <>
                     <button
@@ -1441,6 +1539,135 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                       onChange={(e) => onVideoVolumeChange(Number(e.target.value))}
                       className="w-20 accent-[#ff0033] cursor-pointer"
                     />
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setVideoMenu((m) => (m === 'captions' ? null : 'captions'))}
+                        className={`p-1.5 rounded-lg hover:bg-white/10 cursor-pointer ${
+                          captionsOn && useYouTubeWatchPlayer ? 'text-white bg-white/15' : 'text-[#dbdee1]'
+                        }`}
+                        title={useYouTubeWatchPlayer ? 'Legendas (só para você)' : 'Legendas: disponíveis no modo YouTube'}
+                      >
+                        <Captions className="w-4 h-4" />
+                      </button>
+                      {videoMenu === 'captions' && (
+                        <div className="absolute bottom-9 right-0 w-56 max-h-72 overflow-y-auto rounded-[6px] bg-[#111214] border border-white/10 shadow-xl p-1.5 text-[12px] z-20">
+                          <div className="px-2 py-1 text-[11px] font-bold uppercase text-[#949ba4]">Legendas · só você</div>
+                          {!useYouTubeWatchPlayer ? (
+                            <div className="px-2 py-1.5 text-[#b5bac1]">
+                              Legendas funcionam no player do YouTube. Volte para ele em “Fonte”.
+                            </div>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCaptionsOn(false);
+                                  setVideoMenu(null);
+                                }}
+                                className="w-full flex items-center justify-between px-2 h-8 rounded-[4px] hover:bg-[#5865f2] text-[#dbdee1] hover:text-white cursor-pointer"
+                              >
+                                Desligadas {!captionsOn && <Check className="w-3.5 h-3.5" />}
+                              </button>
+                              {captionTracks.length === 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCaptionsOn(true);
+                                    setCaptionsLang('');
+                                  }}
+                                  className="w-full flex items-center justify-between px-2 h-8 rounded-[4px] hover:bg-[#5865f2] text-[#dbdee1] hover:text-white cursor-pointer"
+                                >
+                                  Ligadas (idioma automático) {captionsOn && !captionsLang && <Check className="w-3.5 h-3.5" />}
+                                </button>
+                              )}
+                              {captionTracks.map((t) => (
+                                <button
+                                  key={t.code}
+                                  type="button"
+                                  onClick={() => {
+                                    setCaptionsOn(true);
+                                    setCaptionsLang(t.code);
+                                    setVideoMenu(null);
+                                  }}
+                                  className="w-full flex items-center justify-between gap-2 px-2 h-8 rounded-[4px] hover:bg-[#5865f2] text-[#dbdee1] hover:text-white cursor-pointer"
+                                >
+                                  <span className="truncate">{t.name}</span>
+                                  {captionsOn && captionsLang === t.code && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                </button>
+                              ))}
+                              {captionsOn && captionTracks.length === 0 && (
+                                <div className="px-2 py-1 text-[11px] text-[#949ba4]">Carregando idiomas do vídeo…</div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setVideoMenu((m) => (m === 'speed' ? null : 'speed'))}
+                        className={`h-7 px-1.5 rounded-lg hover:bg-white/10 cursor-pointer flex items-center gap-1 text-[11px] font-bold ${
+                          videoRate !== 1 ? 'text-white bg-white/15' : 'text-[#dbdee1]'
+                        }`}
+                        title="Velocidade e fonte (velocidade vale para todos)"
+                      >
+                        <Gauge className="w-4 h-4" />
+                        {videoRate !== 1 && `${videoRate}x`}
+                      </button>
+                      {videoMenu === 'speed' && (
+                        <div className="absolute bottom-9 right-0 w-48 rounded-[6px] bg-[#111214] border border-white/10 shadow-xl p-1.5 text-[12px] z-20">
+                          <div className="px-2 py-1 text-[11px] font-bold uppercase text-[#949ba4]">Velocidade · todos</div>
+                          {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((r) => (
+                            <button
+                              key={r}
+                              type="button"
+                              disabled={!onVideoRate}
+                              onClick={() => {
+                                onVideoRate?.(r);
+                                setVideoMenu(null);
+                              }}
+                              className="w-full flex items-center justify-between px-2 h-7 rounded-[4px] hover:bg-[#5865f2] text-[#dbdee1] hover:text-white cursor-pointer disabled:opacity-50"
+                            >
+                              {r === 1 ? 'Normal' : `${r}x`} {videoRate === r && <Check className="w-3.5 h-3.5" />}
+                            </button>
+                          ))}
+                          {currentWatchVideo.youtubeId && (
+                            <>
+                              <div className="h-px bg-white/10 my-1" />
+                              <div className="px-2 py-1 text-[11px] font-bold uppercase text-[#949ba4]">Fonte · só você</div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setYtFallbackIds((prev) => {
+                                    const next = new Set(prev);
+                                    next.delete(currentWatchVideo.queueId);
+                                    return next;
+                                  });
+                                  setVideoMenu(null);
+                                }}
+                                className="w-full flex items-center justify-between px-2 h-7 rounded-[4px] hover:bg-[#5865f2] text-[#dbdee1] hover:text-white cursor-pointer"
+                              >
+                                Player do YouTube {useYouTubeWatchPlayer && <Check className="w-3.5 h-3.5" />}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!hasDirectStream}
+                                onClick={() => {
+                                  setYtFallbackIds((prev) => new Set(prev).add(currentWatchVideo.queueId));
+                                  setVideoMenu(null);
+                                }}
+                                title={hasDirectStream ? undefined : 'O YouTube recusou o download direto deste vídeo'}
+                                className="w-full flex items-center justify-between px-2 h-7 rounded-[4px] hover:bg-[#5865f2] text-[#dbdee1] hover:text-white cursor-pointer disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              >
+                                Stream direto 1080p {!useYouTubeWatchPlayer && <Check className="w-3.5 h-3.5" />}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={() => {

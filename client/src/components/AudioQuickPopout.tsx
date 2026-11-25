@@ -3,7 +3,7 @@ import { Check, ChevronRight, Mic, Settings, Volume2 } from 'lucide-react';
 import { AudioSettings } from '../types';
 
 interface AudioQuickPopoutProps {
-  kind: 'mic' | 'output';
+  kind: 'mic' | 'output' | 'camera';
   audioSettings: AudioSettings;
   onUpdateAudioSettings: (next: AudioSettings) => void;
   onOpenVoiceSettings: () => void;
@@ -25,13 +25,15 @@ export const AudioQuickPopout: React.FC<AudioQuickPopoutProps> = ({
 }) => {
   const ref = useRef<HTMLDivElement>(null);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
-  const [expanded, setExpanded] = useState<'none' | 'device' | 'profile'>('none');
+  const [expanded, setExpanded] = useState<'none' | 'device' | 'profile'>(kind === 'camera' ? 'device' : 'none');
 
   useEffect(() => {
     navigator.mediaDevices
       ?.enumerateDevices?.()
       .then((list) => {
-        setDevices(list.filter((d) => d.kind === (kind === 'mic' ? 'audioinput' : 'audiooutput')));
+        setDevices(
+          list.filter((d) => d.kind === (kind === 'mic' ? 'audioinput' : kind === 'camera' ? 'videoinput' : 'audiooutput'))
+        );
       })
       .catch(() => {});
   }, [kind]);
@@ -51,7 +53,14 @@ export const AudioQuickPopout: React.FC<AudioQuickPopoutProps> = ({
     };
   }, [onClose]);
 
-  const currentDeviceId = kind === 'mic' ? audioSettings.inputDeviceId : audioSettings.outputDeviceId;
+  const currentDeviceId =
+    kind === 'mic' ? audioSettings.inputDeviceId : kind === 'camera' ? audioSettings.videoDeviceId : audioSettings.outputDeviceId;
+  const withDevice = (deviceId: string): AudioSettings =>
+    kind === 'mic'
+      ? { ...audioSettings, inputDeviceId: deviceId }
+      : kind === 'camera'
+      ? { ...audioSettings, videoDeviceId: deviceId }
+      : { ...audioSettings, outputDeviceId: deviceId };
   const currentDeviceLabel =
     devices.find((d) => d.deviceId === currentDeviceId)?.label || 'Padrão do Sistema';
 
@@ -68,7 +77,7 @@ export const AudioQuickPopout: React.FC<AudioQuickPopoutProps> = ({
       >
         <div className="min-w-0 pr-2">
           <div className="font-bold text-white text-[13px]">
-            {kind === 'mic' ? 'Dispositivo de entrada' : 'Dispositivo de saída'}
+            {kind === 'mic' ? 'Dispositivo de entrada' : kind === 'camera' ? 'Câmera' : 'Dispositivo de saída'}
           </div>
           <div className="text-[11px] text-[#949ba4] truncate">{currentDeviceLabel}</div>
         </div>
@@ -84,11 +93,7 @@ export const AudioQuickPopout: React.FC<AudioQuickPopoutProps> = ({
           <button
             type="button"
             onClick={() => {
-              onUpdateAudioSettings(
-                kind === 'mic'
-                  ? { ...audioSettings, inputDeviceId: '' }
-                  : { ...audioSettings, outputDeviceId: '' }
-              );
+              onUpdateAudioSettings(withDevice(''));
               setExpanded('none');
             }}
             className="w-full flex items-center justify-between px-2 py-1.5 rounded text-xs hover:bg-[#35373c] cursor-pointer text-left"
@@ -101,11 +106,7 @@ export const AudioQuickPopout: React.FC<AudioQuickPopoutProps> = ({
               key={d.deviceId}
               type="button"
               onClick={() => {
-                onUpdateAudioSettings(
-                  kind === 'mic'
-                    ? { ...audioSettings, inputDeviceId: d.deviceId }
-                    : { ...audioSettings, outputDeviceId: d.deviceId }
-                );
+                onUpdateAudioSettings(withDevice(d.deviceId));
                 setExpanded('none');
               }}
               className="w-full flex items-center justify-between px-2 py-1.5 rounded text-xs hover:bg-[#35373c] cursor-pointer text-left"

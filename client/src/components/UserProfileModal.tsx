@@ -20,6 +20,7 @@ import {
 import { ApiClient, resolveMediaUrl } from '../lib/api';
 import { GlobalProfile, PresenceStatus, Role, User, UserConnection } from '../types';
 import { AVATAR_DECORATIONS, Avatar, NAME_STYLES } from './Avatar';
+import { PROFILE_EFFECTS, ProfileEffectLayer } from './ProfileEffect';
 import { CONNECTION_PLATFORM_OPTIONS, ConnectionCard } from './ConnectionBadge';
 
 const BANNER_COLORS = ['#5865F2', '#7c3aed', '#23a55a', '#db2777', '#ea580c', '#0284c7', '#dc2626', '#1e1f22'];
@@ -101,6 +102,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [bannerColor, setBannerColor] = useState(user.bannerColor || user.avatarColor || '#5865F2');
   const [avatarDecoration, setAvatarDecoration] = useState(user.avatarDecoration || 'none');
   const [nameStyle, setNameStyle] = useState(user.nameStyle || 'default');
+  const [profileEffect, setProfileEffect] = useState(user.profileEffect || 'none');
   const [connections, setConnections] = useState<UserConnection[]>(user.connections || []);
   const [newConnPlatform, setNewConnPlatform] = useState('Steam');
   const [newConnHandle, setNewConnHandle] = useState('');
@@ -152,6 +154,42 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
   };
 
+  const handleUploadProfileBg = async (file: File) => {
+    setSaving(true);
+    setMsg('');
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      const profileBgHash = simpleHash(dataUrl);
+      if (api) {
+        const uploadRes = await api.uploadProfileBg(file);
+        onUserUpdated(uploadRes.user, { profileBgDataUrl: dataUrl, profileBgHash });
+      } else {
+        onUserUpdated({ ...user, profileBgUrl: dataUrl }, { profileBgDataUrl: dataUrl, profileBgHash });
+      }
+      setMsg('Fundo do perfil atualizado!');
+    } catch (err: unknown) {
+      setMsg((err as Error).message || 'Erro ao subir o fundo.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClearProfileBg = async () => {
+    setSaving(true);
+    try {
+      if (api) {
+        const { user: updated } = await api.updateProfile({ clearProfileBg: true });
+        onUserUpdated(updated, { profileBgDataUrl: null, profileBgHash: null });
+      } else {
+        onUserUpdated({ ...user, profileBgUrl: null }, { profileBgDataUrl: null, profileBgHash: null });
+      }
+    } catch (err: unknown) {
+      setMsg((err as Error).message || 'Erro ao remover o fundo.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -167,6 +205,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         bannerColor,
         avatarDecoration,
         nameStyle,
+        profileEffect,
         connections,
       };
       if (api) {
@@ -207,7 +246,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         </button>
 
         {/* LEFT COLUMN: Discord Profile Card (Print 2 exact layout!) */}
-        <div className="md:col-span-5 bg-[#111214] border-r border-[#2b2d31] flex flex-col overflow-y-auto">
+        <div className="md:col-span-5 bg-[#111214] border-r border-[#2b2d31] flex flex-col overflow-y-auto relative *:relative *:z-[1]">
+          <ProfileEffectLayer
+            effect={rightTab === 'edit' ? profileEffect : user.profileEffect}
+            bgUrl={user.profileBgUrl}
+            serverUrl={serverUrl}
+            sticky
+          />
           {/* Banner */}
           <div
             className="h-28 w-full shrink-0 bg-cover bg-center relative"
@@ -640,6 +685,56 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                         </button>
                       ))}
                     </div>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] text-[#949ba4] mb-1.5">Efeito do perfil (fundo animado do cartão)</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Object.entries(PROFILE_EFFECTS).map(([key, fx]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setProfileEffect(key)}
+                          className={`relative w-[76px] h-[52px] rounded-md overflow-hidden cursor-pointer border-2 transition bg-[#111214] ${
+                            profileEffect === key ? 'border-[#5865f2]' : 'border-transparent hover:border-[#4e5058]'
+                          }`}
+                          title={fx.label}
+                        >
+                          {fx.className && <span aria-hidden className={`absolute inset-0 ${fx.className}`} />}
+                          <span className="absolute bottom-0 inset-x-0 bg-black/55 text-[10px] text-white py-0.5 truncate px-1">{fx.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] text-[#949ba4] mb-1.5">Fundo do perfil (imagem ou GIF animado)</div>
+                    <div className="flex items-center gap-2">
+                      <label className="px-3 h-8 rounded-[4px] bg-[#4e5058] hover:bg-[#6d6f78] text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition">
+                        <Upload className="w-3.5 h-3.5" />
+                        {user.profileBgUrl ? 'Trocar fundo' : 'Escolher imagem/GIF'}
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) handleUploadProfileBg(f);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                      {user.profileBgUrl && (
+                        <button
+                          type="button"
+                          onClick={handleClearProfileBg}
+                          className="px-3 h-8 rounded-[4px] text-xs font-semibold text-[#f23f42] hover:underline cursor-pointer"
+                        >
+                          Remover
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-[#949ba4] mt-1">Aparece atrás do cartão, abaixo do banner. Até 8 MB.</p>
                   </div>
 
                   <div>

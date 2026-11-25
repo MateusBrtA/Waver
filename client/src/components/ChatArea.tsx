@@ -23,6 +23,7 @@ import {
   Settings,
   Smile,
   Sparkles,
+  Star,
   Square,
   Trash2,
   Upload,
@@ -50,6 +51,7 @@ import { FileTransferModal, formatBytes } from './FileTransferModal';
 import { extractEmbeddableMediaUrls, LinkEmbedCard } from './LinkEmbedCard';
 import { getFileExtension, is3DModelFilename } from '../lib/model3dUtils';
 import { VoiceMessagePlayer } from './VoiceMessagePlayer';
+import { toggleFavoriteGif, useFavoriteGifs } from '../lib/favoriteGifs';
 import { isTextureLikeName } from '../lib/model3dUtils';
 
 const Model3DInlinePreview = React.lazy(() => import('./Model3DInlinePreview'));
@@ -185,7 +187,34 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   // Pickers
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
-  const [gifTab, setGifTab] = useState<'server' | 'search' | 'add'>('server');
+  const [gifTab, setGifTab] = useState<'favorites' | 'server' | 'search' | 'add'>('server');
+  const favoriteGifs = useFavoriteGifs();
+  const favoriteGifUrls = useMemo(() => new Set(favoriteGifs.map((g) => g.url)), [favoriteGifs]);
+  /** quadradinho de GIF do seletor, com estrela para favoritar */
+  const renderGifTile = (g: { key: string; url: string; favUrl?: string; previewUrl: string; title?: string }) => {
+    const favKey = g.favUrl || g.url;
+    const fav = favoriteGifUrls.has(favKey);
+    return (
+      <div key={g.key} className="group/gif relative rounded-lg overflow-hidden bg-[#1e1f22] aspect-video border border-transparent hover:border-[#5865f2]">
+        <button type="button" onClick={() => handleSendGif(g.url)} className="block w-full h-full cursor-pointer" title={g.title}>
+          <img src={g.previewUrl} alt={g.title || 'GIF'} loading="lazy" className="w-full h-full object-cover" data-no-image-menu />
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFavoriteGif({ url: favKey, previewUrl: g.previewUrl, title: g.title });
+          }}
+          className={`absolute top-1 right-1 w-7 h-7 rounded-full flex items-center justify-center bg-black/60 hover:bg-black/80 cursor-pointer transition ${
+            fav ? 'opacity-100 text-[#f0b232]' : 'opacity-0 group-hover/gif:opacity-100 text-white'
+          }`}
+          title={fav ? 'Remover dos favoritos' : 'Favoritar GIF'}
+        >
+          <Star className="w-4 h-4" fill={fav ? 'currentColor' : 'none'} />
+        </button>
+      </div>
+    );
+  };
   const [gifQuery, setGifQuery] = useState('');
   const [gifSearchResults, setGifSearchResults] = useState<GifItem[]>([]);
   const [gifProvider, setGifProvider] = useState('local');
@@ -1349,6 +1378,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <div className="flex gap-1 bg-[#1e1f22] p-1 rounded-lg text-xs font-semibold">
                 <button
                   type="button"
+                  onClick={() => setGifTab('favorites')}
+                  className={`flex-1 py-1 rounded-md cursor-pointer flex items-center justify-center gap-1 ${gifTab === 'favorites' ? 'bg-[#5865f2] text-white' : 'text-[#949ba4]'}`}
+                  title="Seus GIFs favoritos (ficam neste PC)"
+                >
+                  <Star className="w-3 h-3" /> {favoriteGifs.length}
+                </button>
+                <button
+                  type="button"
                   onClick={() => setGifTab('server')}
                   className={`flex-1 py-1 rounded-md cursor-pointer ${gifTab === 'server' ? 'bg-[#5865f2] text-white' : 'text-[#949ba4]'}`}
                 >
@@ -1385,6 +1422,28 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </div>
 
             <div className="p-3 overflow-y-auto flex-1">
+              {gifTab === 'favorites' &&
+                (() => {
+                  const q = gifQuery.trim().toLowerCase();
+                  const list = q ? favoriteGifs.filter((g) => (g.title || '').toLowerCase().includes(q)) : favoriteGifs;
+                  return list.length === 0 ? (
+                    <div className="text-center py-8 space-y-1.5">
+                      <Star className="w-8 h-8 text-[#f0b232] mx-auto opacity-80" />
+                      <p className="text-xs text-[#b5bac1]">
+                        {favoriteGifs.length === 0
+                          ? 'Passe o mouse num GIF e clique na estrela para favoritar. No chat, clique direito num GIF → Favoritar.'
+                          : 'Nenhum favorito com esse nome.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      {list.map((g) =>
+                        renderGifTile({ key: g.url, url: g.url, previewUrl: g.previewUrl || g.url, title: g.title })
+                      )}
+                    </div>
+                  );
+                })()}
+
               {gifTab === 'server' &&
                 (filteredSavedGifs.length === 0 ? (
                   <div className="text-center py-8 space-y-2">
@@ -1400,16 +1459,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 gap-2">
-                    {filteredSavedGifs.map((g) => (
-                      <button
-                        key={g.id}
-                        type="button"
-                        onClick={() => handleSendGif(g.url)}
-                        className="relative rounded-lg overflow-hidden bg-[#1e1f22] aspect-video cursor-pointer border border-transparent hover:border-[#5865f2]"
-                      >
-                        <img src={resolveMediaUrl(serverUrl, g.previewUrl || g.url)} alt={g.title} className="w-full h-full object-cover" />
-                      </button>
-                    ))}
+                    {filteredSavedGifs.map((g) =>
+                      renderGifTile({
+                        key: g.id,
+                        url: g.url,
+                        // favorito guarda o endereço completo: continua valendo em outros servidores
+                        favUrl: resolveMediaUrl(serverUrl, g.url),
+                        previewUrl: resolveMediaUrl(serverUrl, g.previewUrl || g.url),
+                        title: g.title,
+                      })
+                    )}
                   </div>
                 ))}
 
@@ -1420,21 +1479,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   </div>
                 ) : gifSearchResults.length > 0 ? (
                   <div className="grid grid-cols-2 gap-2">
-                    {gifSearchResults.map((g) => (
-                      <button
-                        key={g.id}
-                        type="button"
-                        onClick={() => handleSendGif(g.url)}
-                        className="rounded-lg overflow-hidden bg-[#1e1f22] aspect-video cursor-pointer border border-transparent hover:border-[#5865f2]"
-                      >
-                        <img src={g.previewUrl || g.url} alt={g.title} className="w-full h-full object-cover" />
-                      </button>
-                    ))}
+                    {gifSearchResults.map((g) =>
+                      renderGifTile({ key: g.id, url: g.url, previewUrl: g.previewUrl || g.url, title: g.title })
+                    )}
                   </div>
                 ) : (
                   <div className="text-center py-6 text-xs text-[#b5bac1]">
                     {gifProvider === 'local'
-                      ? 'Configure uma chave grátis Tenor/Giphy em Configurações → Servidor, ou use a aba + Subir / Link!'
+                      ? 'Busca na internet precisa de uma chave do GIPHY: Configurações do servidor → Integrações. Ou use a aba + Subir / Link!'
                       : 'Nenhum GIF encontrado.'}
                   </div>
                 ))}

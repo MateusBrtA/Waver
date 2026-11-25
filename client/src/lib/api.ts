@@ -142,7 +142,13 @@ export class ApiClient {
     return this.request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
   }
 
-  updateProfile(payload: Partial<User> & { clearBanner?: boolean }) {
+  uploadProfileBg(file: File) {
+    const fd = new FormData();
+    fd.append('profileBg', file);
+    return this.request<{ user: User }>('/api/upload/profile-bg', { method: 'POST', body: fd });
+  }
+
+  updateProfile(payload: Partial<User> & { clearBanner?: boolean; clearProfileBg?: boolean }) {
     return this.request<{ user: User }>('/api/users/me', {
       method: 'PATCH',
       body: JSON.stringify(payload),
@@ -269,6 +275,7 @@ export class ApiClient {
     allowMembersCreateChannels?: boolean;
     tenorApiKey?: string;
     giphyApiKey?: string;
+    youtubeCookies?: string;
   }) {
     return this.request<{ server: ServerInfo }>('/api/server', {
       method: 'PATCH',

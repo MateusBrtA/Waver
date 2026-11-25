@@ -14,6 +14,43 @@ const unfurlCache = new Map(); // url -> { data, ts }
 const searchStreamCache = new Map(); // normalized query -> { streamUrl, httpHeaders, mimeType, duration, thumbnail, resolvedAt }
 let ytDlpEnsurePromise = null;
 let cachedYtDlpPath = null;
+let ytDataDir = null;
+
+/** cookies.txt do YouTube colado pelo dono do servidor (Configurações do servidor → Mídia). */
+export function getYouTubeCookiesPath(dataDir = ytDataDir) {
+  return dataDir ? path.join(dataDir, 'youtube-cookies.txt') : null;
+}
+
+export function hasYouTubeCookies(dataDir = ytDataDir) {
+  const p = getYouTubeCookiesPath(dataDir);
+  try {
+    return Boolean(p && fs.existsSync(p) && fs.statSync(p).size > 20);
+  } catch {
+    return false;
+  }
+}
+
+export function setYouTubeCookies(dataDir, text) {
+  const p = getYouTubeCookiesPath(dataDir);
+  if (!p) return false;
+  const clean = String(text || '').trim();
+  if (!clean) {
+    try {
+      fs.unlinkSync(p);
+    } catch {}
+    return false;
+  }
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  // formato Netscape exigido pelo yt-dlp
+  const body = clean.startsWith('# Netscape') || clean.startsWith('# HTTP Cookie File') ? clean : `# Netscape HTTP Cookie File\n${clean}`;
+  fs.writeFileSync(p, body + '\n', 'utf8');
+  return true;
+}
+
+const BOT_CHECK_RE = /not a bot|sign in to confirm|confirm you.?re not|login required|HTTP Error 429/i;
+export function isYouTubeBotBlock(err) {
+  return BOT_CHECK_RE.test(String(err?.message || err || ''));
+}
 
 function setRegistryEntry(entry) {
   if (mediaRegistry.size >= 400) {
@@ -91,7 +128,23 @@ function maybeSelfUpdateYtDlp(binPath, dataDir) {
   } catch {}
 }
 
+/** Dados públicos do vídeo (título/canal/miniatura) sem yt-dlp: funciona mesmo com o bloqueio anti-robô. */
+async function fetchYouTubeOEmbed(videoId) {
+  const watch = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+  try {
+    const resp = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(watch)}`, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
 export async function ensureYtDlp(dataDir) {
+  if (dataDir) ytDataDir = dataDir;
   const existing = findExistingYtDlp(dataDir);
   if (existing) {
     maybeSelfUpdateYtDlp(existing, dataDir);
@@ -131,7 +184,48 @@ export async function ensureYtDlp(dataDir) {
   return ytDlpEnsurePromise;
 }
 
-function runYtDlpJson(binPath, args, timeoutMs = 28000) {
+function withoutExtractorArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--extractor-args' && String(args[i + 1] || '').startsWith('youtube:')) {
+      i++;
+      continue;
+    }
+    out.push(args[i]);
+  }
+  return out;
+}
+
+/**
+ * Roda o yt-dlp. Usa o cookies.txt do servidor quando existir e, se o YouTube responder
+ * "confirme que você não é um robô", tenta de novo com outros clientes do player.
+ */
+async function runYtDlpJson(binPath, args, timeoutMs = 28000) {
+  const cookies = getYouTubeCookiesPath();
+  const auth = cookies && hasYouTubeCookies() && !args.includes('--cookies') ? ['--cookies', cookies] : [];
+  try {
+    return await runYtDlpJsonOnce(binPath, [...auth, ...args], timeoutMs);
+  } catch (err) {
+    if (!isYouTubeBotBlock(err)) throw err;
+    const retryArgs = ['--extractor-args', 'youtube:player_client=tv_embedded,web_embedded,mweb', ...withoutExtractorArgs(args)];
+    try {
+      return await runYtDlpJsonOnce(binPath, [...auth, ...retryArgs], timeoutMs);
+    } catch (err2) {
+      if (isYouTubeBotBlock(err2)) {
+        const e = new Error(
+          auth.length
+            ? 'O YouTube bloqueou o download mesmo com os cookies salvos. Atualize o cookies.txt nas configurações do servidor.'
+            : 'O YouTube pediu login para baixar este link (proteção anti-robô). O dono do servidor pode colar um cookies.txt em Configurações do servidor → Mídia do YouTube.'
+        );
+        e.botBlocked = true;
+        throw e;
+      }
+      throw err2;
+    }
+  }
+}
+
+function runYtDlpJsonOnce(binPath, args, timeoutMs = 28000) {
   return new Promise((resolve, reject) => {
     execFile(
       binPath,
@@ -589,6 +683,35 @@ export async function resolveVideoUrl(rawUrl, dataDir) {
     throw new Error('O Tocador de Vídeos aceita links do YouTube, Twitter/X, Instagram e TikTok.');
   }
 
+  if (platform === 'youtube') {
+    const youtubeId = extractYouTubeId(url);
+    if (youtubeId) {
+      try {
+        return await resolveVideoUrlWithYtDlp(url, platform, dataDir);
+      } catch (err) {
+        const meta = await fetchYouTubeOEmbed(youtubeId);
+        if (!meta && !isYouTubeBotBlock(err)) throw err;
+        return {
+          id: makeMediaId(),
+          mediaId: '',
+          platform,
+          youtubeId,
+          title: meta?.title || 'Vídeo do YouTube',
+          author: meta?.author_name || 'YouTube',
+          thumbnail: meta?.thumbnail_url || `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`,
+          duration: 0,
+          originalUrl: url,
+          // sem stream direto: toca só pelo player do YouTube
+          streamPath: null,
+          audioStreamPath: null,
+        };
+      }
+    }
+  }
+  return resolveVideoUrlWithYtDlp(url, platform, dataDir);
+}
+
+async function resolveVideoUrlWithYtDlp(url, platform, dataDir) {
   const ytDlp = await ensureYtDlp(dataDir);
   const videoFmt =
     'bestvideo[ext=mp4][vcodec^=avc1][height<=1080][protocol^=http]+bestaudio[ext=m4a][protocol^=http]/best[ext=mp4][vcodec^=avc1][acodec!=none][height<=1080][protocol^=http]/best[ext=mp4][acodec!=none][vcodec!=none][protocol^=http]/18/best[acodec!=none][vcodec!=none][protocol^=http]/best';

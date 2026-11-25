@@ -129,6 +129,11 @@ export interface User {
   bannerHash?: string | null;
   avatarDecoration?: string;
   nameStyle?: string;
+  /** efeito animado atrás do cartão de perfil (galáxia, aurora...) */
+  profileEffect?: string;
+  /** imagem/GIF de fundo do cartão de perfil (não é o banner) */
+  profileBgUrl?: string | null;
+  profileBgHash?: string | null;
   bio?: string;
   pronouns?: string;
   statusType?: PresenceStatus;
@@ -155,6 +160,9 @@ export interface GlobalProfile {
   avatarHash?: string | null;
   bannerDataUrl?: string | null;
   bannerHash?: string | null;
+  profileEffect?: string;
+  profileBgDataUrl?: string | null;
+  profileBgHash?: string | null;
   avatarDecoration?: string;
   nameStyle?: string;
   bio?: string;
@@ -183,6 +191,7 @@ export interface ServerInfo {
   allowMembersCreateChannels: boolean;
   hasTenorKey: boolean;
   hasGiphyKey: boolean;
+  hasYoutubeCookies?: boolean;
 }
 
 export interface Channel {
@@ -561,7 +570,8 @@ export interface VideoQueueItem {
   thumbnail: string;
   duration: number;
   originalUrl: string;
-  streamPath: string;
+  /** null = só toca pelo player do YouTube (yt-dlp bloqueado) */
+  streamPath: string | null;
   audioStreamPath?: string | null;
   addedBy?: string;
 }
@@ -576,6 +586,8 @@ export interface VideoState {
   seq?: number;
   lastAction?: string;
   actorName?: string;
+  /** velocidade da sala (0.25–2), igual para todos */
+  rate?: number;
   serverNow: number;
 }
 
@@ -876,6 +888,11 @@ export interface ElectronAPI {
   setCloseToTray: (enabled: boolean) => Promise<boolean>;
   quitApp: () => void;
   onTrayToggleMute: (cb: () => void) => () => void;
+  setPttKey?: (code: string | null) => void;
+  copyImage?: (url: string) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+  copyImagePng?: (dataUrl: string) => Promise<{ ok: boolean }>;
+  saveImage?: (url: string, name?: string) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string; error?: string }>;
+  onPttKey?: (cb: (ev: { down: boolean; repeat: boolean }) => void) => () => void;
   onTrayToggleDeafen: (cb: () => void) => () => void;
 }
 

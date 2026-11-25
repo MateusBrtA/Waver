@@ -155,6 +155,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCloseToTray: () => ipcRenderer.invoke('app:get-close-to-tray'),
   setCloseToTray: (enabled) => ipcRenderer.invoke('app:set-close-to-tray', enabled),
   quitApp: () => ipcRenderer.send('app:quit'),
+  // tecla do push-to-talk chega pelo processo principal mesmo com foco num iframe (player do YouTube)
+  copyImage: (url) => ipcRenderer.invoke('image:copy', url),
+  copyImagePng: (dataUrl) => ipcRenderer.invoke('image:copy-png', dataUrl),
+  saveImage: (url, name) => ipcRenderer.invoke('image:save', url, name),
+  setPttKey: (code) => ipcRenderer.send('ptt:set-key', code || null),
+  onPttKey: (cb) => {
+    const listener = (_e, ev) => cb(ev);
+    ipcRenderer.on('ptt:key', listener);
+    return () => ipcRenderer.removeListener('ptt:key', listener);
+  },
   onTrayToggleMute: (cb) => {
     const listener = () => cb();
     ipcRenderer.on('tray:toggle-mute', listener);

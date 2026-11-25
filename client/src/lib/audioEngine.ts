@@ -214,7 +214,8 @@ export class AudioEngine {
 
     const alignedNow = Date.now() + this.clockOffsetMs;
     const latencySec = Math.max(0, (alignedNow - state.serverNow) / 1000);
-    const targetSec = state.isPlaying ? state.positionSec + Math.min(latencySec, 1.5) : state.positionSec;
+    // sem teto de 1,5 s: o estado pode ser reaplicado bem depois de chegar e o teto fazia a música voltar
+    const targetSec = state.isPlaying ? state.positionSec + Math.min(latencySec, 6 * 3600) : state.positionSec;
 
     this.prewarmNextTrack(state);
 

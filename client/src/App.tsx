@@ -76,6 +76,8 @@ import { ScreenShareModal } from './components/ScreenShareModal';
 import { ServerContextMenu } from './components/ServerContextMenu';
 import { ServerDirectoryModal } from './components/ServerDirectoryModal';
 import { ServerRail } from './components/ServerRail';
+import { NowPlayingBar } from './components/NowPlayingBar';
+import { ImageContextMenu } from './components/ImageContextMenu';
 import { SettingsModal, SettingsTabId } from './components/SettingsModal';
 import { Sidebar } from './components/Sidebar';
 import { TrelloBoardModal } from './components/TrelloBoardModal';
@@ -431,6 +433,12 @@ export default function App() {
   const [localScreenStats, setLocalScreenStats] = useState<StreamStats | null>(null);
   const [localScreenLabel, setLocalScreenLabel] = useState('');
   const [remotePeers, setRemotePeers] = useState<Record<string, RemotePeerMedia>>({});
+  const [spotlightRequest, setSpotlightRequest] = useState<{ key: string; seq: number } | null>(null);
+  const remoteScreenStreams = useMemo(() => {
+    const out: Record<string, MediaStream | null> = {};
+    for (const [sid, m] of Object.entries(remotePeers)) out[sid] = m.screenStream || null;
+    return out;
+  }, [remotePeers]);
   const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>(loadPeerVolumes);
   const [streamAudioVolume, setStreamAudioVolume] = useState(0.85);
 
@@ -873,9 +881,13 @@ export default function App() {
     }
 
     const pttCode = audioSettings.pttKey || 'KeyV';
+    // só campos onde se DIGITA bloqueiam o PTT; slider de volume, checkbox e botões não
+    // (antes, clicar no volume do vídeo deixava o foco no slider e a tecla parava de funcionar)
+    const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image']);
     const isTypingTarget = (target: EventTarget | null) => {
       if (!(target instanceof HTMLElement)) return false;
       const tag = target.tagName;
+      if (tag === 'INPUT' && NON_TEXT_INPUTS.has(((target as HTMLInputElement).type || 'text').toLowerCase())) return false;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
         // Still allow function/modifier keys while typing
         return !/^(F\d+|CapsLock|ControlLeft|ControlRight|AltLeft|AltRight|ShiftLeft|ShiftRight)$/.test(pttCode);
@@ -896,13 +908,33 @@ export default function App() {
       rtcRef.current?.setPttPressed(false);
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', onBlur);
+    // No app desktop a tecla também chega pelo processo principal: funciona com o foco
+    // dentro do player do YouTube (iframe), onde a página não recebe o teclado.
+    window.electronAPI?.setPttKey?.(pttCode);
+    const unsubPttIpc = window.electronAPI?.onPttKey?.(({ down, repeat }) => {
+      if (down) {
+        if (repeat || isTypingTarget(document.activeElement)) return;
+        rtcRef.current?.setPttPressed(true);
+      } else {
+        rtcRef.current?.setPttPressed(false);
+      }
+    });
+    const onBlurSafe = () => {
+      // ao clicar no iframe a janela "perde" o foco para ele, mas o app continua em primeiro plano:
+      // nesse caso o IPC cuida da tecla, então não solta o PTT aqui
+      if (unsubPttIpc && document.activeElement?.tagName === 'IFRAME') return;
+      onBlur();
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    window.addEventListener('blur', onBlurSafe);
     return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+      window.removeEventListener('blur', onBlurSafe);
+      unsubPttIpc?.();
+      window.electronAPI?.setPttKey?.(null);
       rtcRef.current?.setPttPressed(false);
     };
   }, [audioSettings.inputMode, audioSettings.pttKey, activeVoiceChannelId]);
@@ -1061,6 +1093,8 @@ export default function App() {
             customStatusText: gp?.customStatusText || '',
             avatarDecoration: gp?.avatarDecoration || 'none',
             nameStyle: gp?.nameStyle || 'default',
+            profileEffect: gp?.profileEffect || 'none',
+            profileBgUrl: gp?.profileBgDataUrl || null,
             connections: gp?.connections || [],
             online: true,
             role: 'member',
@@ -3743,6 +3777,38 @@ export default function App() {
             onStartPrivateCall={handleStartPrivateCall}
             onScanLanPeers={handleScanLan}
             onJoinOrFocusVoiceChannel={handleJoinOrFocusVoiceChannel}
+            remoteScreenStreams={remoteScreenStreams}
+            onWatchStream={(channelId, socketId) => {
+              handleJoinOrFocusVoiceChannel(channelId);
+              setSpotlightRequest({ key: `screen:${socketId}`, seq: Date.now() });
+            }}
+            nowPlayingSlot={
+              <NowPlayingBar
+                musicState={musicState}
+                videoState={videoState}
+                onOpenMusic={() => {
+                  if (activeVoiceChannelId) handleJoinOrFocusVoiceChannel(activeVoiceChannelId);
+                  setVoiceDrawer('music');
+                }}
+                onOpenVideo={() => {
+                  if (activeVoiceChannelId) handleJoinOrFocusVoiceChannel(activeVoiceChannelId);
+                }}
+                onToggleMusic={() => {
+                  const sock = p2pCallSocketRef.current || socketRef.current;
+                  if (musicState?.isPlaying) {
+                    const pos = audioEngine.getMusicPosition();
+                    audioEngine.pauseOptimistic();
+                    sock?.emit('music:pause', { channelId: activeVoiceChannelId, positionSec: pos });
+                  } else {
+                    audioEngine.playOptimistic();
+                    sock?.emit('music:play', { channelId: activeVoiceChannelId });
+                  }
+                }}
+                onNextMusic={() =>
+                  (p2pCallSocketRef.current || socketRef.current)?.emit('music:next', { channelId: activeVoiceChannelId })
+                }
+              />
+            }
             onLeaveVoice={handleLeaveVoice}
             onLeaveServer={handleLeaveServer}
             onCreateChannel={(type, categoryId) => setCreateChannelMeta({ type, categoryId })}
@@ -3812,6 +3878,7 @@ export default function App() {
               participants={activeVoiceParticipants}
               selfSocketId={selfSocketId}
               remotePeers={remotePeers}
+              spotlightRequest={spotlightRequest}
               localCamStream={localCamStream}
               localScreenStream={localScreenStream}
               localSpeaking={localSpeaking}
@@ -3975,6 +4042,9 @@ export default function App() {
                   channelId: activeVoiceChannelId,
                   positionSec: sec,
                 })
+              }
+              onVideoRate={(rate) =>
+                (p2pCallSocketRef.current || socketRef.current)?.emit('video:rate', { channelId: activeVoiceChannelId, rate })
               }
               onVideoNext={() =>
                 (p2pCallSocketRef.current || socketRef.current)?.emit('video:next', { channelId: activeVoiceChannelId })
@@ -4358,6 +4428,8 @@ export default function App() {
       )}
 
       {/* Server Directory Modal ("+" Button: Create Server or Join IPv4/LAN) */}
+      <ImageContextMenu onNotify={showToast} />
+
       {showServerDirectory && (
         <ServerDirectoryModal
           initialTab="create"

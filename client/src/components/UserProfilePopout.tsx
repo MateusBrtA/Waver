@@ -10,6 +10,7 @@ import { resolveMediaUrl } from '../lib/api';
 import { Role, User } from '../types';
 import { Avatar, NAME_STYLES } from './Avatar';
 import { ConnectionIcon, getConnectionInfo } from './ConnectionBadge';
+import { ProfileEffectLayer } from './ProfileEffect';
 
 interface UserProfilePopoutProps {
   user: User;
@@ -74,8 +75,9 @@ export const UserProfilePopout: React.FC<UserProfilePopoutProps> = ({
     <div
       ref={cardRef}
       style={{ left: pos.left, top: pos.top }}
-      className="fixed z-[95] w-[312px] bg-[#111214] border border-[#2b2d31] rounded-lg shadow-[0_16px_42px_rgba(0,0,0,0.75)] overflow-hidden select-none animate-fade-up"
+      className="fixed z-[95] w-[312px] bg-[#111214] border border-[#2b2d31] rounded-lg shadow-[0_16px_42px_rgba(0,0,0,0.75)] overflow-hidden select-none animate-fade-up *:relative *:z-[1]"
     >
+      <ProfileEffectLayer effect={user.profileEffect} bgUrl={user.profileBgUrl} serverUrl={serverUrl} />
       {/* Top Banner (Print 4 style!) */}
       <div
         className="h-24 w-full relative bg-cover bg-center"

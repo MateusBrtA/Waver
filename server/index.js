@@ -27,6 +27,8 @@ import {
   prefetchMedia,
   resolveMusicUrl,
   resolveVideoUrl,
+  hasYouTubeCookies,
+  setYouTubeCookies,
   streamResolvedMedia,
   unfurlMediaUrl,
 } from './mediaResolver.js';
@@ -168,6 +170,9 @@ export function createPulseCordServer(options = {}) {
       bannerHash: u.bannerHash || null,
       avatarDecoration: u.avatarDecoration || 'none',
       nameStyle: u.nameStyle || 'default',
+      profileEffect: u.profileEffect || 'none',
+      profileBgUrl: u.profileBgUrl || null,
+      profileBgHash: u.profileBgHash || null,
       bio: u.bio || '',
       pronouns: u.pronouns || '',
       statusType: u.statusType || 'online',
@@ -317,6 +322,7 @@ export function createPulseCordServer(options = {}) {
       allowMembersCreateChannels: db.server.allowMembersCreateChannels !== false,
       hasTenorKey: Boolean(db.server.tenorApiKey),
       hasGiphyKey: Boolean(db.server.giphyApiKey),
+      hasYoutubeCookies: hasYouTubeCookies(DATA_DIR),
     };
   }
 
@@ -544,17 +550,19 @@ export function createPulseCordServer(options = {}) {
         seq: 0,
         lastAction: 'init',
         actorName: '',
+        rate: 1,
       });
     }
     return videoStates.get(channelId);
   }
+  const videoRate = (s) => (Number.isFinite(s?.rate) && s.rate > 0 ? s.rate : 1);
 
   function serializeVideoState(channelId) {
     const s = getOrCreateVideoState(channelId);
     const now = Date.now();
     let livePosition = s.positionSec;
     if (s.isPlaying && s.currentIndex >= 0 && s.currentIndex < s.queue.length) {
-      livePosition = s.positionSec + Math.max(0, (now - s.updatedAt) / 1000);
+      livePosition = s.positionSec + Math.max(0, (now - s.updatedAt) / 1000) * videoRate(s);
     }
     return {
       channelId,
@@ -566,6 +574,7 @@ export function createPulseCordServer(options = {}) {
       seq: s.seq || 0,
       lastAction: s.lastAction || 'init',
       actorName: s.actorName || '',
+      rate: videoRate(s),
       serverNow: now,
     };
   }
@@ -814,6 +823,10 @@ export function createPulseCordServer(options = {}) {
         rel: 0,
         modestbranding: 1,
         iv_load_policy: 3,
+        controls: 0,
+        disablekb: 1,
+        fs: 0,
+        cc_load_policy: 0,
         origin: window.location.origin
       },
       events: {
@@ -830,9 +843,35 @@ export function createPulseCordServer(options = {}) {
         },
         onError: function(e) {
           post({ event: 'error', code: e.data });
+        },
+        onApiChange: function() {
+          postCaptions();
         }
       }
     });
+  }
+  var wantCaptions = false;
+  var wantLang = '';
+  function postCaptions() {
+    try {
+      var list = (player && player.getOption && player.getOption('captions', 'tracklist')) || [];
+      post({
+        event: 'captions',
+        tracks: list.map(function(t) { return { code: t.languageCode, name: t.displayName || t.languageName || t.languageCode }; })
+      });
+      if (wantCaptions && wantLang && player.setOption) player.setOption('captions', 'track', { languageCode: wantLang });
+    } catch (e) {}
+  }
+  function applyCaptions() {
+    if (!player) return;
+    try {
+      if (wantCaptions) {
+        player.loadModule && player.loadModule('captions');
+        if (wantLang && player.setOption) player.setOption('captions', 'track', { languageCode: wantLang });
+      } else {
+        player.unloadModule && player.unloadModule('captions');
+      }
+    } catch (e) {}
   }
   setInterval(function() {
     if (!player || typeof player.getCurrentTime !== 'function') return;
@@ -850,6 +889,13 @@ export function createPulseCordServer(options = {}) {
       if (msg.cmd === 'play' && player.playVideo) player.playVideo();
       else if (msg.cmd === 'pause' && player.pauseVideo) player.pauseVideo();
       else if (msg.cmd === 'seek' && player.seekTo) player.seekTo(Number(msg.sec || 0), true);
+      else if (msg.cmd === 'rate' && player.setPlaybackRate) player.setPlaybackRate(Number(msg.rate || 1));
+      else if (msg.cmd === 'captions') {
+        wantCaptions = Boolean(msg.on);
+        wantLang = String(msg.lang || '');
+        applyCaptions();
+        setTimeout(postCaptions, 600);
+      }
       else if (msg.cmd === 'volume') {
         var vol = Math.max(0, Math.min(100, Math.round(Number(msg.volume || 0) * 100)));
         if (vol === 0 && player.mute) player.mute();
@@ -1125,6 +1171,11 @@ export function createPulseCordServer(options = {}) {
     if (typeof b.customStatusText === 'string') req.user.customStatusText = b.customStatusText.trim().slice(0, 64);
     if (typeof b.avatarDecoration === 'string') req.user.avatarDecoration = b.avatarDecoration.slice(0, 24);
     if (typeof b.nameStyle === 'string') req.user.nameStyle = b.nameStyle.slice(0, 24);
+    if (typeof b.profileEffect === 'string') req.user.profileEffect = b.profileEffect.slice(0, 24);
+    if (b.clearProfileBg === true) {
+      req.user.profileBgUrl = null;
+      req.user.profileBgHash = null;
+    }
     if (Array.isArray(b.connections)) {
       req.user.connections = b.connections
         .slice(0, 6)
@@ -1178,6 +1229,17 @@ export function createPulseCordServer(options = {}) {
         req.user.avatarHash = String(b.avatarHash);
       }
     }
+    if (typeof b.profileEffect === 'string') req.user.profileEffect = b.profileEffect.slice(0, 24);
+    if (b.profileBgDataUrl === null && req.user.profileBgUrl) {
+      req.user.profileBgUrl = null;
+      req.user.profileBgHash = null;
+    } else if (typeof b.profileBgDataUrl === 'string' && b.profileBgHash && b.profileBgHash !== req.user.profileBgHash) {
+      const saved = saveDataUrlImage(b.profileBgDataUrl, AVATARS_DIR, `pbg-${req.user.id.slice(0, 6)}`);
+      if (saved) {
+        req.user.profileBgUrl = saved;
+        req.user.profileBgHash = String(b.profileBgHash);
+      }
+    }
     if (typeof b.bannerDataUrl === 'string' && b.bannerHash && b.bannerHash !== req.user.bannerHash) {
       const saved = saveDataUrlImage(b.bannerDataUrl, AVATARS_DIR, `bn-${req.user.id.slice(0, 6)}`);
       if (saved) {
@@ -1208,6 +1270,16 @@ export function createPulseCordServer(options = {}) {
     if (!req.file) return res.status(400).json({ error: 'Nenhuma imagem de capa enviada.' });
     req.user.bannerUrl = `/uploads/avatars/${req.file.filename}`;
     req.user.bannerHash = crypto.createHash('md5').update(fs.readFileSync(req.file.path)).digest('hex');
+    saveDb();
+    broadcastUsers();
+    res.json({ user: sanitizeUser(req.user) });
+  });
+
+  // Fundo do perfil (imagem ou GIF atrás do cartão, separado do banner)
+  app.post('/api/upload/profile-bg', requireAuth, uploadAvatar.single('profileBg'), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhuma imagem enviada.' });
+    req.user.profileBgUrl = `/uploads/avatars/${req.file.filename}`;
+    req.user.profileBgHash = crypto.createHash('md5').update(fs.readFileSync(req.file.path)).digest('hex');
     saveDb();
     broadcastUsers();
     res.json({ user: sanitizeUser(req.user) });
@@ -1572,6 +1644,7 @@ export function createPulseCordServer(options = {}) {
       allowMembersCreateChannels,
       tenorApiKey,
       giphyApiKey,
+      youtubeCookies,
     } = req.body || {};
 
     if (typeof name === 'string' && name.trim().length >= 2 && name.trim().length <= 40) db.server.name = name.trim();
@@ -1596,6 +1669,13 @@ export function createPulseCordServer(options = {}) {
     if (typeof allowMembersCreateChannels === 'boolean') db.server.allowMembersCreateChannels = allowMembersCreateChannels;
     if (typeof tenorApiKey === 'string') db.server.tenorApiKey = tenorApiKey.trim();
     if (typeof giphyApiKey === 'string') db.server.giphyApiKey = giphyApiKey.trim();
+    if (typeof youtubeCookies === 'string') {
+      try {
+        setYouTubeCookies(DATA_DIR, youtubeCookies.slice(0, 512 * 1024));
+      } catch (err) {
+        console.warn('[YouTube] Não foi possível salvar cookies:', err?.message);
+      }
+    }
 
     appendAuditLog({
       type: 'server_update',
@@ -2499,7 +2579,7 @@ export function createPulseCordServer(options = {}) {
         }
         const v = videoStates.get(prevChannelId);
         if (v && v.isPlaying) {
-          v.positionSec += Math.max(0, (Date.now() - v.updatedAt) / 1000);
+          v.positionSec += Math.max(0, (Date.now() - v.updatedAt) / 1000) * videoRate(v);
           v.isPlaying = false;
           v.updatedAt = Date.now();
         }
@@ -3475,10 +3555,25 @@ export function createPulseCordServer(options = {}) {
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
       const v = getOrCreateVideoState(targetCh);
       if (typeof positionSec === 'number') v.positionSec = Math.max(0, positionSec);
-      else if (v.isPlaying) v.positionSec += Math.max(0, (Date.now() - v.updatedAt) / 1000);
+      else if (v.isPlaying) v.positionSec += Math.max(0, (Date.now() - v.updatedAt) / 1000) * videoRate(v);
       v.isPlaying = false;
       v.updatedAt = Date.now();
       broadcastVideoState(targetCh, 'pause', actor?.displayName || '');
+    });
+
+    // velocidade vale para a sala toda (como "assistir junto"); legenda é individual (no cliente)
+    socket.on('video:rate', ({ channelId, rate }) => {
+      const targetCh = channelId || socketVoiceChannel.get(socket.id);
+      if (!targetCh) return;
+      const actor = getDb().users.find((u) => u.id === socket.data.userId);
+      if (!canUseMediaInRoom(targetCh, actor)) return;
+      const r = Number(rate);
+      if (!Number.isFinite(r) || r < 0.25 || r > 2) return;
+      const v = getOrCreateVideoState(targetCh);
+      if (v.isPlaying) v.positionSec += Math.max(0, (Date.now() - v.updatedAt) / 1000) * videoRate(v);
+      v.rate = Math.round(r * 100) / 100;
+      v.updatedAt = Date.now();
+      broadcastVideoState(targetCh, 'rate', actor?.displayName || '');
     });
 
     socket.on('video:seek', ({ channelId, positionSec }) => {

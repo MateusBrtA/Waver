@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BellOff,
   Camera,
@@ -49,6 +49,7 @@ import {
   VoiceParticipant,
 } from '../types';
 import { AudioQuickPopout } from './AudioQuickPopout';
+import { ScreenSharePreview } from './ScreenSharePreview';
 import { useIsSpeaking } from '../lib/speakingStore';
 import { Avatar } from './Avatar';
 import { PanelResizer, usePersistentWidth } from './PanelResizer';
@@ -107,6 +108,11 @@ interface SidebarProps {
   onStartPrivateCall: (targetUser: User) => void;
   onScanLanPeers?: () => void;
   onJoinOrFocusVoiceChannel: (channelId: string) => void;
+  /** "tocando agora" (música/vídeo da call) acima do painel de voz */
+  nowPlayingSlot?: React.ReactNode;
+  /** telas recebidas por WebRTC (só de quem está na mesma call) para a miniatura ao passar o mouse */
+  remoteScreenStreams?: Record<string, MediaStream | null>;
+  onWatchStream?: (channelId: string, socketId: string) => void;
   onLeaveVoice: () => void;
   onLeaveServer?: () => void;
   onCreateChannel: (type: 'text' | 'voice', categoryId?: string | null) => void;
@@ -195,6 +201,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onStartPrivateCall,
   onScanLanPeers,
   onJoinOrFocusVoiceChannel,
+  nowPlayingSlot,
+  remoteScreenStreams,
+  onWatchStream,
   onLeaveVoice,
   onLeaveServer,
   onCreateChannel,
@@ -223,7 +232,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [voiceOpen, setVoiceOpen] = useState(true);
   const [collapsedCats, setCollapsedCats] = useState<Set<string>>(() => new Set());
   const [copiedIp, setCopiedIp] = useState(false);
-  const [audioPopout, setAudioPopout] = useState<'none' | 'mic' | 'output'>('none');
+  const [audioPopout, setAudioPopout] = useState<'none' | 'mic' | 'output' | 'camera'>('none');
+  const [sharePreview, setSharePreview] = useState<{
+    socketId: string;
+    channelId: string;
+    rect: DOMRect;
+    name: string;
+    label?: string;
+  } | null>(null);
+  const sharePreviewTimer = useRef<number | null>(null);
+  const keepSharePreview = () => {
+    if (sharePreviewTimer.current !== null) window.clearTimeout(sharePreviewTimer.current);
+    sharePreviewTimer.current = null;
+  };
+  const hideSharePreviewSoon = () => {
+    keepSharePreview();
+    sharePreviewTimer.current = window.setTimeout(() => setSharePreview(null), 180);
+  };
+  useEffect(() => () => keepSharePreview(), []);
 
   const canManageChannels = Boolean(server) && (Boolean(permissions?.manageChannels) || user.role === 'host');
   const canMoveMembers = Boolean(server) && (Boolean(permissions?.moveMembers) || user.role === 'host');
@@ -940,8 +966,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 setDragItem({ kind: 'member', id: p.socketId, userId: p.userId, fromChannelId: ch.id });
                               }}
                               onDragEnd={endDrag}
+                              onMouseEnter={(e) => {
+                                if (!p.screenSharing || p.userId === user.id || !onWatchStream) return;
+                                keepSharePreview();
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                setSharePreview({
+                                  socketId: p.socketId,
+                                  channelId: ch.id,
+                                  rect,
+                                  name: p.displayName,
+                                  label: (p as { screenLabel?: string }).screenLabel,
+                                });
+                              }}
+                              onMouseLeave={() => {
+                                if (sharePreview) hideSharePreviewSoon();
+                              }}
                               title={
-                                p.userId === user.id
+                                p.screenSharing && p.userId !== user.id && onWatchStream
+                                  ? undefined
+                                  : p.userId === user.id
                                   ? 'Arraste para outro canal de voz para trocar de sala'
                                   : canMoveMembers
                                   ? 'Arraste para outro canal de voz para mover'
@@ -1142,6 +1185,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
+      {activeVoiceChannelId && nowPlayingSlot}
+
       {/* Active Voice Connection Bar */}
       {activeVoiceChannelId && (
         <div className="bg-[#232428] border-t border-white/10 px-2.5 py-2 space-y-2">
@@ -1171,16 +1216,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
 
           <div className="grid grid-cols-5 gap-1">
-            <button
-              type="button"
-              onClick={onToggleCamera}
-              className={`h-8 rounded-[4px] flex items-center justify-center transition cursor-pointer ${
-                cameraOn ? 'bg-[#23a55a] text-white' : 'bg-[#2b2d31] hover:bg-[#404249] text-[#dbdee1]'
+            <div
+              className={`h-8 rounded-[4px] flex items-stretch overflow-hidden transition ${
+                cameraOn ? 'bg-[#23a55a] text-white' : 'bg-[#2b2d31] text-[#dbdee1]'
               }`}
-              title={cameraOn ? 'Desligar vídeo' : 'Ligar vídeo'}
             >
-              <Camera className="w-4 h-4" />
-            </button>
+              <button
+                type="button"
+                onClick={onToggleCamera}
+                className={`flex-1 flex items-center justify-center cursor-pointer ${cameraOn ? 'hover:bg-black/10' : 'hover:bg-[#404249]'}`}
+                title={cameraOn ? 'Desligar vídeo' : 'Ligar vídeo'}
+              >
+                <Camera className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setAudioPopout((p) => (p === 'camera' ? 'none' : 'camera'))}
+                className={`w-3.5 flex items-center justify-center cursor-pointer ${cameraOn ? 'hover:bg-black/10' : 'hover:bg-[#404249]'}`}
+                title="Escolher câmera"
+              >
+                <ChevronDown className="w-3 h-3" />
+              </button>
+            </div>
             <button
               type="button"
               onClick={onOpenScreenShare}
@@ -1340,6 +1397,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
         </div>
       </div>
+
+      {sharePreview && onWatchStream && (
+        <ScreenSharePreview
+          anchor={sharePreview.rect}
+          name={sharePreview.name}
+          label={sharePreview.label}
+          sameCall={activeVoiceChannelId === sharePreview.channelId}
+          stream={
+            activeVoiceChannelId === sharePreview.channelId ? remoteScreenStreams?.[sharePreview.socketId] || null : null
+          }
+          onMouseEnter={keepSharePreview}
+          onMouseLeave={hideSharePreviewSoon}
+          onWatch={() => {
+            const sp = sharePreview;
+            setSharePreview(null);
+            onWatchStream(sp.channelId, sp.socketId);
+          }}
+        />
+      )}
 
       {/* Quick Mic / Headphone Popout (Print 3!) */}
       {audioPopout !== 'none' && (

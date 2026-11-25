@@ -147,6 +147,9 @@ export const ServerAdminPanel: React.FC<ServerAdminPanelProps> = ({
   const [newTagLabel, setNewTagLabel] = useState('');
   const [allowCreate, setAllowCreate] = useState(server.allowMembersCreateChannels !== false);
   const [invitePw, setInvitePw] = useState('');
+  const [giphyKey, setGiphyKey] = useState('');
+  const [tenorKey, setTenorKey] = useState('');
+  const [ytCookies, setYtCookies] = useState('');
   const [savingServer, setSavingServer] = useState(false);
   const [uploadingServerImg, setUploadingServerImg] = useState(false);
   const iconInputRef = useRef<HTMLInputElement | null>(null);
@@ -188,8 +191,14 @@ export const ServerAdminPanel: React.FC<ServerAdminPanelProps> = ({
         tags: srvTags.slice(0, 5),
         allowMembersCreateChannels: allowCreate,
         ...(invitePw.trim() ? { invitePassword: invitePw.trim() } : {}),
+        ...(giphyKey.trim() ? { giphyApiKey: giphyKey.trim() } : {}),
+        ...(tenorKey.trim() ? { tenorApiKey: tenorKey.trim() } : {}),
+        ...(ytCookies.trim() ? { youtubeCookies: ytCookies } : {}),
       });
       setInvitePw('');
+      setGiphyKey('');
+      setTenorKey('');
+      setYtCookies('');
       onServerUpdated(updated);
       onNotify?.('Perfil do servidor salvo com sucesso!');
     } catch (err: any) {
@@ -724,6 +733,85 @@ export const ServerAdminPanel: React.FC<ServerAdminPanelProps> = ({
                 )}
               </div>
             </div>
+
+            {permissions.manageServer && (
+              <div className="pt-3 border-t border-[#2e3035] space-y-3">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-[#b5bac1]">Integrações: GIFs e YouTube</div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-[#dbdee1]">
+                    <span>Chave da API do GIPHY</span>
+                    {server.hasGiphyKey && (
+                      <button
+                        type="button"
+                        onClick={() => api.updateServer({ giphyApiKey: '' }).then((r) => onServerUpdated(r.server))}
+                        className="text-[11px] text-[#f23f42] hover:underline cursor-pointer"
+                      >
+                        Remover
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="password"
+                    value={giphyKey}
+                    onChange={(e) => setGiphyKey(e.target.value)}
+                    placeholder={server.hasGiphyKey ? 'Chave configurada · cole outra para trocar' : 'Cole a chave (developers.giphy.com → Create an App)'}
+                    className="w-full px-3 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-xs text-white"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-[#dbdee1]">
+                    <span>Chave da API do Tenor (opcional, alternativa)</span>
+                    {server.hasTenorKey && (
+                      <button
+                        type="button"
+                        onClick={() => api.updateServer({ tenorApiKey: '' }).then((r) => onServerUpdated(r.server))}
+                        className="text-[11px] text-[#f23f42] hover:underline cursor-pointer"
+                      >
+                        Remover
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="password"
+                    value={tenorKey}
+                    onChange={(e) => setTenorKey(e.target.value)}
+                    placeholder={server.hasTenorKey ? 'Chave configurada · cole outra para trocar' : 'Chave do Google Cloud com a Tenor API ativada'}
+                    className="w-full px-3 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-xs text-white"
+                  />
+                  <p className="text-[11px] text-[#949ba4]">Com uma chave, a aba de busca do seletor de GIFs mostra GIFs da internet para todos do servidor.</p>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-[#dbdee1]">
+                    <span>Cookies do YouTube (cookies.txt)</span>
+                    {server.hasYoutubeCookies && (
+                      <button
+                        type="button"
+                        onClick={() => api.updateServer({ youtubeCookies: '' }).then((r) => onServerUpdated(r.server))}
+                        className="text-[11px] text-[#f23f42] hover:underline cursor-pointer"
+                      >
+                        Remover
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    value={ytCookies}
+                    onChange={(e) => setYtCookies(e.target.value)}
+                    rows={3}
+                    spellCheck={false}
+                    placeholder={
+                      server.hasYoutubeCookies
+                        ? 'cookies.txt salvo · cole outro para trocar'
+                        : 'Cole aqui o conteúdo de um cookies.txt do youtube.com (formato Netscape)'
+                    }
+                    className="w-full px-3 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-[11px] font-mono text-white resize-y"
+                  />
+                  <p className="text-[11px] text-[#949ba4]">
+                    Só é preciso se o YouTube pedir “confirme que você não é um robô” ao tocar música. Exporte com uma extensão
+                    de “cookies.txt” numa janela anônima logada numa conta secundária. Fica só neste servidor.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {permissions.manageServer && (
               <div className="pt-2 flex justify-end">

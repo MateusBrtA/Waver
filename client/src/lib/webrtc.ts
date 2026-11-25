@@ -153,7 +153,9 @@ export class WebRTCManager {
       newSettings.noiseSuppression !== this.settings.noiseSuppression ||
       newSettings.autoGainControl !== this.settings.autoGainControl;
 
+    const cameraChanged = newSettings.videoDeviceId !== this.settings.videoDeviceId;
     this.settings = newSettings;
+    if (cameraChanged && this.camStream) this.switchCameraDevice().catch(() => {});
 
     // Live DSP parameter updates (zero reconnect glitch!)
     if (this.micInputGain) {
@@ -725,6 +727,39 @@ export class WebRTCManager {
       this.callbacks.onError('Não foi possível ligar a câmera. Verifique se outra aplicação está usando-a.');
       return false;
     }
+  }
+
+  /** Troca a câmera com ela ligada, sem renegociar (replaceTrack nos peers). */
+  private async switchCameraDevice() {
+    const old = this.camStream;
+    if (!old) return;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        deviceId: this.settings.videoDeviceId ? { exact: this.settings.videoDeviceId } : undefined,
+        width: { ideal: 1920, min: 640 },
+        height: { ideal: 1080, min: 360 },
+        frameRate: { ideal: 30, max: 60 },
+      },
+      audio: false,
+    });
+    if (this.camStream !== old) {
+      // desligou (ou trocou de novo) enquanto abria a nova câmera
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    track.contentHint = 'motion';
+    track.onended = () => this.stopCamera();
+    for (const ctx of this.peers.values()) {
+      if (ctx.camSender) await ctx.camSender.replaceTrack(track).catch(() => {});
+    }
+    this.camStream = stream;
+    old.getTracks().forEach((t) => {
+      t.onended = null;
+      t.stop();
+    });
+    this.emitLocalState();
   }
 
   stopCamera() {
