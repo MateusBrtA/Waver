@@ -1,0 +1,205 @@
+@import "tailwindcss";
+
+:root {
+  --pc-bg-rail: #0b0c10;
+  --pc-bg-sidebar: #111319;
+  --pc-bg-main: #151821;
+  --pc-bg-surface: #1b1f2a;
+  --pc-bg-elevated: #222736;
+  --pc-bg-dock: #0e1015;
+  --pc-border: rgba(255, 255, 255, 0.065);
+  --pc-text: #f1f3f8;
+  --pc-text-muted: #939bb0;
+  --pc-accent: #5865f2;
+  --pc-accent-glow: rgba(88, 101, 242, 0.35);
+  --pc-success: #23a55a;
+  --pc-danger: #f23f42;
+  --pc-radius: 10px;
+  --pc-glass-opacity: 1;
+  --pc-font: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --pc-wallpaper: none;
+  --pc-wallpaper-blur: 0px;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: var(--pc-font);
+    background-color: var(--pc-bg-rail);
+    color: var(--pc-text);
+  }
+
+  ::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(12, 14, 20, 0.85);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(98, 109, 138, 0.55);
+  }
+}
+
+/* Optional customizable wallpaper layer behind translucent surfaces */
+.pc-wallpaper-bg {
+  background-image: var(--pc-wallpaper);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+/* Modern darker Discord-inspired surface classes (safe targets for AI / Linux CSS customization!) */
+.pc-titlebar {
+  background-color: var(--pc-bg-rail) !important;
+  border-bottom: 1px solid var(--pc-border);
+}
+
+.pc-rail {
+  background-color: color-mix(in srgb, var(--pc-bg-rail) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
+  border-right: 1px solid var(--pc-border);
+}
+
+.pc-sidebar {
+  background-color: color-mix(in srgb, var(--pc-bg-sidebar) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
+  border-right: 1px solid var(--pc-border);
+}
+
+.pc-chat {
+  background-color: color-mix(in srgb, var(--pc-bg-main) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
+}
+
+.pc-voice-stage {
+  background-color: color-mix(in srgb, var(--pc-bg-main) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
+}
+
+.pc-member-list {
+  background-color: color-mix(in srgb, var(--pc-bg-sidebar) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
+  border-left: 1px solid var(--pc-border);
+}
+
+.pc-user-dock {
+  background-color: var(--pc-bg-dock) !important;
+  border-top: 1px solid var(--pc-border);
+}
+
+.pc-composer {
+  background-color: var(--pc-bg-surface) !important;
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius) !important;
+}
+
+.pc-message {
+  border-radius: calc(var(--pc-radius) * 0.7);
+  transition: background-color 0.14s ease;
+}
+
+.pc-message:hover {
+  background-color: rgba(255, 255, 255, 0.025) !important;
+}
+
+.pc-modal {
+  background-color: var(--pc-bg-surface) !important;
+  border-color: var(--pc-border) !important;
+  border-radius: calc(var(--pc-radius) + 4px) !important;
+}
+
+/* Functional layout guardrails so user/AI CSS skins never hide core buttons */
+.pc-rail,
+.pc-sidebar,
+.pc-user-dock,
+.pc-composer {
+  flex-shrink: 0;
+  visibility: visible;
+}
+
+/* Custom electron frameless titlebar drag regions */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+@keyframes pulseRing {
+  0%, 100% {
+    box-shadow: 0 0 0 2px #23a55a, 0 0 12px rgba(35, 165, 90, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 3.5px #4ade80, 0 0 22px rgba(74, 222, 128, 0.85);
+  }
+}
+
+.speaking-ring {
+  animation: pulseRing 1.05s ease-in-out infinite;
+}
+
+@keyframes soundboardRing {
+  0%, 100% {
+    box-shadow: 0 0 0 2.5px #22c55e, 0 0 16px rgba(34, 197, 94, 0.75);
+  }
+  50% {
+    box-shadow: 0 0 0 4px #4ade80, 0 0 26px rgba(74, 222, 128, 0.95);
+  }
+}
+
+.soundboard-ring {
+  animation: soundboardRing 0.8s ease-in-out infinite;
+}
+
+@keyframes toastSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.toast-enter {
+  animation: toastSlideIn 0.2s ease-out forwards;
+}
+
+@keyframes eqBar {
+  0%, 100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.eq-bar {
+  transform-origin: bottom;
+  animation: eqBar 1s ease-in-out infinite;
+}
+
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fadeSlideUp 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

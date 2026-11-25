@@ -1,0 +1,17 @@
+node_modules/
+server/node_modules/
+client/node_modules/
+server/data/
+client/dist/
+dist-app/
+*.exe
+*.log
+.DS_Store
+.env
+
+# Binários auxiliares pequenos usados no empacotamento (gerados por scripts/build-*.mjs)
+!electron/bin/*.exe
+# Configuração local do Claude Code / dados de teste
+.claude/settings.local.json
+server-data/
+crash.log

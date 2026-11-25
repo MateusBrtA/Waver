@@ -1,0 +1,96 @@
+{
+  "name": "pulsecord",
+  "version": "4.0.0",
+  "description": "PulseCord 4.0 - App estilo Discord com Sincronização Ultra-Rápida, YouTube Player, Parsec 60-120fps + Controle Xbox Virtual, Áudio no Chat, Fixação e Mensagens Privadas P2P em LAN",
+  "main": "electron/main.js",
+  "author": "PulseCord",
+  "private": true,
+  "scripts": {
+    "setup": "npm install && npm --prefix server install && npm --prefix client install",
+    "dev:server": "node server/index.js",
+    "dev:client": "npm --prefix client run dev",
+    "dev": "concurrently -n SERVER,CLIENT -c cyan,magenta \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:electron": "concurrently -n CLIENT,ELECTRON -c magenta,green \"npm run dev:client\" \"wait-on http://localhost:5173 && cross-env PULSECORD_DEV=1 electron .\"",
+    "build:icon": "node scripts/generate-icon.mjs",
+    "build:loopback": "node scripts/build-loopback.mjs",
+    "build:native": "node scripts/build-loopback.mjs && node scripts/build-native-core.mjs",
+    "build:client": "npm --prefix client run build",
+    "build": "npm run build:icon && npm run build:native && npm run build:client",
+    "start:host": "node server/index.js",
+    "build:exe": "npm run build && electron-builder --win portable",
+    "build:installer": "npm run build && electron-builder --win nsis",
+    "build:win": "npm run build && electron-builder --win nsis portable"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.2",
+    "socket.io": "^4.8.1",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^35.1.5",
+    "electron-builder": "^26.0.12",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.pulsecord.app",
+    "productName": "PulseCord",
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist-app"
+    },
+    "files": [
+      "electron/**/*",
+      "!electron/bin/**",
+      "server/**/*.js",
+      "server/package.json",
+      "client/dist/**/*",
+      "package.json",
+      "!server/data/**",
+      "!server/node_modules/**",
+      "!client/src/**",
+      "!client/node_modules/**",
+      "!scripts/**"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/bin",
+        "to": "bin"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "electron/icon.ico"
+    },
+    "portable": {
+      "artifactName": "PulseCord-Portable.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PulseCord",
+      "installerIcon": "electron/icon.ico",
+      "uninstallerIcon": "electron/icon.ico",
+      "artifactName": "PulseCord-Setup.exe"
+    }
+  }
+}

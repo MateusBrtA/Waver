@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: pulsecord-server
+    runtime: node
+    plan: free
+    buildCommand: npm --prefix server install && npm --prefix client install && npm --prefix client run build
+    startCommand: node server/index.js
+    envVars:
+      - key: NODE_VERSION
+        value: 22
