@@ -580,7 +580,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         <div className="flex items-center gap-2.5 min-w-0">
           {isGroup && dmGroup ? (
             <>
-              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#5865f2] to-[#eb459e] flex items-center justify-center text-white text-xs font-bold shrink-0 overflow-hidden">
+              <div className="w-7 h-7 rounded-full bg-[#5865f2] flex items-center justify-center text-white text-xs font-bold shrink-0 overflow-hidden">
                 {dmGroup.iconUrl ? (
                   <img
                     src={resolveMediaUrl(dmGroup.hostP2pUrl || serverUrl, dmGroup.iconUrl)}
@@ -839,7 +839,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         <div className="pb-4 mb-3 border-b border-[#3f4147]/60">
           {isGroup && dmGroup ? (
             <>
-              <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#5865f2] to-[#eb459e] flex items-center justify-center text-white text-xl font-bold mb-2 overflow-hidden">
+              <div className="w-16 h-16 rounded-full bg-[#5865f2] flex items-center justify-center text-white text-xl font-bold mb-2 overflow-hidden">
                 {dmGroup.iconUrl ? (
                   <img
                     src={resolveMediaUrl(dmGroup.hostP2pUrl || serverUrl, dmGroup.iconUrl)}
@@ -1596,7 +1596,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   {liveRecBars.map((val, idx) => (
                     <span
                       key={idx}
-                      className="flex-1 rounded-full bg-gradient-to-t from-[#5865f2] to-[#22d3ee] transition-all duration-75"
+                      className="flex-1 rounded-full bg-[#5865f2] transition-all duration-75"
                       style={{ height: `${Math.max(18, Math.round(val * 100))}%` }}
                     />
                   ))}

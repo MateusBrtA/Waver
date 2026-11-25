@@ -966,6 +966,15 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
         mainWindow.webContents.send('rc:rumble', { slot, large, small });
       }
     };
+    remoteController.onHostActivity = (active) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('rc:host-activity', { active });
+      }
+    };
+    ipcMain.handle('rc:set-host-priority', (_event, enabled) => {
+      remoteController.setHostPriority(enabled);
+      return remoteController.getStatus();
+    });
     remoteController.onStatusChange = (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('rc:status-changed', st);

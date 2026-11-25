@@ -61,6 +61,9 @@ class WindowsRemoteController {
     this.vigemWaiters = [];
     this.onRumble = null;
     this.onStatusChange = null;
+    this.onHostActivity = null;
+    this.hostActive = false;
+    this.hostPriority = true; // host tem prioridade: enquanto ele mexe, o input remoto é ignorado
   }
 
   getStatus() {
@@ -68,7 +71,25 @@ class WindowsRemoteController {
       enabled: this.enabled,
       ready: this.ready,
       vigemStatus: this.vigemStatus,
+      hostActive: this.hostActive,
+      hostPriority: this.hostPriority,
     };
+  }
+
+  setHostPriority(enabled) {
+    this.hostPriority = Boolean(enabled);
+    if (!this.enabled) return;
+    if (this.hostPriority) this.sendRaw('PRIORITY_ON 1500');
+    else {
+      this.sendRaw('PRIORITY_OFF');
+      this.setHostActive(false);
+    }
+  }
+
+  setHostActive(active) {
+    if (this.hostActive === active) return;
+    this.hostActive = active;
+    this.onHostActivity?.(active);
   }
 
   getTargetBounds() {
@@ -120,6 +141,7 @@ class WindowsRemoteController {
     this.proc.on('exit', () => {
       this.proc = null;
       this.ready = false;
+      this.setHostActive(false);
       this.lineBuf = '';
       while (this.procWaiters.length) {
         const w = this.procWaiters.shift();
@@ -163,6 +185,12 @@ class WindowsRemoteController {
         const w = this.vigemWaiters.shift();
         w.resolve(this.vigemStatus);
       }
+    } else if (line === 'HOST_ACTIVE') {
+      // Host pegou o mouse/teclado: solta tudo que o controle remoto estava segurando
+      this.sendRaw('RELEASE_KM');
+      this.setHostActive(true);
+    } else if (line === 'HOST_IDLE') {
+      this.setHostActive(false);
     } else if (line.startsWith('RUMBLE ')) {
       const parts = line.split(' ');
       const slot = Number(parts[1] || 0);
@@ -193,12 +221,15 @@ class WindowsRemoteController {
     if (process.platform !== 'win32') return false;
     this.targetDisplayId = displayId;
     this.enabled = true;
-    return this.ensureDaemon();
+    const ok = this.ensureDaemon();
+    if (ok && this.hostPriority) this.sendRaw('PRIORITY_ON 1500');
+    return ok;
   }
 
   stop() {
     this.enabled = false;
     if (this.proc && !this.proc.killed) {
+      this.sendRaw('PRIORITY_OFF');
       this.sendRaw('RELEASE_ALL');
       for (let slot = 0; slot < 4; slot++) {
         this.sendRaw(`GP_OFF ${slot}`);

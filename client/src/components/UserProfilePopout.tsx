@@ -2,16 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Crown,
   Edit3,
-  Gamepad2,
   MessageSquare,
   MoreHorizontal,
   Phone,
-  Sparkles,
-  Zap,
 } from 'lucide-react';
 import { resolveMediaUrl } from '../lib/api';
 import { Role, User } from '../types';
 import { Avatar, NAME_STYLES } from './Avatar';
+import { ConnectionIcon, getConnectionInfo } from './ConnectionBadge';
 
 interface UserProfilePopoutProps {
   user: User;
@@ -156,23 +154,30 @@ export const UserProfilePopout: React.FC<UserProfilePopoutProps> = ({
 
           {user.bio && <p className="text-xs text-[#dbdee1] mt-1.5 leading-snug line-clamp-2">{user.bio}</p>}
 
-          {/* Badges pill strip (Print 4!) */}
-          <div className="inline-flex items-center gap-1.5 mt-2 bg-[#1e1f22] border border-[#2b2d31] px-2 py-1 rounded-md">
-            {user.role === 'host' && contextScope === 'server' && (
-              <span title="Host do Servidor">
-                <Crown className="w-3.5 h-3.5 text-[#f0b232]" />
-              </span>
-            )}
-            <span title="PulseNitro Grátis (1080p60 + Perfil Custom)">
-              <Sparkles className="w-3.5 h-3.5 text-[#eb459e]" />
-            </span>
-            <span title="Jogador Ativo">
-              <Gamepad2 className="w-3.5 h-3.5 text-[#5865f2]" />
-            </span>
-            <span title="Membro Pioneiro">
-              <Zap className="w-3.5 h-3.5 text-[#23a55a]" />
-            </span>
-          </div>
+          {user.role === 'host' && contextScope === 'server' && (
+            <div className="inline-flex items-center mt-2 bg-[#1e1f22] px-1.5 py-1 rounded-md" title="Dono do servidor">
+              <Crown className="w-4 h-4 text-[#f0b232]" />
+            </div>
+          )}
+
+          {(user.connections || []).length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 mt-2.5">
+              {(user.connections || []).slice(0, 8).map((c, i) => {
+                const info = getConnectionInfo(c);
+                return (
+                  <button
+                    key={i}
+                    type="button"
+                    title={`${info.meta.name}: ${info.label}`}
+                    onClick={() => info.href && window.open(info.href, '_blank', 'noopener,noreferrer')}
+                    className="p-1 rounded hover:bg-[#2b2d31] cursor-pointer"
+                  >
+                    <ConnectionIcon connection={c} className="w-5 h-5" />
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Live Current Activity OR Game Collection Strip (Print 4!) */}

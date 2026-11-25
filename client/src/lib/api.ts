@@ -302,6 +302,20 @@ export class ApiClient {
     return this.request<{ category: ChannelCategory }>('/api/categories', { method: 'POST', body: JSON.stringify(payload) });
   }
 
+  reorderChannels(layout: Array<{ id: string; categoryId: string | null; position: number }>) {
+    return this.request<{ ok: boolean }>('/api/channels/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ layout }),
+    });
+  }
+
+  reorderCategories(ids: string[]) {
+    return this.request<{ ok: boolean }>('/api/categories/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+  }
+
   updateCategory(categoryId: string, payload: Partial<ChannelCategory>) {
     return this.request<{ category: ChannelCategory }>(`/api/categories/${categoryId}`, {
       method: 'PATCH',

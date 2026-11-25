@@ -267,42 +267,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   };
 
   return (
-    <div className="h-full w-full flex items-center justify-center relative overflow-y-auto p-4 sm:p-6 bg-[#111216]">
-      <div
-        className="pointer-events-none fixed inset-0 overflow-hidden"
-        style={{
-          background:
-            'radial-gradient(ellipse at 18% 15%, rgba(88, 101, 242, 0.34) 0%, transparent 48%), radial-gradient(ellipse at 85% 85%, rgba(35, 165, 90, 0.22) 0%, transparent 48%), linear-gradient(155deg, #161826 0%, #14161e 50%, #232428 100%)',
-        }}
-      />
-
-      <div className="relative z-10 w-full max-w-[520px] animate-fade-up">
+    <div className="h-full w-full flex items-center justify-center relative overflow-y-auto p-4 sm:p-6 bg-[#1e1f22]">
+      <div className="relative z-10 w-full max-w-[480px]">
         {step === 'local' && (
           <form
             onSubmit={handleLocalSubmit}
-            className="bg-[#2b2d31]/95 rounded-lg border border-white/10 shadow-[0_24px_65px_rgba(0,0,0,0.65)] overflow-hidden"
+            className="bg-[#313338] rounded-[5px] shadow-[0_2px_10px_0_rgba(0,0,0,0.2)] overflow-hidden"
           >
-            <div className="px-7 pt-7 pb-5 text-center border-b border-white/5">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#5865f2]/15 border border-[#5865f2]/35 text-[#a5b4fc] text-[11px] font-bold tracking-wide mb-3.5">
-                <Sparkles className="w-3.5 h-3.5" />
-                Chat Privado LAN P2P • Parsec Gaming • 1080p120
-              </div>
-
-              <div className="flex items-center justify-center gap-3 mb-1.5">
-                <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-[#5865f2] to-[#4752c4] flex items-center justify-center shadow-xl shadow-[#5865f2]/30 relative">
-                  <Headphones className="w-6 h-6 text-white" />
-                  <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-[#23a55a] border-[3px] border-[#2b2d31]" />
-                </div>
-                <div className="text-left">
-                  <h1 className="text-2xl font-bold text-white tracking-tight">PulseCord v4</h1>
-                  <p className="text-xs text-[#949ba4]">Entre direto e crie servidores ou chame no privado pela LAN</p>
-                </div>
-              </div>
+            <div className="px-8 pt-8 pb-2 text-center">
+              <h1 className="text-2xl font-semibold text-[#f2f3f5]">Boas-vindas!</h1>
+              <p className="mt-2 text-base text-[#b5bac1]">Escolha seu nome e sua foto para entrar no PulseCord.</p>
             </div>
 
-            <div className="p-7 space-y-5">
+            <div className="px-8 pt-5 pb-8 space-y-5">
               {/* Avatar Preview & Color Picker */}
-              <div className="flex items-center gap-4 bg-[#1e1f22] border border-white/5 rounded-lg p-3.5">
+              <div className="flex items-center gap-4">
                 <label className="relative w-16 h-16 rounded-full shrink-0 cursor-pointer group overflow-hidden flex items-center justify-center text-xl font-bold text-white border-2 border-white/15" style={{ backgroundColor: avatarColor }}>
                   {avatarDataUrl ? (
                     <img src={avatarDataUrl} alt="Avatar" className="w-full h-full object-cover" />
@@ -321,7 +300,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </label>
 
                 <div className="min-w-0 flex-1 space-y-2">
-                  <div className="text-xs font-semibold text-white">Foto Global para Servidores e LAN</div>
+                  <div className="text-xs font-bold uppercase text-[#b5bac1]">Foto de perfil</div>
                   <div className="flex items-center gap-1.5">
                     {PROFILE_COLORS.map((c) => (
                       <button
@@ -339,8 +318,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               </div>
 
               <div className="space-y-1.5">
-                <label className="block text-xs font-bold uppercase tracking-wider text-[#b5bac1]">
-                  Seu Apelido (Nick) <span className="text-[#f23f42]">*</span>
+                <label className="block text-xs font-bold uppercase text-[#b5bac1]">
+                  Nome de exibição <span className="text-[#f23f42]">*</span>
                 </label>
                 <input
                   type="text"
@@ -350,7 +329,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                   maxLength={24}
                   autoFocus
                   required
-                  className="w-full bg-[#1e1f22] border border-[#3f4147] focus:border-[#5865f2] rounded-lg px-4 py-3 text-sm text-white placeholder-[#6d6f78] outline-none transition"
+                  className="w-full h-10 bg-[#1e1f22] rounded-[3px] px-3 text-base text-[#dbdee1] placeholder-[#6d6f78] outline-none"
                 />
               </div>
 
@@ -362,14 +341,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-3.5 bg-[#5865f2] hover:bg-[#4752c4] active:bg-[#3c45a5] text-white font-bold text-sm rounded-lg transition shadow-lg shadow-[#5865f2]/25 flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full h-11 bg-[#5865f2] hover:bg-[#4752c4] active:bg-[#3c45a5] text-white font-medium text-base rounded-[3px] transition flex items-center justify-center gap-2 cursor-pointer"
               >
-                <span>Entrar no PulseCord</span>
-                <ArrowRight className="w-4 h-4" />
+                <span>Entrar</span>
               </button>
 
               <div className="flex items-center justify-between text-[11px] text-[#949ba4] pt-1">
-                <span>Você decide dentro do app se quer criar servidor (+).</span>
+                <span>Depois é só criar um servidor ou entrar em um.</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -378,7 +356,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                   }}
                   className="text-[#808cf8] hover:underline font-semibold cursor-pointer shrink-0 ml-2"
                 >
-                  Entrar por IPv4 →
+                  Entrar por IP
                 </button>
               </div>
             </div>
@@ -388,7 +366,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         {step === 'client' && (
           <form
             onSubmit={handleClientSubmit}
-            className="bg-[#2b2d31]/95 rounded-lg border border-white/10 shadow-[0_24px_65px_rgba(0,0,0,0.65)] overflow-hidden"
+            className="bg-[#313338] rounded-[5px] shadow-[0_2px_10px_0_rgba(0,0,0,0.2)] overflow-hidden"
           >
             <div className="px-6 py-4 bg-[#2b2d31] border-b border-white/5 flex items-center justify-between">
               {!isDirectBrowserHost ? (
@@ -569,7 +547,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full py-3.5 bg-[#5865f2] hover:bg-[#4752c4] active:bg-[#3c45a5] disabled:opacity-50 text-white font-bold text-sm rounded-lg transition shadow-lg shadow-[#5865f2]/25 flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full h-11 bg-[#5865f2] hover:bg-[#4752c4] active:bg-[#3c45a5] disabled:opacity-50 text-white font-medium text-base rounded-[3px] transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
                 <span>Entrar no Servidor</span>

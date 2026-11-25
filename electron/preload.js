@@ -35,6 +35,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   rcRetryViGEm: () => ipcRenderer.invoke('rc:retry-vigem'),
   rcInstallViGEmBus: () => ipcRenderer.invoke('rc:install-vigembus'),
   rcExecuteInput: (evt) => ipcRenderer.send('rc:execute-input', evt),
+  rcSetHostPriority: (enabled) => ipcRenderer.invoke('rc:set-host-priority', enabled),
+  onRcHostActivity: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('rc:host-activity', listener);
+    return () => ipcRenderer.removeListener('rc:host-activity', listener);
+  },
   onRcEmergencyStopped: (cb) => {
     const listener = () => cb();
     ipcRenderer.on('rc:emergency-stopped', listener);

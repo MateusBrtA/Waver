@@ -172,8 +172,174 @@ namespace PulseCordNative {
     public static extern void vigem_target_x360_unregister_notification(IntPtr target);
   }
 
+  /// <summary>
+  /// Prioridade do host (modo Parsec): hooks de baixo nível detectam mouse/teclado FÍSICOS do host
+  /// (ignora eventos injetados via SendInput, que têm a flag INJECTED). Enquanto o host mexe,
+  /// o input remoto é bloqueado; após IdleMs sem input físico, o controle volta para quem está conectado.
+  /// O callback do hook só grava um timestamp (rápido, para o Windows não remover o hook).
+  /// </summary>
+  internal static class HostPresence {
+    private delegate IntPtr LowLevelProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int x; public int y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG {
+      public IntPtr hwnd;
+      public uint message;
+      public IntPtr wParam;
+      public IntPtr lParam;
+      public uint time;
+      public POINT pt;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSLLHOOKSTRUCT {
+      public POINT pt;
+      public uint mouseData;
+      public uint flags;
+      public uint time;
+      public UIntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KBDLLHOOKSTRUCT {
+      public uint vkCode;
+      public uint scanCode;
+      public uint flags;
+      public uint time;
+      public UIntPtr dwExtraInfo;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelProc lpfn, IntPtr hMod, uint dwThreadId);
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+    [DllImport("user32.dll")]
+    private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+    [DllImport("user32.dll")]
+    private static extern bool PostThreadMessage(uint idThread, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WH_MOUSE_LL = 14;
+    private const uint LLMHF_INJECTED = 0x01;
+    private const uint LLKHF_INJECTED = 0x10;
+    private const uint WM_QUIT = 0x0012;
+
+    private static LowLevelProc mouseProc;
+    private static LowLevelProc keyboardProc;
+    private static System.Threading.Thread hookThread;
+    private static uint hookThreadId;
+    private static System.Threading.Timer idleTimer;
+    private static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    private static long lastPhysicalMs = -100000;
+    private static volatile bool active;
+    private static volatile bool running;
+
+    public static int IdleMs = 1500;
+    public static bool Active { get { return running && active; } }
+    public static Action<bool> OnChange;
+
+    private static void MarkPhysical() {
+      System.Threading.Interlocked.Exchange(ref lastPhysicalMs, Clock.ElapsedMilliseconds);
+    }
+
+    private static IntPtr MouseHook(int nCode, IntPtr wParam, IntPtr lParam) {
+      if (nCode >= 0) {
+        MSLLHOOKSTRUCT s = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+        if ((s.flags & LLMHF_INJECTED) == 0) MarkPhysical();
+      }
+      return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+
+    private static IntPtr KeyboardHook(int nCode, IntPtr wParam, IntPtr lParam) {
+      if (nCode >= 0) {
+        KBDLLHOOKSTRUCT s = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+        if ((s.flags & LLKHF_INJECTED) == 0) MarkPhysical();
+      }
+      return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+
+    private static void HookLoop() {
+      hookThreadId = GetCurrentThreadId();
+      mouseProc = MouseHook;
+      keyboardProc = KeyboardHook;
+      IntPtr hMod = GetModuleHandle(null);
+      IntPtr mh = SetWindowsHookEx(WH_MOUSE_LL, mouseProc, hMod, 0);
+      IntPtr kh = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardProc, hMod, 0);
+      MSG msg;
+      while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
+      if (mh != IntPtr.Zero) UnhookWindowsHookEx(mh);
+      if (kh != IntPtr.Zero) UnhookWindowsHookEx(kh);
+    }
+
+    private static void Tick(object _) {
+      if (!running) return;
+      long since = Clock.ElapsedMilliseconds - System.Threading.Interlocked.Read(ref lastPhysicalMs);
+      bool nowActive = since < IdleMs;
+      if (nowActive != active) {
+        active = nowActive;
+        Action<bool> cb = OnChange;
+        if (cb != null) cb(nowActive);
+      }
+    }
+
+    public static void Start() {
+      if (running) return;
+      running = true;
+      active = false;
+      lastPhysicalMs = -100000;
+      hookThread = new System.Threading.Thread(HookLoop);
+      hookThread.IsBackground = true;
+      hookThread.Start();
+      idleTimer = new System.Threading.Timer(Tick, null, 100, 100);
+    }
+
+    public static void Stop() {
+      if (!running) return;
+      running = false;
+      if (idleTimer != null) {
+        idleTimer.Dispose();
+        idleTimer = null;
+      }
+      if (hookThreadId != 0) PostThreadMessage(hookThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+      hookThreadId = 0;
+      if (active) {
+        active = false;
+        Action<bool> cb = OnChange;
+        if (cb != null) cb(false);
+      }
+    }
+  }
+
   internal sealed class Program {
     private static readonly object StdoutLock = new object();
+    // Marca nossos eventos injetados (além da flag INJECTED do Windows)
+    private static readonly UIntPtr PulseMarker = new UIntPtr(0x50554C53u);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    // Move o cursor via SendInput (absoluto na área virtual de todos os monitores).
+    // SetCursorPos não é marcado como "injetado", então confundiria a detecção de input do host.
+    private static void SendMouseAbsolute(int x, int y) {
+      int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77);
+      int vw = Math.Max(1, GetSystemMetrics(78)), vh = Math.Max(1, GetSystemMetrics(79));
+      Win32Input.INPUT inp = new Win32Input.INPUT();
+      inp.type = Win32Input.INPUT_MOUSE;
+      inp.U.mi.dx = (int)Math.Round((x - vx) * 65535.0 / Math.Max(1, vw - 1));
+      inp.U.mi.dy = (int)Math.Round((y - vy) * 65535.0 / Math.Max(1, vh - 1));
+      inp.U.mi.dwFlags = Win32Input.MOUSEEVENTF_MOVE | 0x8000u /*ABSOLUTE*/ | 0x4000u /*VIRTUALDESK*/;
+      inp.U.mi.dwExtraInfo = PulseMarker;
+      Win32Input.SendInput(1, new[] { inp }, InputSize);
+    }
     private static readonly HashSet<int> HeldKeys = new HashSet<int>();
     private static readonly HashSet<int> HeldMouseButtons = new HashSet<int>();
     private static readonly HashSet<int> HeldFallbackKeys = new HashSet<int>();
@@ -223,6 +389,7 @@ namespace PulseCordNative {
         inp.U.ki.wScan = 0;
         inp.U.ki.dwFlags = flags;
       }
+      inp.U.ki.dwExtraInfo = PulseMarker;
       Win32Input.SendInput(1, new[] { inp }, InputSize);
     }
 
@@ -233,6 +400,7 @@ namespace PulseCordNative {
       inp.U.mi.dx = dx;
       inp.U.mi.dy = dy;
       inp.U.mi.dwFlags = Win32Input.MOUSEEVENTF_MOVE;
+      inp.U.mi.dwExtraInfo = PulseMarker;
       Win32Input.SendInput(1, new[] { inp }, InputSize);
     }
 
@@ -254,6 +422,7 @@ namespace PulseCordNative {
       } else {
         return;
       }
+      inp.U.mi.dwExtraInfo = PulseMarker;
       Win32Input.SendInput(1, new[] { inp }, InputSize);
     }
 
@@ -263,6 +432,7 @@ namespace PulseCordNative {
       inp.type = Win32Input.INPUT_MOUSE;
       inp.U.mi.mouseData = delta;
       inp.U.mi.dwFlags = Win32Input.MOUSEEVENTF_WHEEL;
+      inp.U.mi.dwExtraInfo = PulseMarker;
       Win32Input.SendInput(1, new[] { inp }, InputSize);
     }
 
@@ -478,6 +648,7 @@ namespace PulseCordNative {
       Console.OutputEncoding = new UTF8Encoding(false);
 
       string state = InitViGEm();
+      HostPresence.OnChange = (busy) => WriteLineSafe(busy ? "HOST_ACTIVE" : "HOST_IDLE");
       WriteLineSafe("READY vigem=" + state);
 
       try {
@@ -487,8 +658,25 @@ namespace PulseCordNative {
           string[] p = line.Split(' ');
           string cmd = p[0];
           try {
-            if (cmd == "M" && p.Length >= 3) {
-              Win32Input.SetCursorPos(int.Parse(p[1]), int.Parse(p[2]));
+            // Host mexendo no PC: ignora mouse/teclado remotos (soltar teclas/botões continua liberado)
+            if (HostPresence.Active && (cmd == "M" || cmd == "MR" || cmd == "MD" || cmd == "W" || cmd == "KD")) {
+              continue;
+            }
+            if (cmd == "PRIORITY_ON") {
+              if (p.Length >= 2) {
+                int ms;
+                if (int.TryParse(p[1], out ms)) HostPresence.IdleMs = Math.Max(300, Math.Min(10000, ms));
+              }
+              HostPresence.Start();
+            } else if (cmd == "PRIORITY_OFF") {
+              HostPresence.Stop();
+            } else if (cmd == "RELEASE_KM") {
+              foreach (int vk in new List<int>(HeldKeys)) SendKey(vk, false);
+              HeldKeys.Clear();
+              foreach (int btn in new List<int>(HeldMouseButtons)) SendMouseButton(btn, false);
+              HeldMouseButtons.Clear();
+            } else if (cmd == "M" && p.Length >= 3) {
+              SendMouseAbsolute(int.Parse(p[1]), int.Parse(p[2]));
             } else if (cmd == "MR" && p.Length >= 3) {
               SendMouseMoveRel(int.Parse(p[1]), int.Parse(p[2]));
             } else if (cmd == "MD" && p.Length >= 2) {
@@ -524,6 +712,7 @@ namespace PulseCordNative {
           } catch {}
         }
       } finally {
+        HostPresence.Stop();
         Cleanup();
       }
     }

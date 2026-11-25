@@ -11,11 +11,11 @@ export interface ThemePreset {
 export const DEFAULT_THEME_CONFIG: ThemeConfig = {
   presetId: 'obsidian',
   accentColor: '#5865f2',
-  borderRadiusPx: 10,
+  borderRadiusPx: 8,
   glassOpacity: 1,
   wallpaperUrl: '',
   wallpaperBlurPx: 0,
-  fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+  fontFamily: "'gg sans', 'Noto Sans', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif",
   customCss: '',
   safeMode: false,
 };
@@ -23,16 +23,16 @@ export const DEFAULT_THEME_CONFIG: ThemeConfig = {
 export const THEME_PRESETS: ThemePreset[] = [
   {
     id: 'obsidian',
-    name: 'Obsidian Midnight',
-    tagline: 'Padrão moderno mais escuro estilo Discord',
+    name: 'Escuro (padrão)',
+    tagline: 'Cores do tema escuro do Discord',
     preview: ['#1e1f22', '#313338', '#5865f2'],
     config: {
       accentColor: '#5865f2',
-      borderRadiusPx: 10,
+      borderRadiusPx: 8,
       glassOpacity: 1,
       wallpaperUrl: '',
       wallpaperBlurPx: 0,
-      fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+      fontFamily: "'gg sans', 'Noto Sans', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif",
       customCss: '',
     },
   },

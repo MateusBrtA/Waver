@@ -395,6 +395,9 @@ export default function App() {
 
   // Parsec / AnyDesk Remote Control + Per-Peer Permissions + ViGEm Virtual Xbox 360 state
   const [rcControllingPeer, setRcControllingPeer] = useState<{ socketId: string; name: string } | null>(null);
+  // Parsec: host usando o PC (controle remoto pausado) — local = eu sou o host; remote = host que eu controlo
+  const [rcLocalHostBusy, setRcLocalHostBusy] = useState(false);
+  const [rcRemoteHostBusy, setRcRemoteHostBusy] = useState(false);
   const [rcControlledByPeer, setRcControlledByPeer] = useState<{ socketId: string; name: string } | null>(null);
   const [rcControlledPeers, setRcControlledPeers] = useState<RcPeerSession[]>([]);
   const [vigemStatus, setVigemStatus] = useState<string>('UNAVAILABLE');
@@ -1134,6 +1137,22 @@ export default function App() {
     setRcPendingPrompt(null);
   }, []);
 
+  // Parsec: avisa quem está controlando quando o host pega/solta o mouse e teclado físicos
+  useEffect(() => {
+    if (!window.electronAPI?.onRcHostActivity) return;
+    const unsub = window.electronAPI.onRcHostActivity(({ active }) => {
+      setRcLocalHostBusy(active);
+      for (const peer of rcControlledPeersRef.current) {
+        rtcRef.current?.sendRemoteInput(peer.socketId, { type: 'host-busy', busy: active });
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!rcControllingPeer) setRcRemoteHostBusy(false);
+  }, [rcControllingPeer]);
+
   // Forward ViGEm controller rumble from Host PC to the active remote controller!
   useEffect(() => {
     if (!window.electronAPI?.onRcRumble) return;
@@ -1190,6 +1209,10 @@ export default function App() {
         setLocalScreenLabel(st.screenLabel);
       },
       onRemoteInputReceived: (fromSocketId, event) => {
+        if (event.type === 'host-busy') {
+          if (rcControllingPeerRef.current?.socketId === fromSocketId) setRcRemoteHostBusy(Boolean(event.busy));
+          return;
+        }
         if (event.type === 'rumble') {
           if (rcControllingPeerRef.current?.socketId === fromSocketId) {
             gamepadBridgeRef.current?.playRumble(event.largeMotor ?? 0, event.smallMotor ?? 0);
@@ -3214,7 +3237,7 @@ export default function App() {
 
       {/* Automatic LAN Update Available Banner */}
       {updateKindAvailable !== 'none' && !updateBannerDismissed && updateManifest && (
-        <div className="bg-gradient-to-r from-[#5865f2] to-[#23a55a] text-white text-xs font-bold px-4 py-1.5 flex items-center justify-center gap-3 shrink-0 shadow">
+        <div className="bg-[#5865f2] text-white text-sm font-medium px-4 py-1.5 flex items-center justify-center gap-3 shrink-0">
           <Download className="w-4 h-4 shrink-0" />
           <span>
             {updateApplying && updateProgress
@@ -3557,6 +3580,17 @@ export default function App() {
             onLeaveVoice={handleLeaveVoice}
             onLeaveServer={handleLeaveServer}
             onCreateChannel={(type, categoryId) => setCreateChannelMeta({ type, categoryId })}
+            onReorderChannels={(layout) => {
+              api?.reorderChannels(layout).catch((err: Error) => showError(err.message || 'Não foi possível mover o canal.'));
+            }}
+            onReorderCategories={(ids) => {
+              api?.reorderCategories(ids).catch((err: Error) => showError(err.message || 'Não foi possível mover a categoria.'));
+            }}
+            onMoveVoiceMember={(userId, channelId) => {
+              api
+                ?.moderateVoice({ targetUserId: userId, moveToChannelId: channelId })
+                .catch((err: Error) => showError(err.message || 'Não foi possível mover a pessoa.'));
+            }}
             onEditChannel={(ch) => setEditingChannel(ch)}
             onDeleteChannel={handleDeleteChannel}
             onChannelContextMenu={(channel, e) => setChannelContextMenu({ channel, x: e.clientX, y: e.clientY })}
@@ -3637,6 +3671,8 @@ export default function App() {
               onStreamAudioVolumeChange={setStreamAudioVolume}
               clockOffsetMs={clockOffsetMs}
               rcControllingPeer={rcControllingPeer}
+              rcRemoteHostBusy={rcRemoteHostBusy}
+              rcLocalHostBusy={rcLocalHostBusy}
               rcControlledByPeer={rcControlledByPeer}
               rcControlledPeers={rcControlledPeers}
               vigemStatus={vigemStatus}

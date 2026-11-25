@@ -1,22 +1,28 @@
 @import "tailwindcss";
 
 :root {
-  --pc-bg-rail: #0b0c10;
-  --pc-bg-sidebar: #111319;
-  --pc-bg-main: #151821;
-  --pc-bg-surface: #1b1f2a;
-  --pc-bg-elevated: #222736;
-  --pc-bg-dock: #0e1015;
-  --pc-border: rgba(255, 255, 255, 0.065);
-  --pc-text: #f1f3f8;
-  --pc-text-muted: #939bb0;
+  /* Paleta do tema escuro do Discord */
+  --pc-bg-rail: #1e1f22;
+  --pc-bg-sidebar: #2b2d31;
+  --pc-bg-main: #313338;
+  --pc-bg-surface: #383a40;
+  --pc-bg-elevated: #2b2d31;
+  --pc-bg-dock: #232428;
+  --pc-bg-floating: #111214;
+  --pc-bg-hover: #35373c;
+  --pc-bg-selected: #404249;
+  --pc-border: rgba(0, 0, 0, 0.24);
+  --pc-text: #dbdee1;
+  --pc-text-header: #f2f3f5;
+  --pc-text-muted: #949ba4;
+  --pc-interactive: #b5bac1;
   --pc-accent: #5865f2;
   --pc-accent-glow: rgba(88, 101, 242, 0.35);
   --pc-success: #23a55a;
   --pc-danger: #f23f42;
-  --pc-radius: 10px;
+  --pc-radius: 8px;
   --pc-glass-opacity: 1;
-  --pc-font: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --pc-font: 'gg sans', 'Noto Sans', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --pc-wallpaper: none;
   --pc-wallpaper-blur: 0px;
 }
@@ -39,18 +45,33 @@
   }
 
   ::-webkit-scrollbar {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgba(12, 14, 20, 0.85);
+    background: #1a1b1e;
     border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(98, 109, 138, 0.55);
+    background: #111214;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  body {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: rgba(88, 101, 242, 0.45);
   }
 }
 
@@ -65,17 +86,14 @@
 /* Modern darker Discord-inspired surface classes (safe targets for AI / Linux CSS customization!) */
 .pc-titlebar {
   background-color: var(--pc-bg-rail) !important;
-  border-bottom: 1px solid var(--pc-border);
 }
 
 .pc-rail {
   background-color: color-mix(in srgb, var(--pc-bg-rail) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
-  border-right: 1px solid var(--pc-border);
 }
 
 .pc-sidebar {
   background-color: color-mix(in srgb, var(--pc-bg-sidebar) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
-  border-right: 1px solid var(--pc-border);
 }
 
 .pc-chat {
@@ -88,17 +106,15 @@
 
 .pc-member-list {
   background-color: color-mix(in srgb, var(--pc-bg-sidebar) calc(var(--pc-glass-opacity) * 100%), transparent) !important;
-  border-left: 1px solid var(--pc-border);
 }
 
 .pc-user-dock {
   background-color: var(--pc-bg-dock) !important;
-  border-top: 1px solid var(--pc-border);
 }
 
 .pc-composer {
   background-color: var(--pc-bg-surface) !important;
-  border: 1px solid var(--pc-border);
+  border: none;
   border-radius: var(--pc-radius) !important;
 }
 
@@ -108,7 +124,7 @@
 }
 
 .pc-message:hover {
-  background-color: rgba(255, 255, 255, 0.025) !important;
+  background-color: rgba(2, 2, 2, 0.06) !important;
 }
 
 .pc-modal {
@@ -134,31 +150,242 @@
   -webkit-app-region: no-drag;
 }
 
-@keyframes pulseRing {
-  0%, 100% {
-    box-shadow: 0 0 0 2px #23a55a, 0 0 12px rgba(35, 165, 90, 0.6);
-  }
-  50% {
-    box-shadow: 0 0 0 3.5px #4ade80, 0 0 22px rgba(74, 222, 128, 0.85);
-  }
+/* ===== Anéis de voz (estáticos, como no Discord: sem repintar a cada frame) ===== */
+.pc-ring-speaking {
+  box-shadow: 0 0 0 2px #23a55a, 0 0 0 4px var(--pc-ring-gap, transparent);
 }
-
+.pc-ring-soundboard {
+  box-shadow: 0 0 0 2px #f0b232;
+}
+/* compatibilidade com classes antigas */
 .speaking-ring {
-  animation: pulseRing 1.05s ease-in-out infinite;
+  box-shadow: 0 0 0 2px #23a55a;
+}
+.soundboard-ring {
+  box-shadow: 0 0 0 2px #f0b232;
 }
 
-@keyframes soundboardRing {
-  0%, 100% {
-    box-shadow: 0 0 0 2.5px #22c55e, 0 0 16px rgba(34, 197, 94, 0.75);
+/* ===== Decorações de avatar =====
+   Camada absoluta por cima do avatar. Só anima em perfis (tamanhos grandes) ou no hover:
+   em listas com muita gente ficam paradas (custo zero). Só transform/opacity -> compositor. */
+.pc-deco {
+  position: absolute;
+  inset: -12%;
+  border-radius: 9999px;
+  pointer-events: none;
+  z-index: 1;
+}
+.pc-deco::before,
+.pc-deco::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  pointer-events: none;
+}
+.pc-deco,
+.pc-deco::before,
+.pc-deco::after {
+  animation-play-state: paused !important;
+}
+.pc-deco-animated .pc-deco,
+.pc-deco-animated .pc-deco::before,
+.pc-deco-animated .pc-deco::after,
+.pc-avatar:hover .pc-deco,
+.pc-avatar:hover .pc-deco::before,
+.pc-avatar:hover .pc-deco::after {
+  animation-play-state: running !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pc-deco,
+  .pc-deco::before,
+  .pc-deco::after {
+    animation: none !important;
+  }
+}
+
+/* anel feito com máscara (só a borda aparece) */
+.pc-deco-ring-mask {
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+}
+
+@keyframes pcSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pcWave {
+  0% {
+    transform: scale(0.82);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.32);
+    opacity: 0;
+  }
+}
+@keyframes pcGlow {
+  0%,
+  100% {
+    opacity: 0.45;
   }
   50% {
-    box-shadow: 0 0 0 4px #4ade80, 0 0 26px rgba(74, 222, 128, 0.95);
+    opacity: 1;
+  }
+}
+@keyframes pcFlicker {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 0.85;
+  }
+  33% {
+    transform: scale(1.05) rotate(-4deg);
+    opacity: 1;
+  }
+  66% {
+    transform: scale(0.98) rotate(5deg);
+    opacity: 0.75;
+  }
+}
+@keyframes pcTwinkle {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
-.soundboard-ring {
-  animation: soundboardRing 0.8s ease-in-out infinite;
+/* Ondas: anel fixo + duas ondas que se expandem */
+.pc-deco-waves {
+  box-shadow: inset 0 0 0 3px #5865f2;
 }
+.pc-deco-waves::before,
+.pc-deco-waves::after {
+  border: 3px solid #00a8fc;
+  animation: pcWave 2.2s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+}
+.pc-deco-waves::after {
+  border-color: #5865f2;
+  animation-delay: 1.1s;
+}
+
+/* Aurora: gradiente cônico girando */
+.pc-deco-aurora {
+  background: conic-gradient(from 0deg, #22d3ee, #a855f7, #ec4899, #f59e0b, #22c55e, #22d3ee);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  animation: pcSpin 4s linear infinite;
+}
+.pc-deco-aurora::after {
+  inset: -6%;
+  background: conic-gradient(from 90deg, transparent, rgba(168, 85, 247, 0.55), transparent 40%);
+  filter: blur(6px);
+  animation: pcGlow 3s ease-in-out infinite;
+}
+
+/* Órbita: anel tracejado + bolinhas girando */
+.pc-deco-orbit {
+  border: 2px dashed rgba(181, 186, 193, 0.55);
+  animation: pcSpin 18s linear infinite reverse;
+}
+.pc-deco-orbit::before {
+  inset: -4px;
+  background: radial-gradient(circle at 50% 0%, #f0b232 0 5px, transparent 6px),
+    radial-gradient(circle at 50% 100%, #00a8fc 0 4px, transparent 5px);
+  animation: pcSpin 3s linear infinite;
+}
+.pc-deco-orbit::after {
+  inset: 8%;
+  background: radial-gradient(circle at 0% 50%, #eb459e 0 3px, transparent 4px);
+  animation: pcSpin 2.2s linear infinite reverse;
+}
+
+/* Neon: anel azul com brilho pulsando */
+.pc-deco-neon {
+  box-shadow: inset 0 0 0 3px #5865f2;
+}
+.pc-deco-neon::after {
+  box-shadow: 0 0 14px 3px rgba(88, 101, 242, 0.85), inset 0 0 10px rgba(88, 101, 242, 0.6);
+  animation: pcGlow 1.8s ease-in-out infinite;
+}
+
+/* Esmeralda */
+.pc-deco-emerald {
+  background: conic-gradient(#23a55a, #4ade80, #06b6d4, #23a55a);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  animation: pcSpin 6s linear infinite;
+}
+
+/* Chamas */
+.pc-deco-fire {
+  background: conic-gradient(from 180deg, #ef4444, #f97316, #facc15, #f97316, #ef4444);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  animation: pcSpin 2.4s linear infinite;
+}
+.pc-deco-fire::after {
+  inset: -10%;
+  background: radial-gradient(circle, transparent 58%, rgba(249, 115, 22, 0.55) 66%, transparent 74%);
+  animation: pcFlicker 0.9s ease-in-out infinite;
+}
+
+/* Galáxia: anel roxo + estrelas piscando */
+.pc-deco-galaxy {
+  background: conic-gradient(#6d28d9, #c084fc, #1d4ed8, #6d28d9);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  animation: pcSpin 8s linear infinite;
+}
+.pc-deco-galaxy::before {
+  inset: -14%;
+  -webkit-mask: none;
+  background: radial-gradient(circle at 12% 30%, #fff 0 1.5px, transparent 2.5px),
+    radial-gradient(circle at 88% 22%, #fff 0 2px, transparent 3px),
+    radial-gradient(circle at 80% 85%, #e9d5ff 0 1.5px, transparent 2.5px),
+    radial-gradient(circle at 20% 82%, #fff 0 1px, transparent 2px);
+  animation: pcTwinkle 1.6s ease-in-out infinite;
+}
+
+/* Coroa dourada com brilho correndo */
+.pc-deco-gold {
+  background: conic-gradient(#b45309, #facc15, #fef08a, #facc15, #b45309, #facc15, #b45309);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  animation: pcSpin 5s linear infinite;
+}
+
+/* Cyber: dois arcos girando em sentidos opostos */
+.pc-deco-cyber::before {
+  border: 3px solid transparent;
+  border-top-color: #ec4899;
+  border-bottom-color: #ec4899;
+  animation: pcSpin 2s linear infinite;
+}
+.pc-deco-cyber::after {
+  inset: 7%;
+  border: 2px solid transparent;
+  border-left-color: #22d3ee;
+  border-right-color: #22d3ee;
+  animation: pcSpin 1.4s linear infinite reverse;
+}
+
+/* Sakura: anel rosa + pétalas girando */
+.pc-deco-sakura {
+  box-shadow: inset 0 0 0 3px #f9a8d4;
+}
+.pc-deco-sakura::before {
+  inset: -8%;
+  background: radial-gradient(ellipse 5px 3px at 50% 2%, #f472b6 90%, transparent),
+    radial-gradient(ellipse 4px 3px at 96% 60%, #fbcfe8 90%, transparent),
+    radial-gradient(ellipse 4px 3px at 8% 70%, #f9a8d4 90%, transparent);
+  animation: pcSpin 7s linear infinite;
+}
+
 
 @keyframes toastSlideIn {
   from {

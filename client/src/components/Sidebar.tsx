@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BellOff,
   Camera,
@@ -49,8 +49,19 @@ import {
   VoiceParticipant,
 } from '../types';
 import { AudioQuickPopout } from './AudioQuickPopout';
+import { useIsSpeaking } from '../lib/speakingStore';
 import { Avatar } from './Avatar';
+import { PanelResizer, usePersistentWidth } from './PanelResizer';
 import { SettingsTabId } from './SettingsModal';
+
+
+/** Nome do participante na lista de voz: fica branco enquanto a pessoa fala (lido do speakingStore) */
+const SpeakingName: React.FC<{ socketId: string; name: string }> = React.memo(({ socketId, name }) => {
+  const speaking = useIsSpeaking(socketId);
+  return (
+    <span className={`text-[14px] truncate ${speaking ? 'text-[#f2f3f5]' : 'text-[#949ba4]'}`}>{name}</span>
+  );
+});
 
 interface SidebarProps {
   server: ServerInfo | null;
@@ -99,6 +110,11 @@ interface SidebarProps {
   onLeaveVoice: () => void;
   onLeaveServer?: () => void;
   onCreateChannel: (type: 'text' | 'voice', categoryId?: string | null) => void;
+  /** arrastar e soltar: nova ordem/categoria dos canais */
+  onReorderChannels?: (layout: Array<{ id: string; categoryId: string | null; position: number }>) => void;
+  onReorderCategories?: (ids: string[]) => void;
+  /** arrastar alguém para outro canal de voz */
+  onMoveVoiceMember?: (userId: string, channelId: string) => void;
   onEditChannel?: (channel: Channel) => void;
   onDeleteChannel: (channel: Channel) => void;
   onChannelContextMenu?: (channel: Channel, e: React.MouseEvent) => void;
@@ -182,6 +198,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onLeaveVoice,
   onLeaveServer,
   onCreateChannel,
+  onReorderChannels,
+  onReorderCategories,
+  onMoveVoiceMember,
   onEditChannel,
   onDeleteChannel,
   onChannelContextMenu,
@@ -199,6 +218,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onUserContextMenu,
   onOpenSettings,
 }) => {
+  const [sidebarWidth, setSidebarWidth] = usePersistentWidth('pc.sidebarWidth', 240, 200, 440);
   const [textOpen, setTextOpen] = useState(true);
   const [voiceOpen, setVoiceOpen] = useState(true);
   const [collapsedCats, setCollapsedCats] = useState<Set<string>>(() => new Set());
@@ -206,6 +226,37 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [audioPopout, setAudioPopout] = useState<'none' | 'mic' | 'output'>('none');
 
   const canManageChannels = Boolean(server) && (Boolean(permissions?.manageChannels) || user.role === 'host');
+  const canMoveMembers = Boolean(server) && (Boolean(permissions?.moveMembers) || user.role === 'host');
+
+  // ----- arrastar e soltar (canais, categorias e pessoas), estilo Discord
+  type DragItem =
+    | { kind: 'channel'; id: string }
+    | { kind: 'category'; id: string }
+    | { kind: 'member'; id: string; userId: string; fromChannelId: string };
+  type DropTarget =
+    | { kind: 'channel'; id: string; pos: 'before' | 'after' }
+    | { kind: 'voice'; id: string }
+    | { kind: 'category'; id: string | null; pos: 'into' | 'before' | 'after' };
+  const [dragItem, setDragItemState] = useState<DragItem | null>(null);
+  // ref: o drop pode chegar antes do React re-renderizar o estado do dragstart/dragover
+  const dragItemRef = React.useRef<DragItem | null>(null);
+  const setDragItem = (d: DragItem | null) => {
+    dragItemRef.current = d;
+    setDragItemState(d);
+  };
+  const halfOf = (e: React.DragEvent): 'before' | 'after' => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    return e.clientY < r.top + r.height / 2 ? 'before' : 'after';
+  };
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [orderOverride, setOrderOverride] = useState<Record<string, { categoryId: string | null; position: number }>>({});
+  const [categoryOrderOverride, setCategoryOrderOverride] = useState<string[] | null>(null);
+  useEffect(() => setOrderOverride({}), [channels]);
+  useEffect(() => setCategoryOrderOverride(null), [categories]);
+  const endDrag = () => {
+    setDragItem(null);
+    setDropTarget(null);
+  };
   const canCreate = Boolean(server) && (canManageChannels || server?.allowMembersCreateChannels !== false);
 
   const isChannelVisibleInSidebar = (ch: Channel) => {
@@ -215,13 +266,158 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return false;
   };
 
-  const visibleChannels = channels.filter(isChannelVisibleInSidebar);
+  const visibleChannels = useMemo(() => {
+    const indexed = channels.map((c, i) => {
+      const o = orderOverride[c.id];
+      return { ch: o ? { ...c, categoryId: o.categoryId, position: o.position } : c, i };
+    });
+    indexed.sort((a, b) => (a.ch.position ?? a.i) - (b.ch.position ?? b.i) || a.i - b.i);
+    return indexed.map((x) => x.ch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channels, orderOverride]).filter(isChannelVisibleInSidebar);
+  /** canais de um grupo na ordem de exibição (texto primeiro, depois voz, como no Discord) */
+  const channelsInGroup = (catId: string | null, list: Channel[] = visibleChannels) => {
+    const g = list.filter((c) => (c.categoryId || null) === catId);
+    return [...g.filter((c) => c.type === 'text'), ...g.filter((c) => c.type !== 'text')];
+  };
+  const moveChannel = (draggedId: string, targetCatId: string | null, beforeId: string | null) => {
+    const dragged = visibleChannels.find((c) => c.id === draggedId);
+    if (!dragged) return;
+    const srcCat = dragged.categoryId || null;
+    const group = channelsInGroup(targetCatId).filter((c) => c.id !== draggedId);
+    let idx = beforeId ? group.findIndex((c) => c.id === beforeId) : group.length;
+    if (idx < 0) idx = group.length;
+    group.splice(idx, 0, { ...dragged, categoryId: targetCatId });
+    const layout = group.map((c, i) => ({ id: c.id, categoryId: targetCatId, position: i }));
+    if (srcCat !== targetCatId) {
+      channelsInGroup(srcCat)
+        .filter((c) => c.id !== draggedId)
+        .forEach((c, i) => layout.push({ id: c.id, categoryId: srcCat, position: i }));
+    }
+    const prevPos = new Map(visibleChannels.map((c) => [c.id, `${c.categoryId || ''}|${c.position}`]));
+    if (layout.every((l) => prevPos.get(l.id) === `${l.categoryId || ''}|${l.position}`)) return;
+    setOrderOverride((prev) => {
+      const next = { ...prev };
+      for (const l of layout) next[l.id] = { categoryId: l.categoryId, position: l.position };
+      return next;
+    });
+    onReorderChannels?.(layout);
+  };
+  const dropOnChannel = (target: Channel, pos: 'before' | 'after') => {
+    const d = dragItemRef.current;
+    if (!d || d.kind !== 'channel' || d.id === target.id) return;
+    const catId = target.categoryId || null;
+    const group = channelsInGroup(catId).filter((c) => c.id !== d.id);
+    const ti = group.findIndex((c) => c.id === target.id);
+    const beforeId = pos === 'before' ? target.id : group[ti + 1]?.id || null;
+    moveChannel(d.id, catId, beforeId);
+  };
+  const channelDragProps = (ch: Channel) =>
+    canManageChannels && onReorderChannels
+      ? {
+          draggable: true,
+          onDragStart: (e: React.DragEvent) => {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', ch.id);
+            setDragItem({ kind: 'channel', id: ch.id });
+          },
+          onDragEnd: endDrag,
+        }
+      : {};
+  const channelDropProps = (ch: Channel) => ({
+    onDragOver: (e: React.DragEvent) => {
+      const dragItem = dragItemRef.current;
+      if (!dragItem) return;
+      if (dragItem.kind === 'member') {
+        if (ch.type !== 'voice' || dragItem.fromChannelId === ch.id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        if (dropTarget?.kind !== 'voice' || dropTarget.id !== ch.id) setDropTarget({ kind: 'voice', id: ch.id });
+        return;
+      }
+      if (dragItem.kind !== 'channel' || dragItem.id === ch.id) return;
+      e.preventDefault();
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const pos = e.clientY < r.top + r.height / 2 ? 'before' : 'after';
+      if (dropTarget?.kind !== 'channel' || dropTarget.id !== ch.id || dropTarget.pos !== pos) {
+        setDropTarget({ kind: 'channel', id: ch.id, pos });
+      }
+    },
+    onDrop: (e: React.DragEvent) => {
+      const d = dragItemRef.current;
+      if (!d) return;
+      e.preventDefault();
+      if (d.kind === 'member') {
+        if (ch.type === 'voice' && d.fromChannelId !== ch.id) {
+          if (d.userId === user.id) onJoinOrFocusVoiceChannel(ch.id);
+          else onMoveVoiceMember?.(d.userId, ch.id);
+        }
+      } else if (d.kind === 'channel' && d.id !== ch.id) {
+        dropOnChannel(ch, halfOf(e));
+      }
+      endDrag();
+    },
+  });
+  const dropLine = (ch: Channel) =>
+    dropTarget?.kind === 'channel' && dropTarget.id === ch.id ? (
+      <div
+        className={`absolute left-1 right-1 h-[2px] rounded bg-[#5865f2] pointer-events-none ${
+          dropTarget.pos === 'before' ? '-top-[1px]' : '-bottom-[1px]'
+        }`}
+      />
+    ) : null;
+  const categoryHeaderDnd = (catId: string | null) => ({
+    draggable: Boolean(catId && canManageChannels && onReorderCategories),
+    onDragStart: (e: React.DragEvent) => {
+      if (!catId) return;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', catId);
+      setDragItem({ kind: 'category', id: catId });
+    },
+    onDragEnd: endDrag,
+    onDragOver: (e: React.DragEvent) => {
+      const dragItem = dragItemRef.current;
+      if (!dragItem) return;
+      if (dragItem.kind === 'channel') {
+        e.preventDefault();
+        if (dropTarget?.kind !== 'category' || dropTarget.id !== catId || dropTarget.pos !== 'into') {
+          setDropTarget({ kind: 'category', id: catId, pos: 'into' });
+        }
+      } else if (dragItem.kind === 'category' && catId && dragItem.id !== catId) {
+        e.preventDefault();
+        const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const pos = e.clientY < r.top + r.height / 2 ? 'before' : 'after';
+        if (dropTarget?.kind !== 'category' || dropTarget.id !== catId || dropTarget.pos !== pos) {
+          setDropTarget({ kind: 'category', id: catId, pos });
+        }
+      }
+    },
+    onDrop: (e: React.DragEvent) => {
+      const d = dragItemRef.current;
+      if (!d) return;
+      e.preventDefault();
+      if (d.kind === 'channel') {
+        moveChannel(d.id, catId, null);
+      } else if (d.kind === 'category' && catId && d.id !== catId) {
+        const ids = orderedCategories.map((c) => c.id).filter((id) => id !== d.id);
+        let idx = ids.indexOf(catId);
+        if (halfOf(e) === 'after') idx += 1;
+        ids.splice(idx, 0, d.id);
+        setCategoryOrderOverride(ids);
+        onReorderCategories?.(ids);
+      }
+      endDrag();
+    },
+  });
   const pinnedOrFavChannels = visibleChannels.filter(
     (c) => favoriteChannelIds?.has(c.id) || pinnedChannelIds?.has(c.id)
   );
   const uncategorizedText = visibleChannels.filter((c) => c.type === 'text' && !c.categoryId);
   const uncategorizedVoice = visibleChannels.filter((c) => c.type === 'voice' && !c.categoryId);
   const sortedCategories = [...categories].sort((a, b) => (a.position || 0) - (b.position || 0));
+  const orderedCategories = categoryOrderOverride
+    ? (categoryOrderOverride.map((id) => categories.find((c) => c.id === id)).filter(Boolean) as ChannelCategory[])
+    : sortedCategories;
 
   const toggleCategory = (catId: string) => {
     setCollapsedCats((prev) => {
@@ -255,7 +451,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   return (
-    <aside className="w-60 shrink-0 bg-[#2b2d31] pc-sidebar flex flex-col select-none h-full relative">
+    <aside className="shrink-0 bg-[#2b2d31] pc-sidebar flex flex-col select-none h-full relative" style={{ width: sidebarWidth }}>
+      <PanelResizer side="right" width={sidebarWidth} defaultWidth={240} onResize={setSidebarWidth} />
       {/* Header */}
       {navArea === 'dms' || !server ? (
         <div className="h-12 px-4 flex items-center justify-between border-b border-[#1f2023] shadow-[0_1px_0_rgba(4,4,5,0.2)] shrink-0">
@@ -282,69 +479,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </button>
       )}
 
-      {/* Automatic Host / Connected Client Status Bar + Trello Shortcut (Only inside a Server) */}
-      {navArea === 'server' && server && (
-        <div className="px-2.5 pt-2.5 pb-1 space-y-1.5">
-          <div
-            onClick={isHosting ? onOpenModeSwitcher : undefined}
-            className={`rounded-md px-2.5 py-2 border transition flex items-center justify-between gap-1.5 ${
-              isHosting
-                ? 'bg-[#23a55a]/12 hover:bg-[#23a55a]/20 border-[#23a55a]/35 cursor-pointer'
-                : 'bg-[#1e1f22]/70 border-[#3f4147]/60'
-            }`}
+      {/* Host: linha discreta com o endereço para convidar (o resto fica no menu do servidor) */}
+      {navArea === 'server' && server && isHosting && primaryShareUrl && (
+        <div className="px-2 pt-2">
+          <button
+            type="button"
+            onClick={handleCopyShareUrl}
+            className="w-full h-8 px-2 rounded-[4px] flex items-center gap-2 text-[#949ba4] hover:bg-[#35373c] hover:text-[#dbdee1] cursor-pointer transition"
+            title="Copiar endereço para convidar amigos"
           >
-            <div className="flex items-center gap-2 min-w-0">
-              {isHosting ? (
-                <Server className="w-3.5 h-3.5 text-[#23a55a] shrink-0" />
-              ) : (
-                <UserCheck className="w-3.5 h-3.5 text-[#5865f2] shrink-0" />
-              )}
-              <div className="min-w-0">
-                <div className={`text-[11px] font-bold ${isHosting ? 'text-[#4ade80]' : 'text-[#dbdee1]'}`}>
-                  {isHosting ? 'Hospedando Servidor' : 'Conectado no Servidor'}
-                </div>
-                <div className="text-[10px] text-[#949ba4] truncate font-mono">
-                  {isHosting && primaryShareUrl
-                    ? primaryShareUrl.replace(/^https?:\/\//, '')
-                    : serverUrl.replace(/^https?:\/\//, '')}
-                </div>
-              </div>
-            </div>
-
-            {isHosting && primaryShareUrl ? (
-              <button
-                type="button"
-                onClick={handleCopyShareUrl}
-                className="p-1 rounded bg-[#1e1f22] hover:bg-[#23a55a] text-[#dbdee1] hover:text-white transition cursor-pointer shrink-0"
-                title="Copiar IPv4 do servidor"
-              >
-                {copiedIp ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-              </button>
-            ) : onLeaveServer ? (
-              <button
-                type="button"
-                onClick={onLeaveServer}
-                className="p-1 rounded bg-[#1e1f22] hover:bg-[#da373c] text-[#b5bac1] hover:text-white transition cursor-pointer shrink-0"
-                title="Sair deste servidor"
-              >
-                <LogOut className="w-3 h-3" />
-              </button>
-            ) : null}
-          </div>
-
-          {onOpenServerTrello && permissions?.useTrello !== false && (
-            <button
-              type="button"
-              onClick={onOpenServerTrello}
-              className="w-full px-2.5 py-1.5 rounded-md bg-[#181c26] hover:bg-[#5865f2]/20 border border-[#5865f2]/30 text-xs font-semibold text-[#dbdee1] hover:text-white flex items-center justify-between transition cursor-pointer"
-            >
-              <span className="flex items-center gap-2">
-                <KanbanSquare className="w-3.5 h-3.5 text-[#5865f2]" />
-                Trello & Projetos
-              </span>
-              <span className="text-[10px] text-[#949ba4]">Abrir</span>
-            </button>
-          )}
+            <Server className="w-[18px] h-[18px] text-[#23a55a] shrink-0" />
+            <span className="text-[14px] font-medium truncate">Convidar: {primaryShareUrl.replace(/^https?:\/\//, '')}</span>
+            <span className="ml-auto shrink-0">{copiedIp ? <Check className="w-4 h-4 text-[#23a55a]" /> : <Copy className="w-4 h-4" />}</span>
+          </button>
+          <div className="h-px bg-[#3f4147] mx-1 mt-2" />
         </div>
       )}
 
@@ -386,7 +534,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     }`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#5865f2] to-[#eb459e] flex items-center justify-center text-white text-xs font-bold shrink-0 overflow-hidden">
+                      <div className="w-8 h-8 rounded-full bg-[#5865f2] flex items-center justify-center text-white text-xs font-bold shrink-0 overflow-hidden">
                         {gIcon ? <img src={gIcon} alt={g.name} className="w-full h-full object-cover" /> : <Users className="w-4 h-4" />}
                       </div>
                       <div className="min-w-0">
@@ -614,6 +762,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   return (
                     <div
                       key={ch.id}
+                      {...channelDragProps(ch)}
+                      {...channelDropProps(ch)}
                       onClick={() => onSelectTextChannel(ch.id)}
                       onContextMenu={(e) => {
                         if (!onChannelContextMenu) return;
@@ -621,7 +771,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         e.stopPropagation();
                         onChannelContextMenu(ch, e);
                       }}
-                      className={`group flex items-center justify-between h-8 px-2 rounded-[4px] cursor-pointer transition ${
+                      className={`relative group flex items-center justify-between h-8 px-2 rounded-[4px] cursor-pointer transition ${
+                        dragItem?.kind === 'channel' && dragItem.id === ch.id ? 'opacity-40' : ''
+                      } ${
                         selected
                           ? 'bg-[#404249] text-white font-medium'
                           : isMuted
@@ -629,6 +781,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           : 'text-[#949ba4] hover:bg-[#35373c] hover:text-[#dbdee1]'
                       }`}
                     >
+                      {dropLine(ch)}
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className="relative shrink-0">
                           <Hash className="w-[18px] h-[18px] text-[#80848e]" />
@@ -682,6 +835,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 return (
                   <div key={ch.id}>
                     <div
+                      {...channelDragProps(ch)}
+                      {...channelDropProps(ch)}
                       onClick={() => onJoinOrFocusVoiceChannel(ch.id)}
                       onContextMenu={(e) => {
                         if (!onChannelContextMenu) return;
@@ -689,7 +844,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         e.stopPropagation();
                         onChannelContextMenu(ch, e);
                       }}
-                      className={`group flex items-center justify-between h-8 px-2 rounded-[4px] cursor-pointer transition ${
+                      className={`relative group flex items-center justify-between h-8 px-2 rounded-[4px] cursor-pointer transition ${
+                        dragItem?.kind === 'channel' && dragItem.id === ch.id ? 'opacity-40' : ''
+                      } ${
+                        dropTarget?.kind === 'voice' && dropTarget.id === ch.id ? 'ring-2 ring-inset ring-[#5865f2] bg-[#5865f2]/15 ' : ''
+                      }${
                         isFocused
                           ? 'bg-[#404249] text-white font-medium'
                           : isJoined
@@ -699,6 +858,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           : 'text-[#949ba4] hover:bg-[#35373c] hover:text-[#dbdee1]'
                       }`}
                     >
+                      {dropLine(ch)}
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className="relative shrink-0">
                           <Volume2
@@ -749,11 +909,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     {participants.length > 0 && (
                       <div className="ml-6 mt-0.5 mb-1 space-y-0.5">
                         {participants.map((p) => {
-                          const isSpeaking = speakingSocketIds.has(p.socketId);
                           const memberObj = members.find((m) => m.id === p.userId);
                           return (
                             <div
                               key={p.socketId}
+                              draggable={p.userId === user.id || (canMoveMembers && Boolean(onMoveVoiceMember))}
+                              onDragStart={(e) => {
+                                e.stopPropagation();
+                                e.dataTransfer.effectAllowed = 'move';
+                                e.dataTransfer.setData('text/plain', p.userId);
+                                setDragItem({ kind: 'member', id: p.socketId, userId: p.userId, fromChannelId: ch.id });
+                              }}
+                              onDragEnd={endDrag}
+                              title={
+                                p.userId === user.id
+                                  ? 'Arraste para outro canal de voz para trocar de sala'
+                                  : canMoveMembers
+                                  ? 'Arraste para outro canal de voz para mover'
+                                  : undefined
+                              }
                               onClick={(e) => {
                                 if (memberObj) onUserClick(memberObj, e);
                                 else onJoinOrFocusVoiceChannel(ch.id);
@@ -768,7 +942,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                   });
                                 }
                               }}
-                              className="flex items-center justify-between px-1.5 py-1 rounded-[4px] hover:bg-[#35373c]/70 cursor-pointer"
+                              className={`flex items-center justify-between px-1.5 py-1 rounded-[4px] hover:bg-[#35373c]/70 cursor-pointer ${
+                                dragItem?.kind === 'member' && dragItem.id === p.socketId ? 'opacity-40' : ''
+                              }`}
                             >
                               <div className="flex items-center gap-2 min-w-0">
                                 <Avatar
@@ -778,16 +954,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                   decoration={p.avatarDecoration}
                                   serverUrl={serverUrl}
                                   size="xs"
-                                  speaking={isSpeaking}
+                                  speakingId={p.socketId}
                                   soundboardActive={Boolean(soundboardActiveUserIds?.has(p.userId))}
                                 />
-                                <span
-                                  className={`text-[13px] truncate ${
-                                    isSpeaking ? 'text-white font-medium' : 'text-[#949ba4]'
-                                  }`}
-                                >
-                                  {p.displayName}
-                                </span>
+                                <SpeakingName socketId={p.socketId} name={p.displayName} />
                               </div>
                               <div className="flex items-center gap-1 shrink-0">
                                 {p.screenSharing && (
@@ -828,9 +998,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                   )}
 
+                  {/* Canais sem categoria: no Discord ficam no topo, sem cabeçalho */}
+                  {orderedCategories.length > 0 ? (
+                    <div
+                      className={`space-y-[2px] ${
+                        dragItem?.kind === 'channel' && uncategorizedText.length + uncategorizedVoice.length === 0
+                          ? `min-h-8 rounded-[4px] border border-dashed ${
+                              dropTarget?.kind === 'category' && dropTarget.id === null ? 'border-[#5865f2] bg-[#5865f2]/10' : 'border-[#4e5058]'
+                            } flex items-center justify-center`
+                          : ''
+                      }`}
+                      {...(uncategorizedText.length + uncategorizedVoice.length === 0 ? categoryHeaderDnd(null) : {})}
+                    >
+                      {dragItem?.kind === 'channel' && uncategorizedText.length + uncategorizedVoice.length === 0 ? (
+                        <span className="text-[11px] text-[#949ba4] pointer-events-none">Soltar aqui: sem categoria</span>
+                      ) : (
+                        channelsInGroup(null).map(renderChannelItem)
+                      )}
+                    </div>
+                  ) : (
+                    <>
                   {/* TEXT CHANNELS (Uncategorized) */}
                   <div>
-                    <div className="flex items-center justify-between px-1 mb-1">
+                    <div className="flex items-center justify-between px-1 mb-1" {...categoryHeaderDnd(null)}>
                       <button
                         type="button"
                         onClick={() => setTextOpen((v) => !v)}
@@ -855,7 +1045,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                   {/* VOICE CHANNELS (Uncategorized) */}
                   <div>
-                    <div className="flex items-center justify-between px-1 mb-1">
+                    <div className="flex items-center justify-between px-1 mb-1" {...categoryHeaderDnd(null)}>
                       <button
                         type="button"
                         onClick={() => setVoiceOpen((v) => !v)}
@@ -878,13 +1068,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     {voiceOpen && <div className="space-y-0.5">{uncategorizedVoice.map(renderChannelItem)}</div>}
                   </div>
 
+                    </>
+                  )}
+
                   {/* CATEGORIES */}
-                  {sortedCategories.map((cat) => {
-                    const catChannels = visibleChannels.filter((c) => c.categoryId === cat.id);
+                  {orderedCategories.map((cat) => {
+                    const catChannels = channelsInGroup(cat.id);
+                    const catDrop = dropTarget?.kind === 'category' && dropTarget.id === cat.id ? dropTarget.pos : null;
                     const isCollapsed = collapsedCats.has(cat.id);
                     return (
-                      <div key={cat.id}>
-                        <div className="flex items-center justify-between px-1 mb-1">
+                      <div key={cat.id} className={dragItem?.kind === 'category' && dragItem.id === cat.id ? 'opacity-40' : ''}>
+                        <div
+                          {...categoryHeaderDnd(cat.id)}
+                          className={`relative flex items-center justify-between px-1 mb-1 rounded-[4px] ${
+                            catDrop === 'into' ? 'bg-[#5865f2]/15 ring-1 ring-inset ring-[#5865f2]' : ''
+                          }`}
+                        >
+                          {catDrop === 'before' && <div className="absolute -top-1.5 left-0 right-0 h-[2px] rounded bg-[#5865f2]" />}
+                          {catDrop === 'after' && <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded bg-[#5865f2]" />}
                           <button
                             type="button"
                             onClick={() => toggleCategory(cat.id)}
@@ -906,11 +1107,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </div>
                         {!isCollapsed && (
                           <div className="space-y-0.5">
-                            {catChannels.length === 0 ? (
-                              <div className="px-3 py-1 text-[11px] text-[#6d6f78] italic">Vazio</div>
-                            ) : (
-                              catChannels.map(renderChannelItem)
-                            )}
+                            {catChannels.map(renderChannelItem)}
                           </div>
                         )}
                       </div>
@@ -975,7 +1172,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               onClick={() => onOpenVoiceDrawer('video')}
-              className="h-8 rounded-[4px] bg-[#2b2d31] hover:bg-[#404249] text-[#fda4af] flex items-center justify-center transition cursor-pointer"
+              className="h-8 rounded-[4px] bg-[#2b2d31] hover:bg-[#404249] text-[#dbdee1] flex items-center justify-center transition cursor-pointer"
               title="Tocador de Vídeos"
             >
               <Clapperboard className="w-4 h-4" />
@@ -983,7 +1180,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               onClick={() => onOpenVoiceDrawer('soundboard')}
-              className="h-8 rounded-[4px] bg-[#2b2d31] hover:bg-[#404249] text-[#f0b232] flex items-center justify-center transition cursor-pointer"
+              className="h-8 rounded-[4px] bg-[#2b2d31] hover:bg-[#404249] text-[#dbdee1] flex items-center justify-center transition cursor-pointer"
               title="Soundboard"
             >
               <Zap className="w-4 h-4" />
@@ -991,7 +1188,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               onClick={() => onOpenVoiceDrawer('music')}
-              className="h-8 rounded-[4px] bg-[#2b2d31] hover:bg-[#404249] text-[#4ade80] flex items-center justify-center transition cursor-pointer"
+              className="h-8 rounded-[4px] bg-[#2b2d31] hover:bg-[#404249] text-[#dbdee1] flex items-center justify-center transition cursor-pointer"
               title="Tocador de Músicas"
             >
               <Music className="w-4 h-4" />
@@ -1017,7 +1214,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             size="sm"
             online={user.statusType !== 'invisible'}
             statusType={user.statusType}
-            speaking={speakingSocketIds.has(selfSocketId)}
+            speakingId={selfSocketId}
             soundboardActive={Boolean(soundboardActiveUserIds?.has(user.id))}
             borderBg="#232428"
           />

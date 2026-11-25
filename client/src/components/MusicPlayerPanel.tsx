@@ -150,7 +150,7 @@ export const MusicPlayerPanel: React.FC<MusicPlayerPanelProps> = ({
   };
 
   return (
-    <div className="w-80 sm:w-88 shrink-0 bg-[#2b2d31] border-l border-white/10 flex flex-col h-full">
+    <div className="w-full min-w-0 bg-[#2b2d31] flex flex-col h-full">
       {/* Header */}
       <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -210,7 +210,7 @@ export const MusicPlayerPanel: React.FC<MusicPlayerPanelProps> = ({
       </form>
 
       {/* Now Playing Audio Card with Cover Artwork */}
-      <div className="p-3.5 bg-gradient-to-b from-[#2b2d31] to-[#2b2d31] border-b border-white/10 space-y-2.5">
+      <div className="p-3.5 bg-[#2b2d31] border-b border-black/25 space-y-2.5">
         <div className="flex items-center gap-3">
           {currentTrack?.thumbnail ? (
             <img

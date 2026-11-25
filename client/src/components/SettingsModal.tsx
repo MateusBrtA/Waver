@@ -250,7 +250,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             <UserIcon className="w-4 h-4" />
-            Meu Perfil & Nitro
+            Meu Perfil
           </button>
           <button
             type="button"
@@ -375,7 +375,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex-1 flex flex-col min-w-0">
           <div className="px-6 py-4 border-b border-[#1e1f22] flex items-center justify-between">
             <h3 className="text-base font-bold text-white">
-              {tab === 'profile' && 'Perfil Global & Personalização Nitro Grátis'}
+              {tab === 'profile' && 'Perfil'}
               {tab === 'audio' && 'Voz e Vídeo (Estilo Discord)'}
               {tab === 'appearance' && 'Aparência, Temas Linux & Estúdio CSS com IA'}
               {tab === 'storage' && 'Armazenamento, Criptografia e Limite de 2 GB'}
@@ -407,7 +407,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="bg-[#1e1f22] rounded-lg p-5 space-y-3 border border-[#35373c]">
                 <div className="flex items-center gap-2 text-sm font-bold text-white">
                   <Sparkles className="w-5 h-5 text-[#eb459e]" />
-                  Editor Completo de Perfil & PulseNitro Grátis
+                  Editar perfil
                 </div>
                 <p className="text-[#b5bac1] leading-relaxed">
                   Altere sua foto de perfil, capa/banner, decoração animada do avatar, estilo do nome, status em balão,

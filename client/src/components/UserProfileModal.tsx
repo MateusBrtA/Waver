@@ -20,6 +20,7 @@ import {
 import { ApiClient, resolveMediaUrl } from '../lib/api';
 import { GlobalProfile, PresenceStatus, Role, User, UserConnection } from '../types';
 import { AVATAR_DECORATIONS, Avatar, NAME_STYLES } from './Avatar';
+import { CONNECTION_PLATFORM_OPTIONS, ConnectionCard } from './ConnectionBadge';
 
 const BANNER_COLORS = ['#5865F2', '#7c3aed', '#23a55a', '#db2777', '#ea580c', '#0284c7', '#dc2626', '#1e1f22'];
 const STATUS_OPTIONS: Array<{ value: PresenceStatus; label: string; dot: string }> = [
@@ -184,7 +185,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
   const addConnection = () => {
     if (!newConnHandle.trim()) return;
-    setConnections((prev) => [...prev.slice(0, 5), { platform: newConnPlatform, handle: newConnHandle.trim() }]);
+    setConnections((prev) => [...prev.slice(0, 9), { platform: newConnPlatform, handle: newConnHandle.trim() }]);
     setNewConnHandle('');
   };
 
@@ -262,14 +263,11 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 )}
               </div>
 
-              {/* Badges Row */}
-              <div className="inline-flex items-center gap-1.5 mt-2.5 bg-[#1e1f22] border border-[#2b2d31] px-2.5 py-1 rounded-md">
-                {user.role === 'host' && contextScope === 'server' && <Crown className="w-3.5 h-3.5 text-[#f0b232]" />}
-                <Sparkles className="w-3.5 h-3.5 text-[#eb459e]" />
-                <Gamepad2 className="w-3.5 h-3.5 text-[#5865f2]" />
-                <Zap className="w-3.5 h-3.5 text-[#23a55a]" />
-                <span className="text-[10px] font-bold text-[#eb459e] ml-0.5">PulseNitro</span>
-              </div>
+              {user.role === 'host' && contextScope === 'server' && (
+                <div className="inline-flex items-center gap-1 mt-2 bg-[#111214] px-1.5 py-1 rounded-md" title="Dono do servidor">
+                  <Crown className="w-4 h-4 text-[#f0b232]" />
+                </div>
+              )}
             </div>
 
             {/* Action Buttons */}
@@ -280,7 +278,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 className="w-full py-2 bg-[#5865f2] hover:bg-[#4752c4] text-white text-xs font-bold rounded-md flex items-center justify-center gap-1.5 transition cursor-pointer"
               >
                 <Edit3 className="w-3.5 h-3.5" />
-                {rightTab === 'edit' ? 'Ver Atividade' : 'Editar Perfil & Nitro'}
+                {rightTab === 'edit' ? 'Ver perfil' : 'Editar perfil'}
               </button>
             ) : (
               <div className="flex gap-2">
@@ -340,22 +338,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               </div>
             )}
 
-            {/* Conexões (Print 2 bottom left!) */}
-            {(user.connections || []).length > 0 && (
+            {/* Conexões: ícone da rede + nome da conta (como no Discord) */}
+            {(rightTab === 'edit' ? connections : user.connections || []).length > 0 && (
               <div className="space-y-1.5">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-[#949ba4]">Conexões</div>
-                <div className="space-y-1.5">
-                  {(user.connections || []).map((c, idx) => (
-                    <div
-                      key={`${c.platform}-${idx}`}
-                      className="bg-[#1e1f22] border border-[#2b2d31] rounded-lg px-3 py-2 flex items-center justify-between text-xs"
-                    >
-                      <span className="font-bold text-white flex items-center gap-2">
-                        <Globe className="w-3.5 h-3.5 text-[#5865f2]" />
-                        {c.handle}
-                      </span>
-                      <span className="text-[10px] text-[#949ba4] uppercase font-bold">{c.platform}</span>
-                    </div>
+                <div className="text-xs font-bold uppercase text-[#b5bac1]">Conexões</div>
+                <div className="space-y-2">
+                  {(rightTab === 'edit' ? connections : user.connections || []).map((c, idx) => (
+                    <ConnectionCard key={`${c.platform}-${idx}`} connection={c} />
                   ))}
                 </div>
               </div>
@@ -392,8 +381,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   rightTab === 'edit' ? 'border-[#eb459e] text-white' : 'border-transparent text-[#eb459e]/80 hover:text-[#eb459e]'
                 }`}
               >
-                <Sparkles className="w-3.5 h-3.5" />
-                Personalizar (Nitro Grátis)
+                Editar perfil
               </button>
             )}
           </div>
@@ -491,7 +479,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               </div>
             )}
 
-            {/* EDIT PROFILE & NITRO-FREE CUSTOMIZATION TAB */}
+            {/* EDITAR PERFIL */}
             {rightTab === 'edit' && isSelf && (
               <form onSubmit={handleSaveEdit} className="space-y-4 text-xs">
                 {msg && (
@@ -517,7 +505,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   </label>
                   <label className="flex items-center justify-center gap-2 py-2.5 px-3 bg-[#eb459e] hover:bg-[#d63384] text-white font-bold rounded-lg cursor-pointer transition">
                     <Upload className="w-4 h-4" />
-                    Capa / Banner (Nitro)
+                    Banner
                     <input
                       type="file"
                       accept="image/*"
@@ -620,12 +608,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   />
                 </div>
 
-                {/* Nitro Free: Decorations, Banner Color & Name Style */}
-                <div className="bg-[#232428] p-3.5 rounded-lg border border-[#eb459e]/30 space-y-3">
-                  <div className="font-bold text-[#f472b6] flex items-center gap-1.5">
-                    <Sparkles className="w-4 h-4" />
-                    Decorações de Avatar, Estilo de Nome e Cor do Banner (Grátis!)
-                  </div>
+                {/* Decorações, estilo do nome e cor do banner */}
+                <div className="bg-[#2b2d31] p-3.5 rounded-lg space-y-3">
+                  <div className="text-xs font-bold uppercase text-[#b5bac1]">Decoração e estilo</div>
 
                   <div>
                     <div className="text-[11px] text-[#949ba4] mb-1.5">Decoração do Avatar</div>
@@ -635,14 +620,23 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                           key={key}
                           type="button"
                           onClick={() => setAvatarDecoration(key)}
-                          className={`px-2.5 py-1 rounded-md font-semibold cursor-pointer border ${
+                          title={d.label}
+                          className={`w-[76px] flex flex-col items-center gap-1.5 pt-2.5 pb-1.5 rounded-md cursor-pointer border-2 transition ${
                             avatarDecoration === key
-                              ? 'bg-[#5865f2] border-[#5865f2] text-white'
-                              : 'bg-[#1e1f22] border-[#35373c] text-[#b5bac1]'
+                              ? 'bg-[#404249] border-[#5865f2]'
+                              : 'bg-[#1e1f22] border-transparent hover:bg-[#35373c]'
                           }`}
                         >
-                          {d.badge ? `${d.badge} ` : ''}
-                          {d.label}
+                          <Avatar
+                            name={displayName || user.displayName}
+                            avatarUrl={user.avatarUrl}
+                            color={user.avatarColor}
+                            decoration={key}
+                            serverUrl={serverUrl}
+                            size="md"
+                            animateDecoration={avatarDecoration === key}
+                          />
+                          <span className="text-[11px] text-[#dbdee1] truncate max-w-full px-1">{d.label}</span>
                         </button>
                       ))}
                     </div>
@@ -686,28 +680,33 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   </div>
                 </div>
 
-                {/* Connections (Steam, Twitch, Xbox, GitHub) */}
-                <div className="bg-[#232428] p-3.5 rounded-lg border border-[#2b2d31] space-y-2.5">
-                  <div className="font-bold text-white">Conexões (Steam, Twitch, Xbox, etc.)</div>
+                {/* Conexões */}
+                <div className="bg-[#2b2d31] p-3.5 rounded-lg space-y-2.5">
+                  <div className="text-xs font-bold uppercase text-[#b5bac1]">Conexões</div>
+                  <div className="text-[11px] text-[#949ba4]">
+                    Cole o link do seu perfil (ex: steamcommunity.com/id/seunome) ou só o nome de usuário. O ícone da rede aparece automaticamente.
+                  </div>
                   <div className="flex gap-1.5">
                     <select
                       value={newConnPlatform}
                       onChange={(e) => setNewConnPlatform(e.target.value)}
                       className="bg-[#1e1f22] border border-[#3f4147] rounded-lg px-2 py-1.5 text-white outline-none"
                     >
-                      <option>Steam</option>
-                      <option>Twitch</option>
-                      <option>Xbox</option>
-                      <option>PSN</option>
-                      <option>YouTube</option>
-                      <option>GitHub</option>
-                      <option>X</option>
+                      {CONNECTION_PLATFORM_OPTIONS.map((opt) => (
+                        <option key={opt}>{opt}</option>
+                      ))}
                     </select>
                     <input
                       type="text"
                       value={newConnHandle}
                       onChange={(e) => setNewConnHandle(e.target.value)}
-                      placeholder="Seu nick/link..."
+                      placeholder="Link do perfil ou nome de usuário"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addConnection();
+                        }
+                      }}
                       className="flex-1 bg-[#1e1f22] border border-[#3f4147] rounded-lg px-2.5 py-1.5 text-white outline-none"
                     />
                     <button
@@ -719,18 +718,11 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     </button>
                   </div>
                   {connections.map((c, idx) => (
-                    <div key={idx} className="flex items-center justify-between bg-[#1e1f22] px-2.5 py-1.5 rounded-lg">
-                      <span className="text-white">
-                        <strong>{c.platform}:</strong> {c.handle}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setConnections((prev) => prev.filter((_, i) => i !== idx))}
-                        className="text-[#949ba4] hover:text-[#f23f42] cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    <ConnectionCard
+                      key={idx}
+                      connection={c}
+                      onRemove={() => setConnections((prev) => prev.filter((_, i) => i !== idx))}
+                    />
                   ))}
                 </div>
 

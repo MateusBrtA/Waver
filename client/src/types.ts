@@ -211,6 +211,8 @@ export interface WhiteboardLayer {
   visible: boolean;
   locked?: boolean;
   opacity: number;
+  /** modo de mesclagem (globalCompositeOperation): normal, multiply, screen... */
+  blend?: string;
 }
 
 export interface WhiteboardPoint {
@@ -240,6 +242,13 @@ export interface WhiteboardElement {
   fontFamily?: string;
   dataUrl?: string;
   seed?: number;
+  /** deslocamento aplicado por "mover" (traços/formas/texto) */
+  tx?: number;
+  ty?: number;
+  /** rotação em radianos (imagens) */
+  rot?: number;
+  /** retângulo/elipse preenchidos */
+  filled?: boolean;
   authorId: string;
   authorName: string;
   createdAt: number;
@@ -476,7 +485,9 @@ export interface RcPeerSession {
 }
 
 export interface RemoteInputEvent {
-  type: 'mousemove' | 'mouserel' | 'mousedown' | 'mouseup' | 'wheel' | 'keydown' | 'keyup' | 'gamepad' | 'rumble';
+  type: 'mousemove' | 'mouserel' | 'mousedown' | 'mouseup' | 'wheel' | 'keydown' | 'keyup' | 'gamepad' | 'rumble' | 'host-busy';
+  /** host-busy: o host está usando o mouse/teclado físico (controle remoto pausado) */
+  busy?: boolean;
   nx?: number;
   ny?: number;
   dx?: number;
@@ -775,6 +786,8 @@ export interface ElectronAPI {
   rcRetryViGEm: () => Promise<{ vigemStatus: string }>;
   rcInstallViGEmBus: () => Promise<{ ok: boolean; path?: string; error?: string }>;
   rcExecuteInput: (evt: RemoteInputEvent) => void;
+  rcSetHostPriority?: (enabled: boolean) => Promise<unknown>;
+  onRcHostActivity?: (cb: (data: { active: boolean }) => void) => () => void;
   onRcEmergencyStopped: (cb: () => void) => () => void;
   onRcRumble: (cb: (data: { slot: number; large: number; small: number }) => void) => () => void;
   onRcStatusChanged: (cb: (st: { enabled: boolean; ready: boolean; vigemStatus: string }) => void) => () => void;

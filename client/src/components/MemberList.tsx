@@ -2,6 +2,7 @@ import React from 'react';
 import { Crown, Gamepad2, Headphones, Volume2 } from 'lucide-react';
 import { Role, User, VoiceParticipant } from '../types';
 import { Avatar, NAME_STYLES } from './Avatar';
+import { PanelResizer, usePersistentWidth } from './PanelResizer';
 
 interface MemberListProps {
   members: User[];
@@ -22,6 +23,7 @@ export const MemberList: React.FC<MemberListProps> = ({
   onMemberClick,
   onMemberContextMenu,
 }) => {
+  const [listWidth, setListWidth] = usePersistentWidth('pc.memberListWidth', 240, 200, 420);
   const voiceUserIds = new Set<string>();
   for (const list of Object.values(voiceRooms)) {
     for (const p of list) voiceUserIds.add(p.userId);
@@ -40,7 +42,12 @@ export const MemberList: React.FC<MemberListProps> = ({
   };
 
   return (
-    <aside className="w-60 shrink-0 bg-[#2b2d31] pc-member-list border-l border-white/10 overflow-y-auto px-2.5 py-4 space-y-5 hidden lg:block select-none">
+    <aside
+      className="relative shrink-0 bg-[#2b2d31] pc-member-list hidden lg:flex flex-col select-none"
+      style={{ width: listWidth }}
+    >
+      <PanelResizer side="left" width={listWidth} defaultWidth={240} onResize={setListWidth} />
+      <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-4 space-y-5">
       <div>
         <h4 className="text-[11px] font-bold uppercase tracking-wider text-[#949ba4] px-2 mb-1.5">
           Disponível — {online.length}
@@ -150,6 +157,7 @@ export const MemberList: React.FC<MemberListProps> = ({
           </div>
         </div>
       )}
+      </div>
     </aside>
   );
 };

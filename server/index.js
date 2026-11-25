@@ -1680,6 +1680,24 @@ export function createPulseCordServer(options = {}) {
     res.json({ category: cat });
   });
 
+  // Reordenar categorias (arrastar e soltar)
+  app.post('/api/categories/reorder', requireAuth, (req, res) => {
+    const db = getDb();
+    if (!computeServerPermissions(db, req.user).manageChannels) {
+      return res.status(403).json({ error: 'Sem permissão para organizar categorias.' });
+    }
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+    if (!Array.isArray(db.categories)) db.categories = [];
+    ids.forEach((id, i) => {
+      const cat = db.categories.find((c) => c.id === id);
+      if (cat) cat.position = i;
+    });
+    db.categories.sort((a, b) => (a.position || 0) - (b.position || 0));
+    saveDb();
+    emitCategoriesUpdated();
+    res.json({ ok: true });
+  });
+
   app.delete('/api/categories/:id', requireAuth, (req, res) => {
     const db = getDb();
     if (!computeServerPermissions(db, req.user).manageChannels) {
@@ -1761,6 +1779,31 @@ export function createPulseCordServer(options = {}) {
     saveDb();
     emitChannelsUpdated();
     res.status(201).json({ channel });
+  });
+
+  // Reordenar canais / mover para outra categoria (arrastar e soltar, como no Discord)
+  app.post('/api/channels/reorder', requireAuth, (req, res) => {
+    const db = getDb();
+    if (!computeServerPermissions(db, req.user).manageChannels) {
+      return res.status(403).json({ error: 'Sem permissão para organizar canais.' });
+    }
+    const layout = Array.isArray(req.body?.layout) ? req.body.layout.slice(0, 500) : [];
+    const catIds = new Set((db.categories || []).map((c) => c.id));
+    let changed = 0;
+    for (const item of layout) {
+      const ch = db.channels.find((c) => c.id === String(item?.id || ''));
+      if (!ch) continue;
+      if (item.categoryId === null || (typeof item.categoryId === 'string' && catIds.has(item.categoryId))) {
+        ch.categoryId = item.categoryId;
+      }
+      if (Number.isFinite(Number(item.position))) ch.position = Number(item.position);
+      changed++;
+    }
+    if (!changed) return res.status(400).json({ error: 'Nada para reordenar.' });
+    db.channels.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    saveDb();
+    emitChannelsUpdated();
+    res.json({ ok: true });
   });
 
   app.patch('/api/channels/:id', requireAuth, (req, res) => {
@@ -3552,8 +3595,10 @@ export function createPulseCordServer(options = {}) {
       if (!targetCh || !element?.id || !canUseWb(targetCh, actor)) return;
       const wb = getOrCreateWhiteboardState(targetCh);
       const safeEl = { ...element, authorId: actor.id, authorName: actor.displayName, createdAt: element.createdAt || Date.now() };
-      wb.elements.push(safeEl);
-      if (wb.elements.length > 700) wb.elements = wb.elements.slice(-700);
+      const existingIdx = wb.elements.findIndex((e) => e.id === safeEl.id);
+      if (existingIdx !== -1) wb.elements[existingIdx] = safeEl;
+      else wb.elements.push(safeEl);
+      if (wb.elements.length > 2500) wb.elements = wb.elements.slice(-2500);
       wb.seq++;
       io.to(`voice:${targetCh}`).emit('wb:element-added', { channelId: targetCh, element: safeEl, seq: wb.seq });
     });
@@ -3576,7 +3621,65 @@ export function createPulseCordServer(options = {}) {
       const wb = getOrCreateWhiteboardState(targetCh);
       wb.elements = wb.elements.filter((e) => e.id !== elementId);
       wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:state', wb);
+      io.to(`voice:${targetCh}`).emit('wb:element-deleted', { channelId: targetCh, id: elementId, seq: wb.seq });
+    });
+
+    // Edição leve (mover / redimensionar / girar / texto) sem reenviar a imagem inteira
+    const WB_PATCH_KEYS = ['x', 'y', 'w', 'h', 'x2', 'y2', 'tx', 'ty', 'rot', 'layerId', 'opacity', 'color', 'text', 'fontSize', 'filled'];
+    socket.on('wb:patch-element', ({ channelId, id, patch }) => {
+      const targetCh = channelId || socketVoiceChannel.get(socket.id);
+      const actor = getDb().users.find((u) => u.id === socket.data.userId);
+      if (!targetCh || !id || !patch || typeof patch !== 'object' || !canUseWb(targetCh, actor)) return;
+      const wb = getOrCreateWhiteboardState(targetCh);
+      const el = wb.elements.find((e) => e.id === id);
+      if (!el) return;
+      const safe = {};
+      for (const k of WB_PATCH_KEYS) {
+        if (!(k in patch)) continue;
+        const val = patch[k];
+        if (k === 'text') safe[k] = String(val ?? '').slice(0, 4000);
+        else if (k === 'layerId' || k === 'color') safe[k] = String(val ?? '').slice(0, 64);
+        else if (k === 'filled') safe[k] = Boolean(val);
+        else if (Number.isFinite(Number(val))) safe[k] = Number(val);
+      }
+      if (!Object.keys(safe).length) return;
+      Object.assign(el, safe);
+      wb.seq++;
+      socket.to(`voice:${targetCh}`).emit('wb:element-patched', { channelId: targetCh, id, patch: safe, seq: wb.seq });
+    });
+
+    socket.on('wb:reorder-element', ({ channelId, id, toFront }) => {
+      const targetCh = channelId || socketVoiceChannel.get(socket.id);
+      const actor = getDb().users.find((u) => u.id === socket.data.userId);
+      if (!targetCh || !id || !canUseWb(targetCh, actor)) return;
+      const wb = getOrCreateWhiteboardState(targetCh);
+      const idx = wb.elements.findIndex((e) => e.id === id);
+      if (idx === -1) return;
+      const [el] = wb.elements.splice(idx, 1);
+      if (toFront) wb.elements.push(el);
+      else wb.elements.unshift(el);
+      wb.seq++;
+      socket.to(`voice:${targetCh}`).emit('wb:element-reordered', { channelId: targetCh, id, toFront: Boolean(toFront), seq: wb.seq });
+    });
+
+    // Traço ao vivo: repassa o desenho em andamento para quem está na sala (não é salvo)
+    socket.on('wb:draft', (payload) => {
+      const targetCh = payload?.channelId || socketVoiceChannel.get(socket.id);
+      const actor = getDb().users.find((u) => u.id === socket.data.userId);
+      if (!targetCh || !actor || !canUseWb(targetCh, actor)) return;
+      if (payload.cancel) {
+        socket.to(`voice:${targetCh}`).emit('wb:draft', { channelId: targetCh, socketId: socket.id, cancel: true, id: String(payload.id || '') });
+        return;
+      }
+      const d = payload.draft;
+      if (!d || !d.id || d.kind === 'image') return;
+      if (Array.isArray(d.points) && d.points.length > 4000) return;
+      socket.to(`voice:${targetCh}`).emit('wb:draft', {
+        channelId: targetCh,
+        socketId: socket.id,
+        from: Math.max(0, Number(payload.from) || 0),
+        draft: { ...d, authorId: actor.id, authorName: actor.displayName },
+      });
     });
 
     socket.on('wb:undo', ({ channelId }) => {
@@ -3584,14 +3687,17 @@ export function createPulseCordServer(options = {}) {
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
       if (!targetCh || !canUseWb(targetCh, actor)) return;
       const wb = getOrCreateWhiteboardState(targetCh);
+      let removedId = null;
       for (let i = wb.elements.length - 1; i >= 0; i--) {
-        if (wb.elements[i].authorId === actor.id || actor.role === 'host') {
+        if (wb.elements[i].authorId === actor.id) {
+          removedId = wb.elements[i].id;
           wb.elements.splice(i, 1);
           break;
         }
       }
+      if (!removedId) return;
       wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:state', wb);
+      io.to(`voice:${targetCh}`).emit('wb:element-deleted', { channelId: targetCh, id: removedId, seq: wb.seq });
     });
 
     socket.on('wb:clear', ({ channelId, layerId }) => {
@@ -3609,9 +3715,20 @@ export function createPulseCordServer(options = {}) {
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
       if (!targetCh || !Array.isArray(layers) || layers.length === 0 || !canUseWb(targetCh, actor)) return;
       const wb = getOrCreateWhiteboardState(targetCh);
-      wb.layers = layers.slice(0, 12);
+      wb.layers = layers
+        .slice(0, 32)
+        .filter((l) => l && typeof l.id === 'string')
+        .map((l) => ({
+          id: String(l.id).slice(0, 64),
+          name: String(l.name || 'Camada').slice(0, 40),
+          visible: l.visible !== false,
+          locked: Boolean(l.locked),
+          opacity: Math.max(0, Math.min(1, Number(l.opacity ?? 1))),
+          blend: typeof l.blend === 'string' ? l.blend.slice(0, 24) : 'source-over',
+        }));
+      if (!wb.layers.length) return;
       wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:state', wb);
+      socket.to(`voice:${targetCh}`).emit('wb:meta', { channelId: targetCh, layers: wb.layers, background: wb.background, seq: wb.seq });
     });
 
     socket.on('wb:background', ({ channelId, background }) => {
@@ -3622,7 +3739,7 @@ export function createPulseCordServer(options = {}) {
       if (['dark', 'light', 'grid', 'transparent'].includes(background)) {
         wb.background = background;
         wb.seq++;
-        io.to(`voice:${targetCh}`).emit('wb:state', wb);
+        socket.to(`voice:${targetCh}`).emit('wb:meta', { channelId: targetCh, layers: wb.layers, background: wb.background, seq: wb.seq });
       }
     });
 

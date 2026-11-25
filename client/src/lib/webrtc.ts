@@ -332,6 +332,26 @@ export class WebRTCManager {
     this.callbacks.onPeersUpdated(map);
   }
 
+  // Um único timer analisa todos os participantes (antes: um setInterval por pessoa)
+  private vadEntries = new Set<() => void>();
+  private vadTimer: number | null = null;
+
+  private ensureVadTimer() {
+    if (this.vadTimer || this.vadEntries.size === 0) return;
+    this.vadTimer = window.setInterval(() => {
+      const ctx = this.sharedAudioCtx;
+      if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+      this.vadEntries.forEach((tick) => tick());
+    }, 100);
+  }
+
+  private stopVadTimerIfIdle() {
+    if (this.vadEntries.size === 0 && this.vadTimer) {
+      window.clearInterval(this.vadTimer);
+      this.vadTimer = null;
+    }
+  }
+
   private setupRemoteVad(stream: MediaStream, onSpeakingChange: (speaking: boolean) => void): () => void {
     try {
       if (!this.sharedAudioCtx || this.sharedAudioCtx.state === 'closed') {
@@ -345,17 +365,20 @@ export class WebRTCManager {
       analyser.smoothingTimeConstant = 0.5;
       source.connect(analyser);
 
-      const data = new Uint8Array(analyser.frequencyBinCount);
+      // Domínio do tempo (RMS) é mais barato que FFT e mais fiel para detectar voz
+      const data = new Uint8Array(analyser.fftSize);
       let speaking = false;
       let silenceFrames = 0;
 
-      const timer = window.setInterval(() => {
-        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-        analyser.getByteFrequencyData(data);
+      const tick = () => {
+        analyser.getByteTimeDomainData(data);
         let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i];
-        const avg = sum / data.length;
-        const active = avg > 9;
+        for (let i = 0; i < data.length; i += 2) {
+          const v = data[i] - 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / (data.length / 2));
+        const active = rms > 3.2;
         if (active) {
           silenceFrames = 0;
           if (!speaking) {
@@ -369,10 +392,13 @@ export class WebRTCManager {
             onSpeakingChange(false);
           }
         }
-      }, 90);
+      };
+      this.vadEntries.add(tick);
+      this.ensureVadTimer();
 
       return () => {
-        window.clearInterval(timer);
+        this.vadEntries.delete(tick);
+        this.stopVadTimerIfIdle();
         if (speaking) onSpeakingChange(false);
         try {
           source.disconnect();
