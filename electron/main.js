@@ -595,6 +595,9 @@ function createWindow() {
   }
 
   mainWindow.on('close', (e) => {
+    try {
+      mainWindow.webContents.session.flushStorageData();
+    } catch {}
     if (!isQuitting && closeToTray && process.env.PULSECORD_TEST_EXIT !== '1') {
       e.preventDefault();
       mainWindow.hide();
@@ -1196,6 +1199,10 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
 
   app.on('before-quit', () => {
     isQuitting = true;
+    // garante que localStorage (sessão, servidores salvos, ajustes) chegou no disco antes de sair
+    try {
+      session.defaultSession.flushStorageData();
+    } catch {}
     processLoopback.stop();
     remoteController.shutdown();
     globalShortcut.unregisterAll();

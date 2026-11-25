@@ -20,6 +20,14 @@ import { audioEngine } from './lib/audioEngine';
 import { GamepadBridge } from './lib/gamepadBridge';
 import { computeChannelPermissions, computeServerPermissions } from './lib/permissions';
 import { applyThemeConfig, DEFAULT_THEME_CONFIG, loadSavedThemeLocal } from './lib/themeEngine';
+import {
+  clearSavedServers,
+  loadSavedServers,
+  removeSavedServer,
+  SavedServer,
+  serverKey,
+  upsertSavedServer,
+} from './lib/savedServers';
 import { WebRTCManager } from './lib/webrtc';
 import {
   AppMode,
@@ -278,6 +286,9 @@ export default function App() {
   const [localPeerInfo, setLocalPeerInfo] = useState<LanPeer | null>(null);
   const [showHostModal, setShowHostModal] = useState(false);
   const [showServerDirectory, setShowServerDirectory] = useState(false);
+  const [savedServers, setSavedServers] = useState<SavedServer[]>(() => loadSavedServers());
+  /** servidor salvo que estava offline quando o app abriu: tenta de novo sozinho até o host ligar */
+  const [autoReconnectUrl, setAutoReconnectUrl] = useState<string | null>(null);
 
   // Auth & session
   const [booting, setBooting] = useState(true);
@@ -965,9 +976,27 @@ export default function App() {
     let cancelled = false;
     (async () => {
       const raw = localStorage.getItem('pulsecord_session');
-      if (raw) {
+      // hospedar é contínuo: se você hospeda um servidor salvo mas abriu em outro, o seu continua no ar
+      if (window.electronAPI?.isElectron) {
+        let activeMode: AppMode | undefined;
         try {
-          const parsed = JSON.parse(raw) as { serverUrl: string; token: string; mode?: AppMode };
+          activeMode = raw ? (JSON.parse(raw) as { mode?: AppMode }).mode : undefined;
+        } catch {
+          activeMode = undefined;
+        }
+        if (activeMode !== 'host' && loadSavedServers().some((s) => s.mode === 'host')) {
+          window.electronAPI
+            .hostStart(3000)
+            .then((st) => {
+              if (!cancelled) setHostStatus(st);
+            })
+            .catch(() => {});
+        }
+      }
+      if (raw) {
+        let parsed: { serverUrl: string; token: string; mode?: AppMode } | null = null;
+        try {
+          parsed = JSON.parse(raw) as { serverUrl: string; token: string; mode?: AppMode };
           if (parsed.mode === 'host' && window.electronAPI?.isElectron) {
             const st = await window.electronAPI.hostStart(3000);
             if (!cancelled) {
@@ -988,8 +1017,16 @@ export default function App() {
             setBooting(false);
             return;
           }
-        } catch {
-          localStorage.removeItem('pulsecord_session');
+        } catch (err: any) {
+          const status = err?.status;
+          if (status === 401 || status === 403 || !parsed) {
+            // token recusado (ou sessão corrompida): aí sim precisa entrar de novo
+            localStorage.removeItem('pulsecord_session');
+            if (parsed?.serverUrl) setSavedServers((prev) => upsertSavedServer(prev, { serverUrl: parsed!.serverUrl, token: '' }));
+          } else if (!cancelled && parsed?.serverUrl) {
+            // servidor desligado / sem rede: mantém a sessão e reconecta quando o host voltar
+            setAutoReconnectUrl(parsed.serverUrl);
+          }
         }
       }
 
@@ -1309,6 +1346,7 @@ export default function App() {
       setSocketConnected(false);
       if (err.message === 'UNAUTHORIZED') {
         localStorage.removeItem('pulsecord_session');
+        setSavedServers((prev) => upsertSavedServer(prev, { serverUrl, token: '' }));
         setToken(null);
         setUser(null);
       }
@@ -1576,6 +1614,7 @@ export default function App() {
       rtc.leaveChannel(false);
       audioEngine.stopMusic();
       localStorage.removeItem('pulsecord_session');
+      setSavedServers((prev) => removeSavedServer(prev, serverUrl));
       setActiveVoiceChannelId(null);
       setViewMode('chat');
       setNavArea('dms');
@@ -1592,6 +1631,7 @@ export default function App() {
       rtc.leaveChannel(false);
       audioEngine.stopMusic();
       localStorage.removeItem('pulsecord_session');
+      setSavedServers((prev) => removeSavedServer(prev, serverUrl));
       setActiveVoiceChannelId(null);
       setViewMode('chat');
       setToken(null);
@@ -1837,6 +1877,41 @@ export default function App() {
   }, [token, user?.id, activeGroupId, navArea, api, dmGroups]);
 
   // ---- Handlers ----
+  // nome/ícone do servidor mudaram: atualiza o atalho salvo na barra lateral
+  useEffect(() => {
+    if (!token || !server || !serverUrl) return;
+    setSavedServers((prev) =>
+      upsertSavedServer(prev, {
+        serverUrl,
+        token,
+        mode: appMode,
+        name: server.name,
+        iconColor: server.iconColor,
+        iconUrl: server.iconUrl ?? null,
+      })
+    );
+  }, [token, serverUrl, appMode, server?.name, server?.iconColor, server?.iconUrl]);
+
+  // abriu o app com o host desligado: tenta de novo a cada 8 s até conectar (ou até você entrar em outro)
+  useEffect(() => {
+    if (!autoReconnectUrl || token) return;
+    let stop = false;
+    const tick = async () => {
+      const entry = loadSavedServers().find((s) => serverKey(s.serverUrl) === serverKey(autoReconnectUrl));
+      if (!entry) {
+        setAutoReconnectUrl(null);
+        return;
+      }
+      const ok = await switchSavedServerRef.current(entry, { silent: true });
+      if (ok && !stop) showToast(`Reconectado a "${entry.name}".`, 'info');
+    };
+    const id = window.setInterval(tick, 8000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [autoReconnectUrl, token, showToast]);
+
   const handleAuthenticated = (data: {
     mode: AppMode;
     serverUrl: string;
@@ -1856,7 +1931,90 @@ export default function App() {
       'pulsecord_session',
       JSON.stringify({ mode: data.mode, serverUrl: data.serverUrl, token: data.token })
     );
+    setAutoReconnectUrl(null);
+    setSavedServers((prev) =>
+      upsertSavedServer(prev, {
+        serverUrl: data.serverUrl,
+        token: data.token,
+        mode: data.mode,
+        name: data.server.name,
+        iconColor: data.server.iconColor,
+        iconUrl: data.server.iconUrl ?? null,
+        lastUsedAt: Date.now(),
+      })
+    );
   };
+
+  /** Troca para outro servidor salvo na barra lateral (um conectado por vez, como no app antigo). */
+  const handleSwitchSavedServer = async (entry: SavedServer, opts?: { silent?: boolean }): Promise<boolean> => {
+    if (token && server && serverKey(entry.serverUrl) === serverKey(serverUrl)) {
+      setNavArea('server');
+      return true;
+    }
+    let url = entry.serverUrl;
+    if (entry.mode === 'host' && window.electronAPI?.isElectron) {
+      let st = hostStatus;
+      if (!st?.running) {
+        st = await window.electronAPI.hostStart(3000).catch(() => null);
+        if (st) setHostStatus(st);
+      }
+      if (!st?.running || !st.localUrl) {
+        if (!opts?.silent) showError(st?.error || 'Não foi possível ligar o seu servidor neste PC.');
+        return false;
+      }
+      url = st.localUrl;
+    }
+    try {
+      let tok = entry.token;
+      let res: { user: User; server: ServerInfo } | null = null;
+      if (tok) {
+        try {
+          res = await new ApiClient(url, tok).me();
+        } catch (err: any) {
+          if (err?.status !== 401 && err?.status !== 403) throw err;
+          tok = '';
+        }
+      }
+      if (!res) {
+        // sessão expirou: entra de novo com o mesmo nome (servidor com senha pede para entrar pelo "+")
+        const u = userRef.current;
+        if (!u) throw Object.assign(new Error('Entre no servidor de novo pelo botão +.'), { status: 401 });
+        const lr = await new ApiClient(url).login({
+          username: u.username,
+          displayName: u.displayName,
+          hostSelfJoin: entry.mode === 'host' ? true : undefined,
+        });
+        tok = lr.token;
+        res = { user: lr.user, server: lr.server };
+      }
+      revokeRemoteControlInternal(true);
+      disconnectLanCallSocket();
+      rtcRef.current?.leaveChannel();
+      audioEngine.stopMusic();
+      setActiveVoiceChannelId(null);
+      setDmVoiceParticipants([]);
+      setVideoState(null);
+      setViewMode('chat');
+      setChannels([]);
+      setRoles([]);
+      setMembers([]);
+      setVoiceRooms({});
+      handleAuthenticated({ mode: entry.mode, serverUrl: url, token: tok, user: res.user, server: res.server });
+      return true;
+    } catch (err: any) {
+      if (!opts?.silent) {
+        if (err?.status === 401 || err?.status === 403) {
+          showError(err?.message && err.status === 401 ? err.message : 'Esse servidor pediu para entrar de novo.');
+          setShowServerDirectory(true);
+        } else {
+          showError(`"${entry.name}" está offline ou fora da rede agora.`);
+        }
+      }
+      return false;
+    }
+  };
+  const switchSavedServerRef = useRef(handleSwitchSavedServer);
+  switchSavedServerRef.current = handleSwitchSavedServer;
 
   const handleLocalEnter = useCallback(
     (identity: { displayName: string; username: string; avatarColor: string; avatarDataUrl?: string }) => {
@@ -1930,6 +2088,7 @@ export default function App() {
       await handleStopHost();
     }
     localStorage.removeItem('pulsecord_session');
+    setSavedServers((prev) => removeSavedServer(prev, serverUrl));
     setAppMode('client');
     setToken(null);
     setServer(null);
@@ -1958,6 +2117,9 @@ export default function App() {
     }
     localStorage.removeItem('pulsecord_session');
     localStorage.removeItem('pulsecord_local_identity');
+    clearSavedServers();
+    setSavedServers([]);
+    setAutoReconnectUrl(null);
     setActiveVoiceChannelId(null);
     setDmVoiceParticipants([]);
     setVideoState(null);
@@ -2036,9 +2198,7 @@ export default function App() {
       invitePassword: opts.password.trim() || undefined,
     });
 
-    if (appMode === 'host' && window.electronAPI?.isElectron) {
-      await handleStopHost();
-    }
+    // o servidor que você hospeda continua no ar para os outros; ele fica salvo na barra lateral
     handleAuthenticated({
       mode: 'client',
       serverUrl: opts.serverUrl,
@@ -3516,6 +3676,12 @@ export default function App() {
             setShow3DViewer(true);
           }}
           onOpenSettings={() => setSettingsTab('audio')}
+          savedServers={savedServers}
+          onSwitchServer={(entry) => handleSwitchSavedServer(entry)}
+          onRemoveSavedServer={(entry) => {
+            setSavedServers((prev) => removeSavedServer(prev, entry.serverUrl));
+            if (autoReconnectUrl && serverKey(autoReconnectUrl) === serverKey(entry.serverUrl)) setAutoReconnectUrl(null);
+          }}
         />
 
         <div className="flex-1 flex min-w-0 min-h-0 rounded-tl-lg overflow-hidden">
