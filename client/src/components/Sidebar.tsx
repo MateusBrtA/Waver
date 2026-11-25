@@ -324,8 +324,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           onDragEnd: endDrag,
         }
       : {};
-  const channelDropProps = (ch: Channel) => ({
-    onDragOver: (e: React.DragEvent) => {
+  const channelDropProps = (ch: Channel) => {
+    const over = (e: React.DragEvent) => {
       const dragItem = dragItemRef.current;
       if (!dragItem) return;
       if (dragItem.kind === 'member') {
@@ -342,8 +342,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       if (dropTarget?.kind !== 'channel' || dropTarget.id !== ch.id || dropTarget.pos !== pos) {
         setDropTarget({ kind: 'channel', id: ch.id, pos });
       }
-    },
-    onDrop: (e: React.DragEvent) => {
+    };
+    // dragenter também precisa ser cancelado: o Chromium decide o alvo do drop por ele
+    return { onDragEnter: over, onDragOver: over, onDrop: (e: React.DragEvent) => {
       const d = dragItemRef.current;
       if (!d) return;
       e.preventDefault();
@@ -356,8 +357,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         dropOnChannel(ch, halfOf(e));
       }
       endDrag();
-    },
-  });
+    } };
+  };
   const dropLine = (ch: Channel) =>
     dropTarget?.kind === 'channel' && dropTarget.id === ch.id ? (
       <div
@@ -375,6 +376,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       setDragItem({ kind: 'category', id: catId });
     },
     onDragEnd: endDrag,
+    onDragEnter: (e: React.DragEvent) => {
+      const d = dragItemRef.current;
+      if (d && (d.kind === 'channel' || (d.kind === 'category' && catId && d.id !== catId))) e.preventDefault();
+    },
     onDragOver: (e: React.DragEvent) => {
       const dragItem = dragItemRef.current;
       if (!dragItem) return;
@@ -480,18 +485,32 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* Host: linha discreta com o endereço para convidar (o resto fica no menu do servidor) */}
-      {navArea === 'server' && server && isHosting && primaryShareUrl && (
+      {navArea === 'server' && server && isHosting && (
         <div className="px-2 pt-2">
-          <button
-            type="button"
-            onClick={handleCopyShareUrl}
-            className="w-full h-8 px-2 rounded-[4px] flex items-center gap-2 text-[#949ba4] hover:bg-[#35373c] hover:text-[#dbdee1] cursor-pointer transition"
-            title="Copiar endereço para convidar amigos"
-          >
-            <Server className="w-[18px] h-[18px] text-[#23a55a] shrink-0" />
-            <span className="text-[14px] font-medium truncate">Convidar: {primaryShareUrl.replace(/^https?:\/\//, '')}</span>
-            <span className="ml-auto shrink-0">{copiedIp ? <Check className="w-4 h-4 text-[#23a55a]" /> : <Copy className="w-4 h-4" />}</span>
-          </button>
+          <div className="group flex items-center h-8 rounded-[4px] text-[#949ba4] hover:bg-[#35373c] hover:text-[#dbdee1] transition">
+            <button
+              type="button"
+              onClick={primaryShareUrl ? handleCopyShareUrl : onOpenModeSwitcher}
+              className="flex-1 min-w-0 h-full px-2 flex items-center gap-2 cursor-pointer"
+              title={primaryShareUrl ? 'Copiar endereço para convidar amigos' : 'Você está hospedando este servidor'}
+            >
+              <Server className="w-[18px] h-[18px] text-[#23a55a] shrink-0" />
+              <span className="text-[14px] font-medium truncate">
+                {primaryShareUrl ? `Convidar: ${primaryShareUrl.replace(/^https?:\/\//, '')}` : 'Hospedando'}
+              </span>
+              {primaryShareUrl && (
+                <span className="ml-auto shrink-0">{copiedIp ? <Check className="w-4 h-4 text-[#23a55a]" /> : <Copy className="w-4 h-4" />}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onOpenModeSwitcher}
+              className="h-full px-1.5 text-[#949ba4] hover:text-[#dbdee1] cursor-pointer shrink-0"
+              title="Configurações do host (parar de hospedar, túnel, porta)"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          </div>
           <div className="h-px bg-[#3f4147] mx-1 mt-2" />
         </div>
       )}
@@ -1000,22 +1019,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                   {/* Canais sem categoria: no Discord ficam no topo, sem cabeçalho */}
                   {orderedCategories.length > 0 ? (
-                    <div
-                      className={`space-y-[2px] ${
-                        dragItem?.kind === 'channel' && uncategorizedText.length + uncategorizedVoice.length === 0
-                          ? `min-h-8 rounded-[4px] border border-dashed ${
-                              dropTarget?.kind === 'category' && dropTarget.id === null ? 'border-[#5865f2] bg-[#5865f2]/10' : 'border-[#4e5058]'
-                            } flex items-center justify-center`
-                          : ''
-                      }`}
-                      {...(uncategorizedText.length + uncategorizedVoice.length === 0 ? categoryHeaderDnd(null) : {})}
-                    >
-                      {dragItem?.kind === 'channel' && uncategorizedText.length + uncategorizedVoice.length === 0 ? (
-                        <span className="text-[11px] text-[#949ba4] pointer-events-none">Soltar aqui: sem categoria</span>
-                      ) : (
-                        channelsInGroup(null).map(renderChannelItem)
-                      )}
-                    </div>
+                    uncategorizedText.length + uncategorizedVoice.length > 0 ? (
+                      <div className="space-y-[2px]">{channelsInGroup(null).map(renderChannelItem)}</div>
+                    ) : (
+                      // zona "sem categoria" com altura fixa: aparecer/sumir durante o arraste não pode mexer no layout
+                      <div
+                        {...categoryHeaderDnd(null)}
+                        className={`-mt-1 -mb-2 h-6 rounded-[4px] border border-dashed flex items-center justify-center transition-colors ${
+                          dragItem?.kind === 'channel'
+                            ? dropTarget?.kind === 'category' && dropTarget.id === null
+                              ? 'border-[#5865f2] bg-[#5865f2]/10'
+                              : 'border-[#4e5058]'
+                            : 'border-transparent'
+                        }`}
+                      >
+                        {dragItem?.kind === 'channel' && (
+                          <span className="text-[11px] text-[#949ba4] pointer-events-none">Soltar aqui: sem categoria</span>
+                        )}
+                      </div>
+                    )
                   ) : (
                     <>
                   {/* TEXT CHANNELS (Uncategorized) */}

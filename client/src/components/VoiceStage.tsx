@@ -563,9 +563,48 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     };
   }, [releaseHeldRemoteInput]);
 
+  const exitFocusMode = useCallback(() => {
+    try {
+      (navigator as any).keyboard?.unlock?.();
+    } catch {}
+    if (document.pointerLockElement) document.exitPointerLock?.();
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    setFocusMode(false);
+  }, []);
+
   useEffect(() => {
-    if (!isActivelyControllingFocused) releaseHeldRemoteInput();
-  }, [isActivelyControllingFocused, releaseHeldRemoteInput]);
+    if (!isActivelyControllingFocused) {
+      releaseHeldRemoteInput();
+      // perdeu o controle (host tirou / saiu): não deixa a pessoa presa em tela cheia com teclado travado
+      if (focusMode) exitFocusMode();
+    }
+  }, [isActivelyControllingFocused, releaseHeldRemoteInput, focusMode, exitFocusMode]);
+
+  // Segurar Esc por 1s sai do modo foco (o Electron não mostra a dica de saída do Chrome).
+  // Esc rápido continua indo para o jogo no PC remoto.
+  useEffect(() => {
+    if (!focusMode) return;
+    let timer: number | null = null;
+    const down = (e: KeyboardEvent) => {
+      if (e.code !== 'Escape' || e.repeat || timer !== null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        exitFocusMode();
+      }, 1000);
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code !== 'Escape' || timer === null) return;
+      window.clearTimeout(timer);
+      timer = null;
+    };
+    window.addEventListener('keydown', down, true);
+    window.addEventListener('keyup', up, true);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      window.removeEventListener('keydown', down, true);
+      window.removeEventListener('keyup', up, true);
+    };
+  }, [focusMode, exitFocusMode]);
 
   /**
    * Modo foco (jogos): tela cheia + Keyboard Lock (captura Alt+Tab, Win, Alt+F4, Esc curto)
@@ -575,12 +614,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     const el = spotlightContainerRef.current;
     if (!el) return;
     if (focusMode || document.fullscreenElement) {
-      try {
-        (navigator as any).keyboard?.unlock?.();
-      } catch {}
-      if (document.pointerLockElement) document.exitPointerLock?.();
-      if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
-      setFocusMode(false);
+      exitFocusMode();
       return;
     }
     try {
@@ -671,10 +705,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     if (!isActivelyControllingFocused || !rcControllingPeer || !canSendKey) return;
     e.preventDefault();
     e.stopPropagation();
-    if (e.repeat && heldKeysRef.current.has(e.code)) {
-      // auto-repeat: o Windows remoto gera a repetição sozinho enquanto a tecla está "pressionada"
-      return;
-    }
+    // repetições (segurar Backspace/setas) também são enviadas: tecla injetada não repete sozinha no host
     heldKeysRef.current.add(e.code);
     onSendRemoteInput(rcControllingPeer.socketId, { type: 'keydown', code: e.code });
   };

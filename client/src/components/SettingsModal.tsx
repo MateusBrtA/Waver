@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppWindow,
   Ban,
   Check,
   Copy,
@@ -42,6 +43,7 @@ export type SettingsTabId =
   | 'audio'
   | 'appearance'
   | 'network'
+  | 'windows'
   | 'storage'
   | 'server'
   | 'roles'
@@ -292,6 +294,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Globe className="w-4 h-4" />
             Rede P2P / TURN
           </button>
+          {Boolean(window.electronAPI?.isElectron) && (
+            <button
+              type="button"
+              onClick={() => setTab('windows')}
+              className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                tab === 'windows' ? 'bg-[#404249] text-white' : 'text-[#b5bac1] hover:bg-[#35373c]'
+              }`}
+            >
+              <AppWindow className="w-4 h-4" />
+              Configurações do Windows
+            </button>
+          )}
           {server && (
             <>
               <div className="text-[11px] font-bold uppercase tracking-wider text-[#949ba4] px-2.5 pt-3 pb-1 border-t border-white/10 mt-2">
@@ -380,6 +394,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {tab === 'appearance' && 'Aparência, Temas Linux & Estúdio CSS com IA'}
               {tab === 'storage' && 'Armazenamento, Criptografia e Limite de 2 GB'}
               {tab === 'network' && 'Rede P2P & Atualizações pelo App'}
+              {tab === 'windows' && 'Configurações do Windows'}
               {tab === 'server' && 'Perfil do Servidor, Banner, Tags & Acesso'}
               {tab === 'roles' && 'Cargos & Permissões do Servidor'}
               {tab === 'members' && 'Membros, Cargos & Expulsões'}
@@ -757,6 +772,47 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <AppearanceSettingsTab themeConfig={themeConfig} onUpdateTheme={onUpdateThemeConfig} />
             )}
 
+            {/* WINDOWS (comportamento do app desktop) */}
+            {tab === 'windows' && (
+              <div className="space-y-4">
+                <div className="text-[12px] font-bold uppercase tracking-wide text-[#b5bac1]">Comportamento do sistema</div>
+                <label className="flex items-start justify-between gap-4 cursor-pointer">
+                  <div>
+                    <div className="text-[15px] font-medium text-[#dbdee1]">Fechar o PulseCord ao clicar no X</div>
+                    <p className="text-[13px] text-[#949ba4] mt-1 leading-snug">
+                      {closeToTray
+                        ? 'Desligado: o X só esconde a janela. O PulseCord continua rodando nos ícones ocultos da barra de tarefas (chamada e servidor continuam ativos).'
+                        : 'Ligado: o X encerra o PulseCord por completo, saindo da chamada e parando o servidor se você estiver hospedando.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={!closeToTray}
+                    onClick={async () => {
+                      const nextTray = !closeToTray;
+                      setCloseToTray(nextTray);
+                      const saved = await window.electronAPI?.setCloseToTray?.(nextTray).catch(() => undefined);
+                      if (typeof saved === 'boolean') setCloseToTray(saved);
+                    }}
+                    className={`relative mt-0.5 w-10 h-6 rounded-full shrink-0 transition-colors cursor-pointer ${
+                      !closeToTray ? 'bg-[#23a55a]' : 'bg-[#80848e]'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-[3px] w-[18px] h-[18px] rounded-full bg-white transition-all ${
+                        !closeToTray ? 'left-[19px]' : 'left-[3px]'
+                      }`}
+                    />
+                  </button>
+                </label>
+                <div className="h-px bg-[#3f4147]" />
+                <p className="text-[12px] text-[#949ba4]">
+                  Com o app nos ícones ocultos, clique com o botão direito no ícone do PulseCord e escolha "Sair do PulseCord" para fechar de vez.
+                </p>
+              </div>
+            )}
+
             {/* NETWORK & IN-APP UPDATES TAB */}
             {tab === 'network' && (
               <div className="space-y-4">
@@ -800,27 +856,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     mesmo sem precisar reinstalar manualmente!
                   </p>
                 </div>
-
-                {Boolean(window.electronAPI?.isElectron) && (
-                  <div className="bg-[#232428] border border-white/10 p-4 rounded-lg flex items-center justify-between gap-3">
-                    <div>
-                      <div className="font-bold text-sm text-white">Minimizar nos Ícones Ocultos ao Fechar (X)</div>
-                      <p className="text-[11px] text-[#949ba4] mt-0.5">
-                        Mantém sua chamada de voz e servidor ativos em segundo plano com consumo mínimo de RAM e FPS.
-                      </p>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={closeToTray}
-                      onChange={async (e) => {
-                        const next = e.target.checked;
-                        setCloseToTray(next);
-                        await window.electronAPI?.setCloseToTray?.(next);
-                      }}
-                      className="w-4 h-4 accent-[#23a55a] cursor-pointer shrink-0"
-                    />
-                  </div>
-                )}
 
                 <div className="bg-[#232428] p-4 rounded-lg space-y-2">
                   <div className="font-bold text-sm text-white">Rotas Rápidas LAN & P2P Adaptativo</div>
