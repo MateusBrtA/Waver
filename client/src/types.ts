@@ -589,6 +589,8 @@ export interface VideoState {
   /** velocidade da sala (0.25–2), igual para todos */
   rate?: number;
   serverNow: number;
+  /** Date.now() local quando este estado chegou (posição conta a partir daqui) */
+  receivedAt?: number;
 }
 
 export interface MediaEmbedInfo {

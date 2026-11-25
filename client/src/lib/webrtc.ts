@@ -113,6 +113,8 @@ export class WebRTCManager {
   private micGateGain: GainNode | null = null;
   private micHighPass: BiquadFilterNode | null = null;
   private micDspTimer: number | null = null;
+  private micReacquireAt = 0;
+  private micReacquiring = false;
 
   private camStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
@@ -412,6 +414,23 @@ export class WebRTCManager {
     }
   }
 
+  /** O microfone "morreu" (driver reiniciou, dispositivo trocado, Windows tomou o áudio): pega de novo. */
+  private scheduleMicReacquire(reason: string) {
+    if (!this.activeChannelId || this.micReacquiring) return;
+    const now = Date.now();
+    if (now - this.micReacquireAt < 3000) return;
+    this.micReacquireAt = now;
+    this.micReacquiring = true;
+    console.warn('[WebRTC] Microfone parou (' + reason + '), recapturando...');
+    window.setTimeout(() => {
+      this.acquireMicrophone({ auto: true })
+        .catch(() => {})
+        .finally(() => {
+          this.micReacquiring = false;
+        });
+    }, 300);
+  }
+
   private cleanupMicDsp() {
     if (this.micDspTimer) {
       window.clearInterval(this.micDspTimer);
@@ -432,7 +451,7 @@ export class WebRTCManager {
    * Captures microphone with Discord-like profiles (Voice Isolation / Studio / Custom),
    * live Input Gain (0-200%), Auto/Manual Voice Detection Gate, and Push-to-Talk!
    */
-  async acquireMicrophone(): Promise<MediaStream | null> {
+  async acquireMicrophone(opts: { auto?: boolean } = {}): Promise<MediaStream | null> {
     if (!navigator.mediaDevices?.getUserMedia) {
       this.callbacks.onError(
         'Microfone bloqueado pelo navegador em HTTP. Use o app Desktop PulseCord (.exe) para falar por voz em LAN!'
@@ -476,6 +495,12 @@ export class WebRTCManager {
 
     if (!rawStream) {
       console.warn('[WebRTC] Microfone indisponível, entrando em modo ouvinte:', lastError);
+      if (opts.auto) {
+        // para o vigia do microfone morto (senão ele tentaria de novo a cada 3 s, com aviso toda vez)
+        this.cleanupMicDsp();
+        this.callbacks.onError('O microfone foi desconectado. Escolha outro dispositivo de entrada para voltar a falar.');
+        return null;
+      }
       this.callbacks.onError(
         'Não foi possível acessar o microfone (verifique permissões do Windows). Você entrou apenas como ouvinte.'
       );
@@ -484,6 +509,8 @@ export class WebRTCManager {
 
     this.cleanupMicDsp();
     this.rawMicStream = rawStream;
+    const rawTrack = rawStream.getAudioTracks()[0];
+    if (rawTrack) rawTrack.onended = () => this.scheduleMicReacquire('track ended');
 
     // Build Web Audio DSP pipeline: RawMic -> HighPass -> InputGain -> GateGain -> Destination
     let outboundStream: MediaStream = rawStream;
@@ -524,6 +551,10 @@ export class WebRTCManager {
 
       this.micDspTimer = window.setInterval(() => {
         if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        if (rawTrack && rawTrack.readyState === 'ended') {
+          this.scheduleMicReacquire('watchdog');
+          return;
+        }
         analyser.getByteFrequencyData(data);
         let sum = 0;
         for (let i = 0; i < data.length; i++) sum += data[i];

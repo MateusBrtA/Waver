@@ -54,10 +54,11 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
     return { hash, buffer: cachedUiBundleGz };
   }
 
-  function findInstallerMeta() {
+  function findInstallerMeta(kind = 'any') {
+    const names = kind === 'portable' ? ['PulseCord-Portable.exe', 'PulseCord-Setup.exe'] : ['PulseCord-Setup.exe', 'PulseCord-Portable.exe'];
     const candidates = [];
     if (updatesDir && fs.existsSync(updatesDir)) {
-      for (const name of ['PulseCord-Setup.exe', 'PulseCord-Portable.exe']) {
+      for (const name of names) {
         candidates.push(path.join(updatesDir, name));
       }
       // Also accept any uploaded .exe in updatesDir
@@ -68,10 +69,24 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
       } catch {}
     }
     if (downloadsDir) {
-      candidates.push(path.join(downloadsDir, 'PulseCord-Setup.exe'));
-      candidates.push(path.join(downloadsDir, '..', 'PulseCord-Setup.exe'));
-      candidates.push(path.join(downloadsDir, 'PulseCord-Portable.exe'));
-      candidates.push(path.join(downloadsDir, '..', 'PulseCord-Portable.exe'));
+      const local = [];
+      for (const name of names) {
+        local.push(path.join(downloadsDir, name));
+        local.push(path.join(downloadsDir, '..', name));
+      }
+      // Sem preferência (clientes antigos não dizem se são portable): o .exe mais novo é a versão atual,
+      // então um Setup.exe velho esquecido na pasta não ganha de um portable recém-gerado.
+      if (kind !== 'portable') {
+        const mtime = (f) => {
+          try {
+            return fs.statSync(f).mtimeMs;
+          } catch {
+            return -1;
+          }
+        };
+        local.sort((x, y) => mtime(y) - mtime(x));
+      }
+      candidates.push(...local);
     }
 
     for (const p of candidates) {
@@ -80,7 +95,9 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
           const stat = fs.statSync(p);
           const customMetaFile = updatesDir ? path.join(updatesDir, 'release-meta.json') : '';
           let releaseMeta = null;
-          if (customMetaFile && fs.existsSync(customMetaFile)) {
+          // release-meta.json só descreve o arquivo publicado em updatesDir
+          const inUpdatesDir = updatesDir && path.resolve(path.dirname(p)) === path.resolve(updatesDir);
+          if (inUpdatesDir && customMetaFile && fs.existsSync(customMetaFile)) {
             try {
               releaseMeta = JSON.parse(fs.readFileSync(customMetaFile, 'utf8'));
             } catch {}

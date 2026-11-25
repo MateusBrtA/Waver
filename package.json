@@ -1,6 +1,6 @@
 {
   "name": "pulsecord",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "PulseCord 4.0 - App estilo Discord com Sincronização Ultra-Rápida, YouTube Player, Parsec 60-120fps + Controle Xbox Virtual, Áudio no Chat, Fixação e Mensagens Privadas P2P em LAN",
   "main": "electron/main.js",
   "author": "PulseCord",

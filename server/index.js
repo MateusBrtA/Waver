@@ -989,13 +989,15 @@ export function createPulseCordServer(options = {}) {
   });
 
   app.get('/api/update/installer', (req, res) => {
-    const inst = updateHelper.findInstallerMeta();
+    const inst = updateHelper.findInstallerMeta(req.query.kind === 'portable' ? 'portable' : 'any');
     if (!inst || !fs.existsSync(inst.path)) {
       return res.status(404).json({ error: 'Nenhum instalador de atualização disponível no Host.' });
     }
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', inst.size);
     res.setHeader('Content-Disposition', `attachment; filename="${inst.name}"`);
+    res.setHeader('X-PulseCord-Installer-Name', inst.name);
+    if (inst.sha256) res.setHeader('X-PulseCord-Sha256', inst.sha256);
     res.setHeader('Cache-Control', 'no-store');
     const stream = fs.createReadStream(inst.path, { highWaterMark: 1024 * 1024 });
     req.on('close', () => stream.destroy());

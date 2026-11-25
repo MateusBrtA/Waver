@@ -212,10 +212,13 @@ export class AudioEngine {
     const isNewSeq = incomingSeq !== -1 && incomingSeq !== this.lastAppliedSeq;
     if (incomingSeq !== -1) this.lastAppliedSeq = incomingSeq;
 
-    const alignedNow = Date.now() + this.clockOffsetMs;
-    const latencySec = Math.max(0, (alignedNow - state.serverNow) / 1000);
-    // sem teto de 1,5 s: o estado pode ser reaplicado bem depois de chegar e o teto fazia a música voltar
-    const targetSec = state.isPlaying ? state.positionSec + Math.min(latencySec, 6 * 3600) : state.positionSec;
+    // Tempo contado a partir da chegada (relógio local) + trânsito da rede limitado a 2 s:
+    // relógio mal sincronizado não desloca a música, e o tempo de carregar a faixa também conta.
+    const receivedAt = Date.now();
+    const transitSec = Math.min(2, Math.max(0, (receivedAt + this.clockOffsetMs - state.serverNow) / 1000));
+    const targetNow = () =>
+      state.isPlaying ? state.positionSec + transitSec + Math.max(0, (Date.now() - receivedAt) / 1000) : state.positionSec;
+    const targetSec = targetNow();
 
     this.prewarmNextTrack(state);
 
@@ -223,9 +226,10 @@ export class AudioEngine {
       this.musicAudio.src = fullUrl;
       this.musicAudio.load();
       const applyStart = () => {
-        if (Number.isFinite(targetSec) && targetSec > 0.25) {
+        const startSec = targetNow();
+        if (Number.isFinite(startSec) && startSec > 0.25) {
           try {
-            this.musicAudio.currentTime = targetSec;
+            this.musicAudio.currentTime = startSec;
           } catch {
             // ignore seek before ready
           }

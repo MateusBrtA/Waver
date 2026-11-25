@@ -13,6 +13,7 @@ interface YouTubeSyncPlayerProps {
   positionSec: number;
   serverNow: number;
   clockOffsetMs?: number;
+  receivedAt?: number;
   seq?: number;
   lastAction?: string;
   /** velocidade da sala (sincronizada) */
@@ -36,11 +37,21 @@ export function expectedVideoPosition(
   serverNow: number,
   clockOffsetMs: number,
   isPlaying: boolean,
-  rate = 1
+  rate = 1,
+  receivedAt?: number
 ) {
   if (!isPlaying) return positionSec;
+  const r = rate > 0 ? rate : 1;
+  if (receivedAt && receivedAt > 0) {
+    // Conta o tempo a partir da CHEGADA (relógio local, sempre confiável) + o trânsito da rede,
+    // limitado a 2 s. Assim um relógio mal sincronizado não desloca o vídeo, e reexecutar o efeito
+    // depois não faz o vídeo voltar.
+    const transit = Math.min(2, Math.max(0, (receivedAt + clockOffsetMs - serverNow) / 1000));
+    const sinceArrival = Math.max(0, (Date.now() - receivedAt) / 1000);
+    return positionSec + (transit + Math.min(sinceArrival, 6 * 3600)) * r;
+  }
   const elapsed = Math.max(0, (Date.now() + clockOffsetMs - serverNow) / 1000);
-  return positionSec + Math.min(elapsed, 6 * 3600) * (rate > 0 ? rate : 1);
+  return positionSec + Math.min(elapsed, 6 * 3600) * r;
 }
 
 export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
@@ -50,6 +61,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   positionSec,
   serverNow,
   clockOffsetMs = 0,
+  receivedAt,
   seq = 0,
   lastAction,
   rate = 1,
@@ -73,8 +85,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const fallbackCalledRef = useRef(false);
 
   // valores mais recentes para o handler de "ready" (que é registrado uma vez por vídeo)
-  const latest = useRef({ isPlaying, positionSec, serverNow, clockOffsetMs, rate, volume, deafened, captionsOn, captionsLang });
-  latest.current = { isPlaying, positionSec, serverNow, clockOffsetMs, rate, volume, deafened, captionsOn, captionsLang };
+  const latest = useRef({ isPlaying, positionSec, serverNow, clockOffsetMs, receivedAt, rate, volume, deafened, captionsOn, captionsLang });
+  latest.current = { isPlaying, positionSec, serverNow, clockOffsetMs, receivedAt, rate, volume, deafened, captionsOn, captionsLang };
   const cbs = useRef({ onTimeUpdate, onEnded, onFallbackNeeded, onCaptionTracks });
   cbs.current = { onTimeUpdate, onEnded, onFallbackNeeded, onCaptionTracks };
 
@@ -150,7 +162,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         sendCmd('volume', { volume: L.deafened ? 0 : L.volume });
         sendCmd('rate', { rate: L.rate });
         if (L.captionsOn) sendCmd('captions', { on: true, lang: L.captionsLang });
-        const target = expectedVideoPosition(L.positionSec, L.serverNow, L.clockOffsetMs, L.isPlaying, L.rate);
+        const target = expectedVideoPosition(L.positionSec, L.serverNow, L.clockOffsetMs, L.isPlaying, L.rate, L.receivedAt);
         if (target > 0.4) sendCmd('seek', { sec: target });
         sendCmd(L.isPlaying ? 'play' : 'pause');
       } else if (data.event === 'time' || data.event === 'state') {
@@ -209,7 +221,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     if (!readyRef.current) return;
     const isNewSeq = seq !== lastSeqRef.current;
     lastSeqRef.current = seq;
-    const target = expectedVideoPosition(positionSec, serverNow, clockOffsetMs, isPlaying, rate);
+    const target = expectedVideoPosition(positionSec, serverNow, clockOffsetMs, isPlaying, rate, receivedAt);
     const driftThreshold = isNewSeq && (lastAction === 'seek' || lastAction === 'track') ? 0.25 : 1.5;
 
     if (Number.isFinite(target) && Math.abs(curTimeRef.current - target) > driftThreshold) {

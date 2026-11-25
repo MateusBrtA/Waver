@@ -1820,7 +1820,7 @@ export default function App() {
 
     socket.on('video:state', (state: VideoState) => {
       if (state.channelId === activeVoiceChannelIdRef.current) {
-        setVideoState(state);
+        setVideoState({ ...state, receivedAt: Date.now() });
       }
     });
 
@@ -2342,7 +2342,7 @@ export default function App() {
             audioEngine.syncMusicState(res.musicState);
           }
           if ((res as { videoState?: VideoState }).videoState) {
-            setVideoState((res as { videoState?: VideoState }).videoState!);
+            setVideoState({ ...(res as { videoState: VideoState }).videoState, receivedAt: Date.now() });
           }
         }
       );
@@ -2400,7 +2400,7 @@ export default function App() {
         setMusicState(state);
         audioEngine.syncMusicState(state);
       });
-      p2pSock.on('video:state', (state: VideoState) => setVideoState(state));
+      p2pSock.on('video:state', (state: VideoState) => setVideoState({ ...state, receivedAt: Date.now() }));
       p2pSock.on('rc:invited', ({ fromSocketId, fromName }: { fromSocketId: string; fromName: string }) => {
         audioEngine.playUiTone('join');
         setRcPendingPrompt({ kind: 'invite', fromSocketId, fromName });
@@ -2513,7 +2513,7 @@ export default function App() {
             setMusicState(res.musicState);
             audioEngine.syncMusicState(res.musicState);
           }
-          if (res.videoState) setVideoState(res.videoState);
+          if (res.videoState) setVideoState({ ...res.videoState, receivedAt: Date.now() });
         }
       );
     },

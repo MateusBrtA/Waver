@@ -495,7 +495,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
       videoState.serverNow,
       clockOffsetMs,
       videoState.isPlaying,
-      videoState.rate || 1
+      videoState.rate || 1,
+      videoState.receivedAt
     );
     const driftThreshold = isNewSeq && (videoState.lastAction === 'seek' || videoState.lastAction === 'track') ? 0.18 : 0.75;
 
@@ -1219,6 +1220,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                   positionSec={videoState?.positionSec || 0}
                   serverNow={videoState?.serverNow || Date.now()}
                   clockOffsetMs={clockOffsetMs}
+                  receivedAt={videoState?.receivedAt}
                   seq={videoState?.seq || 0}
                   lastAction={videoState?.lastAction}
                   rate={videoRate}
@@ -1335,7 +1337,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                           videoState.serverNow,
                           clockOffsetMs,
                           videoState.isPlaying,
-                          videoState.rate || 1
+                          videoState.rate || 1,
+                          videoState.receivedAt
                         );
                         if (Number.isFinite(targetSec) && targetSec > 0.25 && Math.abs((el.currentTime || 0) - targetSec) > 0.25) {
                           try {

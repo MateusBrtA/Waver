@@ -284,7 +284,11 @@ async function startEmbeddedHost(preferredPortOrOpts = 3000) {
     const { createPulseCordServer, getNetworkAddresses } = await import(serverModUrl);
 
     const dataDir = path.join(app.getPath('userData'), 'server-data');
-    const downloadsDir = path.join(path.dirname(app.getPath('exe')), 'dist-app');
+    // No portable, app.getPath('exe') é a cópia extraída em %TEMP%: usa a pasta do .exe real.
+    const exeDir = process.env.PORTABLE_EXECUTABLE_FILE
+      ? path.dirname(process.env.PORTABLE_EXECUTABLE_FILE)
+      : path.dirname(app.getPath('exe'));
+    const downloadsDir = path.join(exeDir, 'dist-app');
 
     let targetPort = Number(hostOpts.port) || 3000;
     let startedInfo = null;
@@ -825,10 +829,18 @@ if (!gotLock) {
     ipcMain.handle('update:download-and-install', async (_event, { serverUrl, expectedSha256, installerName }) => {
       const osTmp = require('node:os').tmpdir();
       const targetExe = path.join(osTmp, `PulseCord-Update-${Date.now()}.exe`);
-      const resp = await fetch(`${serverUrl}/api/update/installer`);
+      const portableSelf = Boolean(process.env.PORTABLE_EXECUTABLE_FILE);
+      const resp = await fetch(`${serverUrl}/api/update/installer${portableSelf ? '?kind=portable' : ''}`);
       if (!resp.ok || !resp.body) {
         throw new Error(`Não foi possível baixar o instalador do Host (HTTP ${resp.status}).`);
       }
+      const servedName = resp.headers.get('x-pulsecord-installer-name') || installerName || '';
+      if (portableSelf && servedName && !/portable/i.test(servedName)) {
+        resp.body.cancel().catch(() => {});
+        throw new Error('O Host só tem o instalador (Setup), não o PulseCord-Portable.exe. Peça ao Host para colocar o portable novo na pasta dist-app.');
+      }
+      const headerSha = resp.headers.get('x-pulsecord-sha256') || '';
+      if (headerSha || servedName !== installerName) expectedSha256 = headerSha;
 
       const total = Number(resp.headers.get('content-length') || 0);
       let loaded = 0;
