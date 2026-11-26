@@ -158,6 +158,34 @@ class GithubUpdater {
     }
   }
 
+  /**
+   * Baixa o .exe deste tipo da última release para instalar AGORA (ex.: "Instalar no PC" a partir do portátil).
+   * Diferente da atualização, aceita a MESMA versão deste app; mais velha nunca (não deixa voltar para uma versão
+   * com falha já corrigida). Assinatura, tipo e SHA-256 são conferidos do mesmo jeito.
+   */
+  async downloadForInstall() {
+    const rel = await this.fetchLatestRelease();
+    if (!rel) throw new Error('Não foi possível falar com o GitHub agora. Confira a internet e tente de novo.');
+    const assets = Array.isArray(rel.assets) ? rel.assets : [];
+    const exeName = EXE_NAMES[this.kind].find((n) => assets.some((a) => a?.name === n));
+    const exeAsset = exeName && assets.find((a) => a?.name === exeName);
+    const sigAsset = exeName && assets.find((a) => a?.name === `${exeName}.sig.json`);
+    if (!exeAsset || !sigAsset) throw new Error('A última versão publicada não tem o instalador.');
+    const sig = JSON.parse(await this.fetchSmallText(sigAsset.browser_download_url, MAX_SIG_BYTES));
+    const signed = this.verifySignature(sig, '0.0.0');
+    if (signed.kind !== this.kind) throw new Error('A assinatura não é deste tipo de .exe.');
+    if (this.compareVersions(signed.version, this.currentVersion) < 0) {
+      throw new Error(`A versão publicada (${signed.version}) é mais velha que esta (${this.currentVersion}).`);
+    }
+    fs.mkdirSync(this.downloadDir, { recursive: true });
+    const finalPath = path.join(this.downloadDir, `Waver-${signed.version}-${this.kind}-install.exe`);
+    if (!(fs.existsSync(finalPath) && (await sha256OfFile(finalPath)) === signed.sha256)) {
+      fs.rmSync(finalPath, { force: true });
+      await this.download(exeAsset, signed, finalPath);
+    }
+    return { version: signed.version, path: finalPath };
+  }
+
   markReady(version, file, notes) {
     // apaga downloads de versões anteriores
     for (const name of fs.readdirSync(this.downloadDir)) {

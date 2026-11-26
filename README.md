@@ -51,6 +51,8 @@ Baixe na página de [Releases](https://github.com/MateusBrtA/Waver/releases/late
 | `Waver-Portable.exe` | Abre direto, sem instalar. |
 | `Waver-Setup.exe` | Instalador, com atalho na Área de Trabalho e no Menu Iniciar (quando publicado na release). |
 
+Começou pelo portátil e quer instalar? Em **Configurações → Configurações do Windows → Instalar no PC** o app baixa o instalador oficial, instala e abre já instalado, sem perder login nem configurações.
+
 O `.exe` ainda não tem certificado de assinatura de código do Windows.
 Na primeira vez o SmartScreen pode mostrar "O Windows protegeu o computador": clique em **Mais informações → Executar assim mesmo**.
 
@@ -205,6 +207,7 @@ journalctl -u pulsecord -f     # logs ao vivo
 - Se houver, baixa em segundo plano: no máximo 3 MB/s, **pausando durante chamadas** e continuando de onde parou se a conexão cair.
 - Pronto o download, aparece **"Reiniciar e atualizar"**. A instalação só acontece quando você clica.
 - Todo `.exe` publicado tem uma **assinatura Ed25519** feita com a chave privada de quem publica, que não fica no GitHub. O app confere a assinatura, a versão e o SHA-256 antes de oferecer a atualização. Um arquivo trocado, alterado ou de versão mais velha é recusado, mesmo que venha do GitHub.
+- Quem está na **4.4.1 ou 4.4.2** precisa atualizar à mão uma vez: nessas versões o botão "Reiniciar e atualizar" fecha o app sem instalar nada. Baixe o `.exe` da [última versão](https://github.com/MateusBrtA/Waver/releases/latest) e troque o antigo; a partir da 4.4.3 a atualização volta a ser automática.
 - Servidores Waver também podem oferecer a atualização aos amigos pela rede local, com as mesmas verificações.
 
 ## Segurança e privacidade

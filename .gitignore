@@ -11,8 +11,8 @@ dist-app/
 
 # Binários auxiliares pequenos usados no empacotamento (gerados por scripts/build-*.mjs)
 !electron/bin/*.exe
-# Configuração local do Claude Code / dados de teste
-.claude/settings.local.json
+# Configuração local do Claude Code (caminhos do PC de quem desenvolve) / dados de teste
+.claude/
 server-data/
 crash.log
 dist-server/

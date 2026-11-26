@@ -966,6 +966,10 @@ export interface ElectronAPI {
   installGithubUpdate?: () => Promise<{ ok: boolean }>;
   setUpdateBusy?: (busy: boolean) => void;
   setTrayVoiceState?: (st: { inCall: boolean; speaking: boolean; muted: boolean }) => void;
+  getInstallInfo?: () => Promise<{ portable: boolean; packaged: boolean; installed: boolean }>;
+  installFromPortable?: () => Promise<{ ok: boolean; version: string }>;
+  openInstalledApp?: () => Promise<{ ok: boolean }>;
+  onInstallProgress?: (cb: (st: { status: string; loaded?: number; total?: number; version?: string }) => void) => () => void;
   onGithubUpdateState?: (cb: (s: GithubUpdateState) => void) => () => void;
   // 3D Blender & Theme Persistence
   convertLocalBlend: (opts: {

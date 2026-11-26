@@ -1,6 +1,6 @@
 {
   "name": "pulsecord",
-  "version": "4.4.2",
+  "version": "4.4.3",
   "description": "Waver: chat de texto, voz, vídeo e tela para grupos de amigos, com servidor próprio",
   "main": "electron/main.js",
   "author": "Waver",

@@ -87,6 +87,94 @@ const ShortcutEditor: React.FC<{ action: keyof DesktopPrefs['shortcuts']; value:
   );
 };
 
+const mb = (n?: number) => `${((n || 0) / 1048576).toFixed(0)} MB`;
+
+/** Só no portátil: instala o Waver no PC (Setup assinado da última versão) ou troca para a versão já instalada. */
+const InstallSection: React.FC = () => {
+  const api = window.electronAPI;
+  const [info, setInfo] = useState<{ portable: boolean; packaged: boolean; installed: boolean } | null>(null);
+  const [progress, setProgress] = useState<{ status: string; loaded?: number; total?: number } | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api?.getInstallInfo?.().then(setInfo).catch(() => setInfo(null));
+    return api?.onInstallProgress?.((st) => setProgress(st));
+  }, [api]);
+
+  if (!info?.portable) return null;
+
+  const install = async () => {
+    if (!window.confirm('O Waver vai baixar o instalador oficial, instalar neste PC e abrir já instalado. Login, servidores e configurações continuam. Continuar?')) return;
+    setError('');
+    setBusy(true);
+    try {
+      await api?.installFromPortable?.();
+    } catch (err) {
+      setBusy(false);
+      setProgress(null);
+      setError(String((err as Error)?.message || err).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''));
+    }
+  };
+  const openInstalled = async () => {
+    setError('');
+    try {
+      await api?.openInstalledApp?.();
+    } catch (err) {
+      setError(String((err as Error)?.message || err).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''));
+    }
+  };
+
+  const status =
+    progress?.status === 'installing'
+      ? 'Instalando… o Waver vai fechar e abrir de novo, já instalado.'
+      : progress?.status === 'downloading' || progress?.status === 'paused'
+      ? progress.total
+        ? `Baixando o instalador: ${mb(progress.loaded)} de ${mb(progress.total)}`
+        : 'Procurando o instalador…'
+      : '';
+
+  return (
+    <>
+      <div className="text-[12px] font-bold uppercase tracking-wide text-[#b5bac1]">Instalação</div>
+      <Row
+        title={info.installed ? 'O Waver já está instalado neste PC' : 'Instalar o Waver neste PC'}
+        desc={
+          info.installed
+            ? 'Você está usando a versão portátil. A instalada abre mais rápido e aparece no Menu Iniciar. Os dados são os mesmos nas duas.'
+            : 'Você está usando a versão portátil. Instalando, o Waver abre mais rápido e ganha atalho na Área de Trabalho e no Menu Iniciar. O instalador oficial (assinado) é baixado da última versão no GitHub. Login, servidores e configurações continuam; depois você pode apagar o portátil.'
+        }
+      >
+        <div className="flex flex-col items-end gap-2 shrink-0">
+          {info.installed && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={openInstalled}
+              className="h-8 px-3 rounded bg-[#23a55a] hover:bg-[#1a8a49] text-white text-[13px] font-medium cursor-pointer disabled:opacity-40"
+            >
+              Abrir a versão instalada
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={busy || !info.packaged}
+            onClick={install}
+            className={`h-8 px-3 rounded text-white text-[13px] font-medium cursor-pointer disabled:opacity-40 ${
+              info.installed ? 'bg-[#4e5058] hover:bg-[#6d6f78]' : 'bg-[#23a55a] hover:bg-[#1a8a49]'
+            }`}
+          >
+            {info.installed ? 'Instalar de novo' : 'Instalar no PC'}
+          </button>
+        </div>
+      </Row>
+      {status && <p className="text-[13px] text-[#dbdee1]">{status}</p>}
+      {error && <p className="text-[12px] text-[#f23f43]">{error}</p>}
+      <div className="h-px bg-[#3f4147]" />
+    </>
+  );
+};
+
 /** Integração com o Windows: notificações, atalhos globais, overlay, "ouvindo agora" e menu do Explorer. */
 export const WindowsIntegrationSettings: React.FC = () => {
   const prefs = useDesktopPrefs();
@@ -104,6 +192,7 @@ export const WindowsIntegrationSettings: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      <InstallSection />
       <div className="text-[12px] font-bold uppercase tracking-wide text-[#b5bac1]">Notificações</div>
       <Row
         title="Notificações do Windows"

@@ -18,6 +18,7 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const releaseVerify = require('./releaseVerify');
 const { GithubUpdater } = require('./githubUpdater');
+const { buildApplyScript, startApplyScript } = require('./applyUpdate');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -721,61 +722,34 @@ function createTray() {
 
 // Instala um .exe de atualização já verificado: o portátil troca o próprio arquivo; o instalador roda em
 // silêncio. Um script do PowerShell espera o app fechar, aplica e abre o PulseCord de novo.
-function launchExeUpdate(targetExe, installerName) {
-  const osTmp = os.tmpdir();
-  const portableTarget = process.env.PORTABLE_EXECUTABLE_FILE || '';
-  const isPortableDownload = /portable/i.test(installerName || '');
-  const psScriptPath = path.join(osTmp, `pulsecord-apply-${Date.now()}.ps1`);
-
-  let psContent = '';
-  if (portableTarget) {
-    psContent = `
-Start-Sleep -Milliseconds 1400
-for ($i = 0; $i -lt 20; $i++) {
+// Aplica um .exe novo depois que este app fecha: substitui o portátil (modo portátil) ou roda o Setup em
+// silêncio e abre o app instalado (electron/applyUpdate.js). forceSetup: roda o Setup mesmo estando no
+// portátil (botão "Instalar no PC").
+function launchExeUpdate(targetExe, installerName, { forceSetup = false } = {}) {
+  const portableTarget = forceSetup ? '' : process.env.PORTABLE_EXECUTABLE_FILE || '';
+  if (!portableTarget && /portable/i.test(installerName || '') && !forceSetup) {
+    throw new Error('Este .exe é a versão portátil, mas o app não está rodando como portátil.');
+  }
+  let logPath = path.join(os.tmpdir(), 'waver-atualizacao.log');
   try {
-Copy-Item -Force "${targetExe.replace(/"/g, '""')}" "${portableTarget.replace(/"/g, '""')}"
-Remove-Item -Force "${targetExe.replace(/"/g, '""')}" -ErrorAction SilentlyContinue
-Start-Process "${portableTarget.replace(/"/g, '""')}"
-break
-  } catch {
-Start-Sleep -Milliseconds 500
-  }
-}
-Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
-`;
-  } else if (isPortableDownload && !app.isPackaged) {
-    throw new Error('Atualização por EXE requer versão empacotada do app.');
-  } else {
-    psContent = `
-Start-Sleep -Milliseconds 1400
-Start-Process -FilePath "${targetExe.replace(/"/g, '""')}" -ArgumentList "/S" -Wait
-$candidates = @(
-  "$env:LOCALAPPDATA\\Programs\\Waver\\Waver.exe",
-  "$env:ProgramFiles\\Waver\\Waver.exe",
-  "$env:LOCALAPPDATA\\Programs\\PulseCord\\PulseCord.exe",
-  "$env:LOCALAPPDATA\\Programs\\PulseCord\\Waver.exe",
-  "$env:ProgramFiles\\PulseCord\\PulseCord.exe",
-  "$env:ProgramFiles\\PulseCord\\Waver.exe",
-  "${process.execPath.replace(/"/g, '""')}"
-)
-foreach ($p in $candidates) {
-  if (Test-Path $p) {
-Start-Process $p
-break
-  }
-}
-Remove-Item -Force "${targetExe.replace(/"/g, '""')}" -ErrorAction SilentlyContinue
-Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
-`;
-  }
-
-  fs.writeFileSync(psScriptPath, psContent, 'utf8');
-  const updater = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScriptPath], {
-    detached: true,
-    windowsHide: true,
-    stdio: 'ignore',
+    const dir = path.join(app.getPath('userData'), 'updates');
+    fs.mkdirSync(dir, { recursive: true });
+    logPath = path.join(dir, 'aplicar-atualizacao.log');
+  } catch {}
+  const content = buildApplyScript({
+    mode: portableTarget ? 'portable' : 'setup',
+    src: targetExe,
+    dst: portableTarget,
+    pid: process.pid,
+    logPath,
+    fallback: forceSetup ? process.env.PORTABLE_EXECUTABLE_FILE || process.execPath : process.execPath,
+    label: forceSetup ? 'instalando o Waver a partir do portátil' : 'atualizando pelo instalador',
+    // instalar a partir do portátil: sempre na conta do usuário (sem pedir administrador)
+    setupArgs: forceSetup ? '/S /currentuser' : '/S',
   });
-  updater.unref();
+  startApplyScript(path.join(os.tmpdir(), `waver-apply-${Date.now()}.ps1`), content, (err) =>
+    console.error('[update] não foi possível iniciar o PowerShell:', err?.message || err)
+  );
   isQuitting = true;
   setTimeout(() => app.quit(), 300);
 }
@@ -1105,6 +1079,78 @@ if (!gotLock) {
     ipcMain.on('update:set-busy', (_event, busy) => {
       updateBusy = Boolean(busy);
     });
+    // ===== Instalar no PC (a partir do portátil) =====
+    // Baixa o Waver-Setup.exe assinado da última release (mesma versão ou mais nova), instala em silêncio na conta
+    // do Windows e abre o app instalado. Os dados ficam onde já estão (%APPDATA%\PulseCord), então nada se perde.
+    const installedExe = () =>
+      [
+        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Waver', 'Waver.exe'),
+        path.join(process.env.ProgramFiles || '', 'Waver', 'Waver.exe'),
+      ].find((p) => p && fs.existsSync(p)) || null;
+    let installRunning = false;
+    ipcMain.handle('app:install-info', () => ({
+      portable: Boolean(process.env.PORTABLE_EXECUTABLE_FILE),
+      packaged: app.isPackaged,
+      installed: Boolean(installedExe()),
+    }));
+    ipcMain.handle('app:install-from-portable', async () => {
+      if (!process.env.PORTABLE_EXECUTABLE_FILE) throw new Error('O Waver já está instalado (esta não é a versão portátil).');
+      if (installRunning) throw new Error('A instalação já está em andamento.');
+      let repo = '';
+      try {
+        repo = require('../package.json')?.pulsecordUpdate?.githubRepo || '';
+      } catch {}
+      if (!repo || !releaseVerify.hasReleaseKey()) throw new Error('Esta cópia do Waver não sabe de onde baixar o instalador.');
+      installRunning = true;
+      try {
+        const send = (st) => {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app:install-progress', st);
+        };
+        const dl = new GithubUpdater({
+          repo,
+          currentVersion: app.getVersion(),
+          kind: 'setup',
+          downloadDir: path.join(app.getPath('userData'), 'install'),
+          verifySignature: (sig, current) => releaseVerify.verifyInstallerSignatureObject(sig, current),
+          compareVersions: releaseVerify.compareVersions,
+          maxBytesPerSec: 0, // a pessoa está esperando: sem limite
+          log: (m) => console.log(m),
+          onState: (st) => send({ status: st.status, loaded: st.loaded || 0, total: st.total || 0 }),
+        });
+        send({ status: 'downloading', loaded: 0, total: 0 });
+        const { path: setupPath, version } = await dl.downloadForInstall();
+        send({ status: 'installing', version });
+        const tmpExe = path.join(os.tmpdir(), `Waver-Setup-${Date.now()}.exe`);
+        fs.copyFileSync(setupPath, tmpExe);
+        try {
+          fs.rmSync(path.dirname(setupPath), { recursive: true, force: true });
+        } catch {}
+        launchExeUpdate(tmpExe, 'Waver-Setup.exe', { forceSetup: true });
+        return { ok: true, version };
+      } catch (err) {
+        installRunning = false;
+        throw err;
+      }
+    });
+    ipcMain.handle('app:open-installed', () => {
+      const exe = installedExe();
+      if (!exe) throw new Error('Não achei o Waver instalado neste PC.');
+      let logPath = path.join(os.tmpdir(), 'waver-atualizacao.log');
+      try {
+        logPath = path.join(app.getPath('userData'), 'updates', 'aplicar-atualizacao.log');
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      } catch {}
+      // só um Waver por vez: este fecha e o instalado abre logo depois
+      startApplyScript(
+        path.join(os.tmpdir(), `waver-open-${Date.now()}.ps1`),
+        buildApplyScript({ mode: 'launch', src: '', dst: exe, pid: process.pid, logPath }),
+        (err) => console.error('[instalar] não foi possível abrir o app instalado:', err?.message || err)
+      );
+      isQuitting = true;
+      setTimeout(() => app.quit(), 300);
+      return { ok: true };
+    });
+
     ipcMain.handle('update:github-install', () => {
       const st = githubUpdater?.state;
       if (!st || st.status !== 'ready' || !st.path || !fs.existsSync(st.path)) {

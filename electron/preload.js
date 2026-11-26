@@ -61,6 +61,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setUpdateBusy: (busy) => ipcRenderer.send('update:set-busy', Boolean(busy)),
   // ícone da bandeja: em chamada / falando / mutado
   setTrayVoiceState: (st) => ipcRenderer.send('tray:voice-state', st || {}),
+  getInstallInfo: () => ipcRenderer.invoke('app:install-info'),
+  installFromPortable: () => ipcRenderer.invoke('app:install-from-portable'),
+  openInstalledApp: () => ipcRenderer.invoke('app:open-installed'),
+  onInstallProgress: (cb) => {
+    const h = (_e, st) => cb(st);
+    ipcRenderer.on('app:install-progress', h);
+    return () => ipcRenderer.removeListener('app:install-progress', h);
+  },
   onGithubUpdateState: (cb) => {
     const listener = (_e, data) => cb(data);
     ipcRenderer.on('update:github-state', listener);
