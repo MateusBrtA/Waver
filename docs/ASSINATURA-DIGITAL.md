@@ -68,5 +68,5 @@ e também `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` e `AZURE_CLIENT_SECRET` do *App R
   `$env:PULSECORD_SIGN_TIMESTAMP = "http://timestamp.sectigo.com"` (ou o do seu fornecedor). Com carimbo,
   o .exe continua válido depois que o certificado vence.
 - Algoritmo: SHA-256.
-- Conferir manualmente: `Get-AuthenticodeSignature .\dist\PulseCord-Portable.exe`
+- Conferir manualmente: `Get-AuthenticodeSignature .\dist-app\PulseCord-Portable.exe`
 - `npm run build:exe` continua gerando a versão **sem** assinatura, como antes.
