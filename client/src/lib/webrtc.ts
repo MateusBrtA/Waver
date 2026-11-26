@@ -1822,7 +1822,8 @@ export class WebRTCManager {
           if (this.screenConfig?.qualityMode === 'auto') {
             const dSent = Math.max(1, packetsSent - this.prevPacketsSent);
             const dLost = Math.max(0, packetsLost - this.prevPacketsLost);
-            const next = this.nextAdaptiveBitrate(dLost / (dSent + dLost), rttMs, isLan);
+            // no SFU o teto vale também para o alvo mostrado na UI
+            const next = Math.min(this.nextAdaptiveBitrate(dLost / (dSent + dLost), rttMs, isLan), this.sfuScreenCapMbps());
             if (Math.abs(next - this.adaptiveBitrateMbps) >= 1) {
               this.adaptiveBitrateMbps = next;
               if (producer.rtpSender && this.screenConfig) {

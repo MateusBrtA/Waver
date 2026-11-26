@@ -122,8 +122,10 @@ Para ligar no Debian:
    ```
    Na call, o botão de status mostra **"Voz conectada (SFU)"** quando a mídia passa pelo servidor.
 
-O mediasoup é instalado junto com as dependências do servidor (binário pronto para Linux x64/arm64).
-Se o download do binário falhar, o `install.sh` avisa. Para compilar: `apt-get install -y python3-pip build-essential && cd /opt/pulsecord/server && npm rebuild mediasoup`.
+O mediasoup é instalado junto com as dependências do servidor.
+O binário do worker (Linux x64 e arm64) já vem dentro do pacote do `npm run pack:server`, porque o GitHub, de onde o npm o baixaria, não tem IPv6: num servidor só com IPv6 o download falharia.
+O `install.sh` usa esse binário (`MEDIASOUP_WORKER_BIN` no `pulsecord.env`) e avisa no fim se o SFU não carregou.
+Para compilar na própria máquina: `apt-get install -y python3-pip build-essential && cd /opt/pulsecord/server && npm rebuild mediasoup` (precisa de internet com IPv4).
 
 Consumo de banda do servidor: ele recebe uma cópia de cada fonte e envia N−1 cópias de cada uma.
 - Voz: no máximo 0,13 Mbps por pessoa falando e por ouvinte.

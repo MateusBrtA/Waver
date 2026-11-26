@@ -102,6 +102,19 @@ fi
 
 echo "==> Dependências do servidor"
 cd "$APP_DIR/server"
+# SFU: worker do mediasoup que veio pronto no pacote (o npm baixaria do GitHub, que não tem IPv6)
+MS_BIN=""
+case "$(uname -m)" in x86_64) MS_ARCH=x64 ;; aarch64|arm64) MS_ARCH=arm64 ;; *) MS_ARCH="" ;; esac
+MS_VER="$("$NODE_BIN" -p "(require('./package-lock.json').packages['node_modules/mediasoup'] || {}).version || ''" 2>/dev/null || true)"
+MS_TGZ="$APP_DIR/deploy/mediasoup-worker/mediasoup-worker-$MS_VER-linux-$MS_ARCH-kernel$(uname -r | cut -d. -f1).tgz"
+if [ -n "$MS_VER" ] && [ -n "$MS_ARCH" ] && [ -f "$MS_TGZ" ]; then
+  install -d -m 0755 "$APP_DIR/mediasoup-worker"
+  tar -xzf "$MS_TGZ" -C "$APP_DIR/mediasoup-worker"
+  if [ -x "$APP_DIR/mediasoup-worker/mediasoup-worker" ]; then
+    MS_BIN="$APP_DIR/mediasoup-worker/mediasoup-worker"
+    export MEDIASOUP_WORKER_BIN="$MS_BIN" # o postinstall do mediasoup não baixa nada com isto
+  fi
+fi
 if [ -f package-lock.json ]; then
   npm ci --omit=dev --no-audit --no-fund
 else
@@ -110,11 +123,13 @@ fi
 chown -R root:root "$APP_DIR"
 # o mediasoup (SFU) é opcional: se o download do binário pronto falhar e não der para compilar, o npm
 # segue sem ele e as chamadas ficam em malha. Avisa aqui para não ser surpresa.
-if "$NODE_BIN" -e "import('mediasoup').then(()=>process.exit(0),()=>process.exit(1))" 2>/dev/null; then
-  echo "    mediasoup (SFU) disponível"
+if "$NODE_BIN" -e "import('mediasoup').then((m)=>m.createWorker({logLevel:'error'})).then((w)=>{w.close();process.exit(0)},()=>process.exit(1))" 2>/dev/null; then
+  echo "    mediasoup (SFU) disponível${MS_BIN:+ (worker do pacote)}"
 else
   echo "    mediasoup (SFU) NÃO carregou: chamadas grandes ficam em malha P2P."
-  echo "    Para compilar: apt-get install -y python3-pip build-essential && cd $APP_DIR/server && npm rebuild mediasoup"
+  echo "    O worker pronto vem do GitHub, que só tem IPv4: num servidor só com IPv6, gere o pacote de novo"
+  echo "    com 'npm run pack:server' (ele já leva o worker para Linux) ou compile aqui:"
+  echo "    apt-get install -y python3-pip build-essential && cd $APP_DIR/server && npm rebuild mediasoup"
 fi
 
 # Endereços públicos desta máquina
@@ -130,6 +145,8 @@ set_env() { # set_env CHAVE valor
 }
 set_env PORT "$PORT"
 set_env PULSECORD_HOST "::"
+# worker do mediasoup do pacote: o servidor também precisa saber onde ele está
+[ -n "$MS_BIN" ] && set_env MEDIASOUP_WORKER_BIN "$MS_BIN"
 
 if [ "$WITH_TURN" -eq 1 ]; then
   echo "==> TURN (coturn)"
