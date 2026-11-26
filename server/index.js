@@ -668,12 +668,24 @@ export function createPulseCordServer(options = {}) {
     });
   }
 
+  // Várias mudanças no mesmo instante (entrar na call + status + atividade) viram UMA transmissão:
+  // a lista inteira de membros/salas não é serializada e enviada a todos várias vezes seguidas.
+  let usersBroadcastTimer = null;
+  let roomsBroadcastTimer = null;
   function broadcastUsers() {
-    io.emit('users:update', getMembersPayload());
+    if (usersBroadcastTimer) return;
+    usersBroadcastTimer = setTimeout(() => {
+      usersBroadcastTimer = null;
+      io.emit('users:update', getMembersPayload());
+    }, 50);
   }
 
   function broadcastVoiceRooms() {
-    io.emit('voice:rooms', getVoiceRoomsSnapshot());
+    if (roomsBroadcastTimer) return;
+    roomsBroadcastTimer = setTimeout(() => {
+      roomsBroadcastTimer = null;
+      io.emit('voice:rooms', getVoiceRoomsSnapshot());
+    }, 30);
   }
 
   function emitToUser(userId, event, payload) {
@@ -2330,15 +2342,38 @@ export function createPulseCordServer(options = {}) {
     const stat = fs.statSync(filePath);
     const safeName = transfer.originalName.replace(/["\r\n]/g, '_');
     res.setHeader('Content-Type', transfer.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Length', stat.size);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(safeName)}`);
     res.setHeader('Cache-Control', 'no-store');
 
-    const stream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }); // 1 MB chunks for ultra-fast LAN speed!
+    // Retomar download (Range): se a conexão cair no meio de um arquivo grande, o navegador continua de onde parou.
+    // Download único não aceita pedaços: ele é apagado ao terminar.
+    let start = 0;
+    let end = stat.size - 1;
+    const range = !transfer.oneTime && /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || '').trim());
+    if (!transfer.oneTime) res.setHeader('Accept-Ranges', 'bytes');
+    if (range && (range[1] || range[2])) {
+      if (range[1]) {
+        start = Number(range[1]);
+        if (range[2]) end = Math.min(end, Number(range[2]));
+      } else {
+        start = Math.max(0, stat.size - Number(range[2]));
+      }
+      if (!Number.isFinite(start) || start > end || start >= stat.size) {
+        res.setHeader('Content-Range', `bytes */${stat.size}`);
+        return res.status(416).end();
+      }
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+    }
+    res.setHeader('Content-Length', end - start + 1);
+    const reachesEnd = end === stat.size - 1;
+
+    const stream = fs.createReadStream(filePath, { start, end, highWaterMark: 1024 * 1024 }); // 1 MB chunks for ultra-fast LAN speed!
     let completed = false;
 
     res.on('finish', () => {
       completed = true;
+      if (!reachesEnd) return; // pedaço do meio de um download retomado: conta só quando chega ao fim
       transfer.downloadedCount = (transfer.downloadedCount || 0) + 1;
       if (transfer.oneTime) {
         inFlightOneTimeTransfers.delete(transfer.id);
@@ -2965,7 +3000,7 @@ export function createPulseCordServer(options = {}) {
         if (!perms.viewChannels || !perms.connectVoice) {
           return cb?.({ error: 'Seu cargo não tem permissão para conectar neste canal de voz.' });
         }
-        const curSize = voiceRooms.get(channelId)?.size || 0;
+        const curSize = Array.from(voiceRooms.get(channelId)?.values() || []).filter((p) => p.userId !== currentUser.id).length;
         if (channelObj.userLimit > 0 && curSize >= channelObj.userLimit && !perms.moveMembers && !perms.administrator) {
           return cb?.({ error: `Canal cheio (limite ${channelObj.userLimit} usuários).` });
         }
@@ -2975,7 +3010,9 @@ export function createPulseCordServer(options = {}) {
 
       if (!voiceRooms.has(channelId)) voiceRooms.set(channelId, new Map());
       const roomMap = voiceRooms.get(channelId);
-      const existingPeers = Array.from(roomMap.values());
+      // sockets antigos da mesma conta (queda de rede que o servidor ainda não percebeu, ou outro aparelho)
+      // não entram como peers: são removidos logo abaixo
+      const existingPeers = Array.from(roomMap.values()).filter((p) => p.userId !== currentUser.id);
 
       const canSpeakHere = channelObj ? computeChannelPermissions(currentDb, currentUser, channelObj).speakVoice : true;
       const effectiveServerMuted = Boolean(currentUser.serverMuted || !canSpeakHere);
@@ -3001,6 +3038,24 @@ export function createPulseCordServer(options = {}) {
       roomMap.set(socket.id, participant);
       socketVoiceChannel.set(socket.id, channelId);
       socket.join(`voice:${channelId}`);
+
+      // Mesma conta entrando por outro socket: o antigo sai da call (como no Discord). Feito depois de
+      // adicionar o novo, para a sala não ficar vazia e pausar música/vídeo numa simples reconexão.
+      const staleSockets = [];
+      for (const [sid, chId] of socketVoiceChannel) {
+        if (sid !== socket.id && voiceRooms.get(chId)?.get(sid)?.userId === currentUser.id) staleSockets.push([sid, chId]);
+      }
+      for (const [sid, chId] of staleSockets) {
+        const oldSock = io.sockets.sockets.get(sid);
+        if (oldSock) {
+          leaveVoiceRoom(oldSock);
+          oldSock.emit('voice:moved-elsewhere', { channelId: chId });
+        } else {
+          socketVoiceChannel.delete(sid);
+          voiceRooms.get(chId)?.delete(sid);
+          io.to(`voice:${chId}`).emit('voice:peer-left', { channelId: chId, socketId: sid });
+        }
+      }
 
       if (channelObj) {
         appendAuditLog({
@@ -3917,11 +3972,23 @@ export function createPulseCordServer(options = {}) {
   });
 
   if (clientDist && fs.existsSync(clientDist)) {
-    app.use(express.static(clientDist));
+    app.use(
+      express.static(clientDist, {
+        // arquivos com hash no nome nunca mudam: o navegador não precisa pedir de novo
+        setHeaders: (res, filePath) => {
+          if (/[\\/]assets[\\/]/.test(filePath)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          else res.setHeader('Cache-Control', 'no-cache');
+        },
+      })
+    );
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path.startsWith('/socket.io')) {
         return next();
       }
+      // arquivo antigo da interface (host atualizado com a aba aberta): 404 de verdade, não o index.html,
+      // para o cliente perceber e recarregar em vez de travar com tela branca
+      if (req.path.startsWith('/assets/')) return res.status(404).end();
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(clientDist, 'index.html'));
     });
   }

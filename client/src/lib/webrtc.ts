@@ -39,6 +39,8 @@ interface PeerContext {
   prevInboundCamBytes: number;
   prevInboundCamTs: number;
   vadCleanup?: () => void;
+  /** reinício de ICE agendado quando a conexão fica "disconnected" (troca de rede, Wi-Fi oscilando) */
+  iceRecoverTimer?: number;
 }
 
 export interface WebRTCManagerCallbacks {
@@ -661,6 +663,28 @@ export class WebRTCManager {
     this.emitPeersState();
   }
 
+  /**
+   * O socket caiu e voltou com outro id (o servidor já nos tirou da sala): refaz só as conexões
+   * com os outros, mantendo microfone, câmera e tela. Depois chame completeJoin com os peers novos.
+   */
+  resetPeersForRejoin(channelId: string, selfSocketId: string) {
+    for (const ctx of this.peers.values()) {
+      ctx.vadCleanup?.();
+      if (ctx.iceRecoverTimer) window.clearTimeout(ctx.iceRecoverTimer);
+      try {
+        ctx.rcChannel?.close();
+        ctx.rcFastChannel?.close();
+        ctx.pc.close();
+      } catch {}
+    }
+    this.peers.clear();
+    this.pendingIceCandidates.clear();
+    this.pendingRemoteMeta.clear();
+    this.activeChannelId = channelId;
+    this.selfSocketId = selfSocketId;
+    this.emitPeersState();
+  }
+
   reconnectAllPeers() {
     for (const ctx of this.peers.values()) {
       try {
@@ -678,6 +702,7 @@ export class WebRTCManager {
 
     for (const ctx of this.peers.values()) {
       ctx.vadCleanup?.();
+      if (ctx.iceRecoverTimer) window.clearTimeout(ctx.iceRecoverTimer);
       try {
         ctx.rcChannel?.close();
         ctx.rcFastChannel?.close();
@@ -1158,9 +1183,27 @@ export class WebRTCManager {
       } else if (pc.iceConnectionState === 'failed') {
         state = 'failed';
       }
+      const changed = ctx.media.connectionState !== state;
       ctx.media.connectionState = state;
       if (state === 'failed') pc.restartIce();
-      this.emitPeersState();
+      if (pc.iceConnectionState === 'disconnected') {
+        // costuma voltar sozinho em 1-2 s; se não voltar, renegocia a rota (só um lado, para não colidir)
+        if (!ctx.iceRecoverTimer && !ctx.polite) {
+          ctx.iceRecoverTimer = window.setTimeout(() => {
+            ctx.iceRecoverTimer = undefined;
+            if (this.peers.get(ctx.socketId) === ctx && pc.iceConnectionState === 'disconnected') {
+              try {
+                pc.restartIce();
+              } catch {}
+            }
+          }, 4000);
+        }
+      } else if (ctx.iceRecoverTimer) {
+        window.clearTimeout(ctx.iceRecoverTimer);
+        ctx.iceRecoverTimer = undefined;
+      }
+      // os dois eventos (connection + ice) disparam juntos: só avisa a UI quando o estado muda
+      if (changed) this.emitPeersState();
     };
 
     pc.onconnectionstatechange = syncConnectionState;
@@ -1372,6 +1415,7 @@ export class WebRTCManager {
     this.pendingRemoteMeta.delete(socketId);
     if (!ctx) return;
     ctx.vadCleanup?.();
+    if (ctx.iceRecoverTimer) window.clearTimeout(ctx.iceRecoverTimer);
     try {
       ctx.rcChannel?.close();
       ctx.pc.close();

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { ApiClient } from '../lib/api';
 import { AppMode, HostStatus } from '../types';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 interface HostControlModalProps {
   api?: ApiClient | null;
@@ -39,6 +40,7 @@ export const HostControlModal: React.FC<HostControlModalProps> = ({
   onStopTunnel,
   onClose,
 }) => {
+  useEscapeToClose(onClose);
   const isElectron = Boolean(window.electronAPI?.isElectron);
   const [switching, setSwitching] = useState(false);
   const [copied, setCopied] = useState('');

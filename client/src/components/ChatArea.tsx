@@ -1068,6 +1068,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <img
                       src={msg.content.trim()}
                       alt="Mídia"
+                      loading="lazy"
+                      decoding="async"
                       onClick={() => setLightboxUrl(msg.content.trim())}
                       className="max-h-80 max-w-full rounded-lg cursor-zoom-in border border-[#1e1f22] bg-[#1e1f22]"
                     />
@@ -1079,6 +1081,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <img
                       src={resolveMediaUrl(serverUrl, msg.gifUrl)}
                       alt="GIF"
+                      loading="lazy"
+                      decoding="async"
                       onClick={() => setLightboxUrl(resolveMediaUrl(serverUrl, msg.gifUrl))}
                       className="max-h-72 max-w-full rounded-lg cursor-zoom-in border border-[#1e1f22] bg-[#1e1f22]"
                     />

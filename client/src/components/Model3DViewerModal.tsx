@@ -37,6 +37,18 @@ export const Model3DViewerModal: React.FC<Model3DViewerModalProps> = ({
   onClose,
 }) => {
   const mountRef = useRef<HTMLDivElement>(null);
+  // URLs de blob dos arquivos locais abertos: liberadas ao trocar de modelo e ao fechar (senão o modelo inteiro fica na memória)
+  const blobUrlsRef = useRef<string[]>([]);
+  const makeBlobUrl = (f: File) => {
+    const u = URL.createObjectURL(f);
+    blobUrlsRef.current.push(u);
+    return u;
+  };
+  const revokeBlobUrls = () => {
+    for (const u of blobUrlsRef.current) URL.revokeObjectURL(u);
+    blobUrlsRef.current = [];
+  };
+  useEffect(() => revokeBlobUrls, []);
   const [target, setTarget] = useState<Model3DViewerTarget | null>(initialTarget || null);
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
@@ -308,16 +320,20 @@ export const Model3DViewerModal: React.FC<Model3DViewerModalProps> = ({
   const handleOpenLocalFiles = (files: File[]) => {
     const model = files.find((f) => MODEL_3D_EXTENSIONS.includes(getFileExtension(f.name)));
     const extras = files.filter((f) => isTextureLikeName(f.name));
-    const companions = extras.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }));
     if (model) {
-      setTarget({ name: model.name, url: URL.createObjectURL(model), ext: getFileExtension(model.name), companions });
+      // modelo novo: libera o anterior (o carregamento antigo já terminou ou será descartado)
+      revokeBlobUrls();
+      const companions = extras.map((f) => ({ name: f.name, url: makeBlobUrl(f) }));
+      setTarget({ name: model.name, url: makeBlobUrl(model), ext: getFileExtension(model.name), companions });
       return;
     }
+    const companions = extras.map((f) => ({ name: f.name, url: makeBlobUrl(f) }));
     if (companions.length > 0 && target) {
       // Só texturas: recarrega o modelo atual usando-as
       setTarget({ ...target, companions: [...(target.companions || []), ...companions] });
       return;
     }
+    if (!target) revokeBlobUrls();
     setError('Escolha um arquivo .blend, .glb, .gltf, .fbx, .obj ou .stl (e, se quiser, as texturas junto).');
   };
 

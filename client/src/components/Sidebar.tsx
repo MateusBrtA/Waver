@@ -53,7 +53,7 @@ import { ScreenSharePreview } from './ScreenSharePreview';
 import { useIsSpeaking } from '../lib/speakingStore';
 import { Avatar } from './Avatar';
 import { PanelResizer, usePersistentWidth } from './PanelResizer';
-import { SettingsTabId } from './SettingsModal';
+import type { SettingsTabId } from './SettingsModal';
 
 
 /** Nome do participante na lista de voz: fica branco enquanto a pessoa fala (lido do speakingStore) */

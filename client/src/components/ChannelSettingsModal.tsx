@@ -11,6 +11,7 @@ import {
   Role,
   User,
 } from '../types';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 interface ChannelSettingsModalProps {
   channel: Channel;
@@ -44,6 +45,7 @@ export const ChannelSettingsModal: React.FC<ChannelSettingsModalProps> = ({
   onDeleted,
   onClose,
 }) => {
+  useEscapeToClose(onClose);
   const [tab, setTab] = useState<'overview' | 'permissions'>('overview');
   const [name, setName] = useState(channel.name);
   const [topic, setTopic] = useState(channel.topic || '');

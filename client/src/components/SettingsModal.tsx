@@ -37,6 +37,7 @@ import {
 import { AppearanceSettingsTab } from './AppearanceSettingsTab';
 import { formatBytes } from './FileTransferModal';
 import { ServerAdminPanel } from './ServerAdminPanel';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 export type SettingsTabId =
   | 'profile'
@@ -102,6 +103,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onLogout,
   onClose,
 }) => {
+  useEscapeToClose(onClose);
   const effectivePerms = useMemo(
     () => permissions || computeServerPermissions(user, roles),
     [permissions, user, roles]

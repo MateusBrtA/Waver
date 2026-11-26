@@ -72,16 +72,20 @@ export const ImageContextMenu: React.FC<{ onNotify: (msg: string, kind?: 'error'
       if (ref.current && e.target instanceof Node && ref.current.contains(e.target)) return;
       setMenu(null);
     };
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault(); // fecha só o menu, não a janela de trás
+      setMenu(null);
+    };
     window.addEventListener('mousedown', close, true);
     window.addEventListener('wheel', close, true);
     window.addEventListener('blur', close);
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true); // captura: antes do Esc das janelas
     return () => {
       window.removeEventListener('mousedown', close, true);
       window.removeEventListener('wheel', close, true);
       window.removeEventListener('blur', close);
-      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, true);
     };
   }, [menu]);
 

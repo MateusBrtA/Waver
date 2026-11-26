@@ -61,9 +61,12 @@ import { Avatar } from './Avatar';
 import { MusicPlayerPanel } from './MusicPlayerPanel';
 import { SoundboardPanel } from './SoundboardPanel';
 import { VideoPlayerPanel } from './VideoPlayerPanel';
-import { WhiteboardPanel } from './WhiteboardPanel';
 import { PanelResizer, usePersistentWidth } from './PanelResizer';
 import { CaptionTrack, expectedVideoPosition, YouTubeSyncPlayer } from './YouTubeSyncPlayer';
+import { LazyBoundary } from './LazyBoundary';
+
+// o quadro (e o motor de desenho) só carrega quando alguém abre
+const WhiteboardPanel = React.lazy(() => import('./WhiteboardPanel').then((m) => ({ default: m.WhiteboardPanel })));
 
 const VideoView: React.FC<{
   stream: MediaStream;
@@ -1193,13 +1196,18 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
             socket ? (
               // mesma altura do palco (igual ao player de vídeo); o resto da call fica abaixo, rolando
               <div className="shrink-0 h-full min-h-[420px] flex flex-col">
-                <WhiteboardPanel
-                  socket={socket}
-                  channelId={channelId || channelName}
-                  user={user}
-                  canDraw={canWhiteboard}
-                  onClose={() => setShowWhiteboard(false)}
-                />
+                <LazyBoundary
+                  label="o Whiteboard"
+                  fallback={<div className="flex-1 grid place-items-center text-xs text-[#949ba4]">Carregando o Whiteboard…</div>}
+                >
+                  <WhiteboardPanel
+                    socket={socket}
+                    channelId={channelId || channelName}
+                    user={user}
+                    canDraw={canWhiteboard}
+                    onClose={() => setShowWhiteboard(false)}
+                  />
+                </LazyBoundary>
               </div>
             ) : (
               <div className="p-4 rounded-lg bg-[#2b2d31] border border-white/10 text-xs text-[#949ba4]">
@@ -1230,7 +1238,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                   captionsLang={captionsLang}
                   onCaptionTracks={setCaptionTracks}
                   onTimeUpdate={(cur, dur) => {
-                    setWatchCurSec(cur);
+                    setWatchCurSec((prev) => (Math.floor(prev) === Math.floor(cur) ? prev : cur));
                     if (dur > 0) setWatchDurSec(dur);
                     // player só demorou para subir: tira o aviso de bloqueado
                     if (cur > 0.5 && ytEmbedBlocked.has(currentWatchVideo.queueId)) {
@@ -1308,7 +1316,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                     }}
                     onTimeUpdate={(e) => {
                       const v = e.currentTarget as HTMLVideoElement;
-                      setWatchCurSec(v.currentTime || 0);
+                      const vt = v.currentTime || 0;
+                      setWatchCurSec((prev) => (Math.floor(prev) === Math.floor(vt) ? prev : vt));
                       const aud = watchAudioRef.current;
                       if (aud && currentWatchVideo.audioStreamPath && !v.paused) {
                         if (Math.abs((aud.currentTime || 0) - (v.currentTime || 0)) > 0.25) {

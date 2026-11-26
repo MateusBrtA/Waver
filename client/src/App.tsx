@@ -1,4 +1,4 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import {
   AlertCircle,
@@ -65,31 +65,37 @@ import {
 } from './types';
 import { Avatar } from './components/Avatar';
 import { ChannelContextMenu } from './components/ChannelContextMenu';
-import { ChannelSettingsModal } from './components/ChannelSettingsModal';
 import { ChatArea } from './components/ChatArea';
 import { CreateChannelModal } from './components/CreateChannelModal';
 import { GroupModal } from './components/GroupModal';
-import { HostControlModal } from './components/HostControlModal';
 import { LoginScreen } from './components/LoginScreen';
 import { MemberList } from './components/MemberList';
 import { ScreenShareModal } from './components/ScreenShareModal';
 import { ServerContextMenu } from './components/ServerContextMenu';
-import { ServerDirectoryModal } from './components/ServerDirectoryModal';
 import { ServerRail } from './components/ServerRail';
 import { NowPlayingBar } from './components/NowPlayingBar';
 import { ImageContextMenu } from './components/ImageContextMenu';
-import { SettingsModal, SettingsTabId } from './components/SettingsModal';
+import type { SettingsTabId } from './components/SettingsModal';
 import { Sidebar } from './components/Sidebar';
-import { TrelloBoardModal } from './components/TrelloBoardModal';
 import { ContextMenuTarget, UserContextMenu } from './components/UserContextMenu';
-import { UserProfileModal } from './components/UserProfileModal';
 import { UserProfilePopout } from './components/UserProfilePopout';
 import { VoiceAudioBridge } from './components/VoiceAudioBridge';
 import { VoiceStage } from './components/VoiceStage';
+import { LazyBoundary } from './components/LazyBoundary';
 
+// Janelas pesadas só carregam quando abertas (menos JS na memória do cliente)
+const ChannelSettingsModal = React.lazy(() => import('./components/ChannelSettingsModal').then((m) => ({ default: m.ChannelSettingsModal })));
+const HostControlModal = React.lazy(() => import('./components/HostControlModal').then((m) => ({ default: m.HostControlModal })));
+const ServerDirectoryModal = React.lazy(() => import('./components/ServerDirectoryModal').then((m) => ({ default: m.ServerDirectoryModal })));
+const TrelloBoardModal = React.lazy(() => import('./components/TrelloBoardModal').then((m) => ({ default: m.TrelloBoardModal })));
+const UserProfileModal = React.lazy(() => import('./components/UserProfileModal').then((m) => ({ default: m.UserProfileModal })));
+const SettingsModal = React.lazy(() => import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal })));
 const Model3DViewerModal = React.lazy(() =>
   import('./components/Model3DViewerModal').then((m) => ({ default: m.Model3DViewerModal }))
 );
+
+const MAX_CACHED_MESSAGES = 400;
+const MAX_CACHED_CHANNELS = 5;
 
 function compareVersions(a: string, b: string): number {
   const pa = String(a || '0').split('.').map((x) => parseInt(x, 10) || 0);
@@ -309,6 +315,7 @@ export default function App() {
   const [voiceRooms, setVoiceRooms] = useState<Record<string, VoiceParticipant[]>>({});
   const [dmVoiceParticipants, setDmVoiceParticipants] = useState<VoiceParticipant[]>([]);
   const [messagesByChannel, setMessagesByChannel] = useState<Record<string, ChatMessage[]>>({});
+  const recentTextChannelsRef = useRef<string[]>([]);
   const [dmMessagesByPair, setDmMessagesByPair] = useState<Record<string, ChatMessage[]>>({});
   const [unreadDmByUser, setUnreadDmByUser] = useState<Record<string, number>>({});
   const [dmGroups, setDmGroups] = useState<PrivateGroup[]>([]);
@@ -459,6 +466,8 @@ export default function App() {
   const soundboardTimersRef = useRef<Map<string, number>>(new Map());
   const mutedAlertTimerRef = useRef<number | null>(null);
   const activeVoiceChannelIdRef = useRef<string | null>(null);
+  const rejoinVoiceAfterReconnectRef = useRef<(socket: Socket) => void>(() => {});
+  const refetchActiveTextChannelRef = useRef<() => void>(() => {});
   const navAreaRef = useRef<'server' | 'dms'>('server');
   const activeDmUserIdRef = useRef<string | null>(null);
   const activeGroupIdRef = useRef<string | null>(null);
@@ -1356,7 +1365,8 @@ export default function App() {
 
     audioEngine.setCallbacks({
       onProgress: (cur, dur) => {
-        setMusicCurrentSec(cur);
+        // ~4 eventos/s: só re-renderiza o app quando o segundo exibido muda (ou num salto)
+        setMusicCurrentSec((prev) => (Math.floor(prev) === Math.floor(cur) ? prev : cur));
         setMusicDurationSec(dur);
       },
       onTrackEnded: (queueId) => {
@@ -1367,10 +1377,17 @@ export default function App() {
       onMusicError: (msg) => showError(msg),
     });
 
+    let everConnected = false;
     socket.on('connect', () => {
       setSocketConnected(true);
       setSelfSocketId(socket.id || '');
       syncClockWithSocket(socket);
+      // reconexão (Wi-Fi oscilou, túnel caiu): o servidor já nos tirou da call; volta sozinho
+      if (everConnected) {
+        rejoinVoiceAfterReconnectRef.current(socket);
+        refetchActiveTextChannelRef.current(); // mensagens enviadas enquanto estava fora
+      }
+      everConnected = true;
     });
     const clockInterval = window.setInterval(() => syncClockWithSocket(socket), 30000);
 
@@ -1513,7 +1530,9 @@ export default function App() {
       setMessagesByChannel((prev) => {
         const list = prev[msg.channelId] || [];
         if (list.some((m) => m.id === msg.id)) return prev;
-        return { ...prev, [msg.channelId]: [...list, msg] };
+        // teto por canal: a conversa pode ficar aberta por horas sem a memória crescer sem fim
+        const nextList = list.length >= MAX_CACHED_MESSAGES ? [...list.slice(-(MAX_CACHED_MESSAGES - 1)), msg] : [...list, msg];
+        return { ...prev, [msg.channelId]: nextList };
       });
     });
 
@@ -1824,6 +1843,19 @@ export default function App() {
       }
     });
 
+    socket.on('voice:moved-elsewhere', ({ channelId }: { channelId: string }) => {
+      if (activeVoiceChannelIdRef.current !== channelId) return;
+      revokeRemoteControlInternal(true);
+      rtc.leaveChannel();
+      audioEngine.stopMusic();
+      setActiveVoiceChannelId(null);
+      setDmVoiceParticipants([]);
+      setMusicState(null);
+      setVideoState(null);
+      setViewMode('chat');
+      showToast('Você entrou nesta call por outra conexão, então esta saiu.', 'info');
+    });
+
     socket.on('voice:channel-deleted', ({ channelId }: { channelId: string }) => {
       if (activeVoiceChannelIdRef.current === channelId) {
         revokeRemoteControlInternal(true);
@@ -1856,10 +1888,30 @@ export default function App() {
     api
       .getMessages(activeTextChannelId)
       .then((res) => {
-        setMessagesByChannel((prev) => ({ ...prev, [activeTextChannelId]: res.messages }));
+        const order = recentTextChannelsRef.current.filter((id) => id !== activeTextChannelId);
+        order.unshift(activeTextChannelId);
+        recentTextChannelsRef.current = order.slice(0, MAX_CACHED_CHANNELS);
+        setMessagesByChannel((prev) => {
+          // só os últimos canais visitados ficam na memória; os outros são buscados de novo ao abrir
+          const next: Record<string, ChatMessage[]> = {};
+          for (const id of recentTextChannelsRef.current) {
+            if (id === activeTextChannelId) next[id] = res.messages;
+            else if (prev[id]) next[id] = prev[id];
+          }
+          return next;
+        });
       })
       .catch(() => {});
   }, [token, activeTextChannelId, navArea, api]);
+
+  refetchActiveTextChannelRef.current = () => {
+    if (!api || !activeTextChannelId || navArea !== 'server') return;
+    const chId = activeTextChannelId;
+    api
+      .getMessages(chId)
+      .then((res) => setMessagesByChannel((prev) => ({ ...prev, [chId]: res.messages })))
+      .catch(() => {});
+  };
 
   // Fetch & merge DM message history with encrypted local vault
   useEffect(() => {
@@ -2349,6 +2401,45 @@ export default function App() {
     },
     [muted, deafened, revokeRemoteControlInternal, disconnectLanCallSocket, showError]
   );
+
+  rejoinVoiceAfterReconnectRef.current = (socket: Socket) => {
+    const channelId = activeVoiceChannelIdRef.current;
+    const rtc = rtcRef.current;
+    if (!channelId || !rtc || isLanCallActiveRef.current || socketRef.current !== socket) return;
+    rtc.attachSocket(socket);
+    rtc.resetPeersForRejoin(channelId, socket.id || '');
+    socket.emit(
+      'voice:join',
+      { channelId, muted, deafened },
+      async (res: {
+        ok?: boolean;
+        error?: string;
+        selfSocketId?: string;
+        peers?: VoiceParticipant[];
+        participants?: VoiceParticipant[];
+        musicState?: MusicState;
+        videoState?: VideoState;
+      }) => {
+        if (activeVoiceChannelIdRef.current !== channelId) return; // saiu da call enquanto reconectava
+        if (!res?.ok) {
+          rtc.leaveChannel();
+          setActiveVoiceChannelId(null);
+          showError(res?.error || 'A conexão caiu e não foi possível voltar para a call.');
+          return;
+        }
+        const selfId = res.selfSocketId || socket.id || '';
+        setSelfSocketId(selfId);
+        if (channelId.startsWith('dm:')) setDmVoiceParticipants(res.participants || []);
+        await rtc.completeJoin(channelId, selfId, res.peers || []);
+        if (res.musicState) {
+          setMusicState(res.musicState);
+          audioEngine.syncMusicState(res.musicState);
+        }
+        if (res.videoState) setVideoState({ ...res.videoState, receivedAt: Date.now() });
+        showToast('Conexão restabelecida: você voltou para a call.', 'info');
+      }
+    );
+  };
 
   const connectAndJoinLanCall = useCallback(
     async (callServerUrl: string, dmRoomId: string) => {
@@ -4401,6 +4492,7 @@ export default function App() {
 
       {/* Full Discord Profile & Nitro-Free Global Profile Editor Modal */}
       {profileModal && resolvedModalUser && (
+        <LazyBoundary>
         <UserProfileModal
           user={resolvedModalUser}
           selfUser={user}
@@ -4425,12 +4517,14 @@ export default function App() {
             handleStartPrivateCall(u);
           }}
         />
+        </LazyBoundary>
       )}
 
       {/* Server Directory Modal ("+" Button: Create Server or Join IPv4/LAN) */}
       <ImageContextMenu onNotify={showToast} />
 
       {showServerDirectory && (
+        <LazyBoundary>
         <ServerDirectoryModal
           initialTab="create"
           lanServers={lanServers}
@@ -4439,10 +4533,12 @@ export default function App() {
           onJoinServer={handleJoinServerFromDirectory}
           onClose={() => setShowServerDirectory(false)}
         />
+        </LazyBoundary>
       )}
 
       {/* Modals */}
       {showHostModal && server && (
+        <LazyBoundary>
         <HostControlModal
           api={api}
           appMode={appMode}
@@ -4457,10 +4553,11 @@ export default function App() {
           onStopTunnel={handleStopTunnel}
           onClose={() => setShowHostModal(false)}
         />
+        </LazyBoundary>
       )}
 
       {show3DViewer && (
-        <Suspense
+        <LazyBoundary
           fallback={
             <div className="fixed inset-0 z-[130] bg-black/75 flex items-center justify-center text-white text-xs font-bold">
               Carregando motor 3D...
@@ -4473,7 +4570,7 @@ export default function App() {
             serverUrl={serverUrl}
             onClose={() => setShow3DViewer(false)}
           />
-        </Suspense>
+        </LazyBoundary>
       )}
 
       {createChannelMeta && api && (
@@ -4498,6 +4595,7 @@ export default function App() {
       )}
 
       {settingsTab && (
+        <LazyBoundary>
         <SettingsModal
           initialTab={settingsTab}
           api={api}
@@ -4522,6 +4620,7 @@ export default function App() {
           onLogout={handleLogout}
           onClose={() => setSettingsTab(null)}
         />
+        </LazyBoundary>
       )}
 
       {channelContextMenu && (
@@ -4629,6 +4728,7 @@ export default function App() {
       )}
 
       {editingChannel && api && (
+        <LazyBoundary>
         <ChannelSettingsModal
           channel={editingChannel}
           categories={categories}
@@ -4645,6 +4745,7 @@ export default function App() {
           }}
           onClose={() => setEditingChannel(null)}
         />
+        </LazyBoundary>
       )}
 
       {groupModal && (
@@ -4662,6 +4763,7 @@ export default function App() {
       )}
 
       {trelloModal && (
+        <LazyBoundary>
         <TrelloBoardModal
           scopeKey={trelloModal.scopeKey}
           scopeTitle={trelloModal.scopeTitle}
@@ -4672,6 +4774,7 @@ export default function App() {
           onSaveBoards={(nextBoards) => handleSaveTrelloBoards(trelloModal.scopeKey, nextBoards)}
           onClose={() => setTrelloModal(null)}
         />
+        </LazyBoundary>
       )}
       </div>
     </div>

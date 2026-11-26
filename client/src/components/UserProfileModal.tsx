@@ -22,6 +22,7 @@ import { GlobalProfile, PresenceStatus, Role, User, UserConnection } from '../ty
 import { AVATAR_DECORATIONS, Avatar, NAME_STYLES } from './Avatar';
 import { PROFILE_EFFECTS, ProfileEffectLayer } from './ProfileEffect';
 import { CONNECTION_PLATFORM_OPTIONS, ConnectionCard } from './ConnectionBadge';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 const BANNER_COLORS = ['#5865F2', '#7c3aed', '#23a55a', '#db2777', '#ea580c', '#0284c7', '#dc2626', '#1e1f22'];
 const STATUS_OPTIONS: Array<{ value: PresenceStatus; label: string; dot: string }> = [
@@ -87,6 +88,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   onOpenDm,
   onStartPrivateCall,
 }) => {
+  useEscapeToClose(onClose);
   const isSelf = user.id === selfUser.id;
   const [rightTab, setRightTab] = useState<'activity' | 'about' | 'edit'>(
     initialEdit && isSelf ? 'edit' : 'activity'

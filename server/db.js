@@ -347,17 +347,19 @@ export function initDataPaths(customDataDir) {
 }
 
 // AES-256-GCM + Gzip encrypted message vault (80-90% smaller & protected at rest!)
-function writeEncryptedVault(filePath, payloadObj) {
-  const jsonBuf = Buffer.from(JSON.stringify(payloadObj), 'utf8');
-  const compressed = zlib.gzipSync(jsonBuf, { level: 6 });
+function encryptVaultBuffer(compressed) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', vaultKey, iv);
   const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()]);
   const tag = cipher.getAuthTag();
   // Format: [4B magic "PCV1"][12B iv][16B authTag][ciphertext]
-  const out = Buffer.concat([Buffer.from('PCV1', 'ascii'), iv, tag, encrypted]);
+  return Buffer.concat([Buffer.from('PCV1', 'ascii'), iv, tag, encrypted]);
+}
+
+function writeEncryptedVault(filePath, jsonStr) {
+  const compressed = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'), { level: 6 });
   const tmp = `${filePath}.tmp`;
-  fs.writeFileSync(tmp, out);
+  fs.writeFileSync(tmp, encryptVaultBuffer(compressed));
   fs.renameSync(tmp, filePath);
 }
 
@@ -548,35 +550,90 @@ export function getDb() {
   return db;
 }
 
+// Assinatura do último cofre gravado: mudanças de presença, perfil, whiteboard etc. não
+// recomprimem nem recriptografam todas as mensagens de novo.
+let lastVaultSig = '';
+let saveGen = 0;
+let asyncSaving = false;
+let asyncPending = false;
+
+function snapshotForSave() {
+  const vaultJson = JSON.stringify({
+    messages: db.messages || {},
+    directMessages: db.directMessages || {},
+    groupMessages: db.groupMessages || {},
+  });
+  const vaultSig = crypto.createHash('sha1').update(vaultJson).digest('hex');
+  const { messages: _m, directMessages: _dm, groupMessages: _gm, ...metaOnly } = db;
+  // JSON compacto: sem indentação o arquivo fica menor e é gerado mais rápido
+  return { vaultJson, vaultSig, metaJson: JSON.stringify(metaOnly) };
+}
+
 export function saveDbNow() {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
   if (!db || !paths) return;
+  saveGen += 1; // invalida um salvamento assíncrono que ainda esteja em andamento
+  const snap = snapshotForSave();
 
-  // 1) Write compressed + AES-256-GCM encrypted message vault
-  writeEncryptedVault(paths.MESSAGES_VAULT_FILE, {
-    messages: db.messages || {},
-    directMessages: db.directMessages || {},
-    groupMessages: db.groupMessages || {},
-  });
+  // 1) Write compressed + AES-256-GCM encrypted message vault (só se mudou)
+  if (snap.vaultSig !== lastVaultSig || !fs.existsSync(paths.MESSAGES_VAULT_FILE)) {
+    writeEncryptedVault(paths.MESSAGES_VAULT_FILE, snap.vaultJson);
+    lastVaultSig = snap.vaultSig;
+  }
 
   // 2) Write lean metadata JSON (without duplicated raw messages!)
-  const { messages: _m, directMessages: _dm, groupMessages: _gm, ...metaOnly } = db;
   const tmpFile = `${paths.DB_FILE}.tmp`;
-  fs.writeFileSync(tmpFile, JSON.stringify(metaOnly, null, 2), 'utf8');
+  fs.writeFileSync(tmpFile, snap.metaJson, 'utf8');
   fs.renameSync(tmpFile, paths.DB_FILE);
 }
 
+const gzipAsync = (buf) =>
+  new Promise((resolve, reject) => zlib.gzip(buf, { level: 6 }, (err, out) => (err ? reject(err) : resolve(out))));
+
+async function saveDbAsync() {
+  if (!db || !paths) return;
+  const gen = saveGen;
+  const snap = snapshotForSave();
+  // gzip roda no pool de threads do Node e a escrita é assíncrona: o host não trava durante o salvamento
+  let vaultBuf = null;
+  if (snap.vaultSig !== lastVaultSig) vaultBuf = encryptVaultBuffer(await gzipAsync(Buffer.from(snap.vaultJson, 'utf8')));
+  if (gen !== saveGen) return; // um salvamento síncrono mais novo já gravou
+  if (vaultBuf) {
+    const tmp = `${paths.MESSAGES_VAULT_FILE}.atmp`;
+    await fs.promises.writeFile(tmp, vaultBuf);
+    if (gen !== saveGen) return;
+    await fs.promises.rename(tmp, paths.MESSAGES_VAULT_FILE);
+    lastVaultSig = snap.vaultSig;
+  }
+  const tmpFile = `${paths.DB_FILE}.atmp`;
+  await fs.promises.writeFile(tmpFile, snap.metaJson, 'utf8');
+  if (gen !== saveGen) return;
+  await fs.promises.rename(tmpFile, paths.DB_FILE);
+}
+
 export function saveDb() {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
+  // agrupa várias mudanças seguidas num só salvamento, sem adiar para sempre em chat movimentado
+  if (saveTimer) return;
+  saveTimer = setTimeout(async () => {
     saveTimer = null;
+    if (asyncSaving) {
+      asyncPending = true;
+      return;
+    }
+    asyncSaving = true;
     try {
-      saveDbNow();
+      await saveDbAsync();
     } catch (err) {
       console.error('[DB] Erro ao salvar db:', err);
+    } finally {
+      asyncSaving = false;
+      if (asyncPending) {
+        asyncPending = false;
+        saveDb();
+      }
     }
-  }, 180);
+  }, 400);
 }

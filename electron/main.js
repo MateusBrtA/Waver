@@ -116,6 +116,9 @@ app.commandLine.appendSwitch('renderer-process-limit', '2');
 app.commandLine.appendSwitch('disable-site-isolation-trials');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-zero-copy');
+// Menos processos/memória: sem renderer "reserva" pré-aberto, sem Cast/Media Router e sem
+// downloads de dicas de otimização do Chrome (nada disso é usado pelo PulseCord).
+app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess,MediaRouter,OptimizationHints,Translate');
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
 }

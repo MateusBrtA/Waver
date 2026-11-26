@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { ApiClient, normalizeServerUrl } from '../lib/api';
 import { LanServer, ServerInfo } from '../types';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 interface ServerDirectoryModalProps {
   initialTab?: 'create' | 'join';
@@ -40,6 +41,7 @@ export const ServerDirectoryModal: React.FC<ServerDirectoryModalProps> = ({
   onJoinServer,
   onClose,
 }) => {
+  useEscapeToClose(onClose);
   const isElectron = Boolean(window.electronAPI?.isElectron);
   const [tab, setTab] = useState<'create' | 'join'>(isElectron ? initialTab : 'join');
 

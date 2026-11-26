@@ -21,10 +21,14 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
   let cachedUiHash = null;
   let cachedUiBundleGz = null;
 
+  let uiHashComputedAt = 0;
   function computeUiHash() {
-    if (!clientDistDir || !fs.existsSync(clientDistDir)) return '';
+    // a interface servida não muda enquanto o host roda: não relê/recalcula tudo a cada cliente
+    if (cachedUiHash !== null && Date.now() - uiHashComputedAt < 5 * 60 * 1000) return cachedUiHash;
+    uiHashComputedAt = Date.now();
+    if (!clientDistDir || !fs.existsSync(clientDistDir)) return (cachedUiHash = '');
     const files = walkRelFiles(clientDistDir);
-    if (files.length === 0) return '';
+    if (files.length === 0) return (cachedUiHash = '');
     const h = crypto.createHash('sha256');
     for (const f of files) {
       h.update(f.rel);
@@ -34,9 +38,10 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
     return cachedUiHash;
   }
 
+  let cachedUiBundleHash = null;
   function getUiBundleBuffer() {
-    const hash = cachedUiHash || computeUiHash();
-    if (cachedUiBundleGz) return { hash, buffer: cachedUiBundleGz };
+    const hash = computeUiHash();
+    if (cachedUiBundleGz && cachedUiBundleHash === hash) return { hash, buffer: cachedUiBundleGz };
     if (!clientDistDir || !fs.existsSync(clientDistDir)) return null;
 
     const files = walkRelFiles(clientDistDir);
@@ -51,6 +56,7 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
       builtAt: Date.now(),
     });
     cachedUiBundleGz = zlib.gzipSync(Buffer.from(json, 'utf8'), { level: 6 });
+    cachedUiBundleHash = hash;
     return { hash, buffer: cachedUiBundleGz };
   }
 

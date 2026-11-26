@@ -225,7 +225,40 @@ async function runYtDlpJson(binPath, args, timeoutMs = 28000) {
   }
 }
 
+// Cada yt-dlp é um processo Python pesado: no máximo 2 ao mesmo tempo no host (uma playlist colada
+// não abre 30 de uma vez) e pedidos idênticos em andamento compartilham o mesmo resultado.
+const YTDLP_MAX_CONCURRENT = 2;
+let ytDlpRunning = 0;
+const ytDlpQueue = [];
+const ytDlpInFlight = new Map();
+
+function withYtDlpSlot(task) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      ytDlpRunning += 1;
+      task()
+        .then(resolve, reject)
+        .finally(() => {
+          ytDlpRunning -= 1;
+          const next = ytDlpQueue.shift();
+          if (next) next();
+        });
+    };
+    if (ytDlpRunning < YTDLP_MAX_CONCURRENT) run();
+    else ytDlpQueue.push(run);
+  });
+}
+
 function runYtDlpJsonOnce(binPath, args, timeoutMs = 28000) {
+  const key = JSON.stringify([binPath, args]);
+  const existing = ytDlpInFlight.get(key);
+  if (existing) return existing;
+  const p = withYtDlpSlot(() => runYtDlpJsonProcess(binPath, args, timeoutMs)).finally(() => ytDlpInFlight.delete(key));
+  ytDlpInFlight.set(key, p);
+  return p;
+}
+
+function runYtDlpJsonProcess(binPath, args, timeoutMs) {
   return new Promise((resolve, reject) => {
     execFile(
       binPath,

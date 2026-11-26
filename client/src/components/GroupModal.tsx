@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Camera, Check, Loader2, Phone, Trash2, UserPlus, Users, X } from 'lucide-react';
 import { resolveMediaUrl } from '../lib/api';
 import { PrivateGroup, PrivateGroupMemberMeta } from '../types';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 function readFileAsCompressedDataUrl(file: File, maxDim = 256): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -58,6 +59,7 @@ export const GroupModal: React.FC<GroupModalProps> = ({
   onLeaveGroup,
   onClose,
 }) => {
+  useEscapeToClose(onClose);
   const [name, setName] = useState(group?.name || 'Chamada da Galera');
   const [selectedIds, setSelectedIds] = useState<string[]>(() => {
     if (group) return group.memberIds.filter((id) => id !== selfUserId);

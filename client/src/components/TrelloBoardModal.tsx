@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react';
 import { TrelloBoard, TrelloCard, TrelloChecklistItem, User } from '../types';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 const BOARD_BACKGROUNDS = [
   'linear-gradient(135deg, #1e293b 0%, #312e81 55%, #0f172a 100%)',
@@ -47,6 +48,7 @@ export const TrelloBoardModal: React.FC<TrelloBoardModalProps> = ({
   onSaveBoards,
   onClose,
 }) => {
+  useEscapeToClose(onClose);
   const safeBoards = useMemo<TrelloBoard[]>(() => {
     if (boards.length > 0) return boards;
     return [

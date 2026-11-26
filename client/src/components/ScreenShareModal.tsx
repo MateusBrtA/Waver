@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { DesktopSourceItem, ScreenShareConfig } from '../types';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 interface ScreenShareModalProps {
   onClose: () => void;
@@ -18,6 +19,7 @@ interface ScreenShareModalProps {
 }
 
 export const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ onClose, onStart }) => {
+  useEscapeToClose(onClose);
   const isElectron = Boolean(window.electronAPI?.isElectron);
 
   const [sources, setSources] = useState<DesktopSourceItem[]>([]);

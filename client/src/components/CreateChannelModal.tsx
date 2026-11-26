@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Hash, Loader2, Lock, Volume2, X } from 'lucide-react';
+import { useEscapeToClose } from '../lib/useEscapeToClose';
 
 interface CreateChannelModalProps {
   initialType: 'text' | 'voice';
@@ -22,6 +23,7 @@ export const CreateChannelModal: React.FC<CreateChannelModalProps> = ({
   onClose,
   onCreate,
 }) => {
+  useEscapeToClose(onClose);
   const [type, setType] = useState<'text' | 'voice'>(initialType);
   const [name, setName] = useState('');
   const [topic, setTopic] = useState('');
