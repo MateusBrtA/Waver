@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# PulseCord - instalador do servidor dedicado para Debian 12/13 (IPv6 + IPv4).
+# Waver - instalador do servidor dedicado para Debian 12/13 (IPv6 + IPv4).
 #
 # Uso (como root, dentro da pasta extraída do pacote pulsecord-server):
 #   sudo ./deploy/debian/install.sh [--port 3000] [--with-turn] [--domain chat.exemplo.com] [--no-firewall]
 #
-#   --port N        porta TCP do PulseCord (padrão 3000)
+#   --port N        porta TCP do Waver (padrão 3000)
 #   --with-turn     instala o coturn (TURN) para chamadas atravessarem NAT/CGNAT e firewalls
 #   --domain D      domínio apontado para este servidor (registros A/AAAA). Usado no TURN e no HTTPS opcional
 #   --https         instala o Caddy como proxy HTTPS (exige --domain e as portas 80/443 livres)
@@ -89,11 +89,11 @@ id pulsecord >/dev/null 2>&1 || useradd --system --home-dir "$DATA_DIR" --shell 
 install -d -m 0755 "$APP_DIR" "$ENV_DIR"
 install -d -m 0750 -o pulsecord -g pulsecord "$DATA_DIR"
 
-echo "==> Copiando o PulseCord para $APP_DIR"
+echo "==> Copiando o Waver para $APP_DIR"
 rsync -a --delete \
   --exclude 'server/node_modules' --exclude 'server/data' \
   "$PKG_DIR/server" "$PKG_DIR/client" "$PKG_DIR/package.json" "$PKG_DIR/deploy" "$APP_DIR/"
-# exe do app para os amigos atualizarem pelo próprio PulseCord (opcional)
+# exe do app para os amigos atualizarem pelo próprio Waver (opcional)
 if [ -d "$PKG_DIR/dist-app" ]; then
   rsync -a "$PKG_DIR/dist-app" "$APP_DIR/"
 else
@@ -239,7 +239,7 @@ done
 
 echo
 echo "================================================================"
-echo " PulseCord instalado e rodando (systemctl status pulsecord)"
+echo " Waver instalado e rodando (systemctl status pulsecord)"
 echo "================================================================"
 if [ "$WITH_HTTPS" -eq 1 ]; then
   echo " Endereço: https://$DOMAIN"

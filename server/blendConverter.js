@@ -266,7 +266,7 @@ export function convertBlendToGlb(blendFilePath, outputGlbPath) {
 
     execFile(
       blender,
-      ['--background', '--factory-startup', blendFilePath, '--python', scriptPath, '--', outputGlbPath],
+      ['--background', '--factory-startup', '--disable-autoexec', blendFilePath, '--python', scriptPath, '--', outputGlbPath],
       { timeout: 180000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
       (err, stdout, stderr) => {
         if (err || !fs.existsSync(outputGlbPath) || fs.statSync(outputGlbPath).size === 0) {

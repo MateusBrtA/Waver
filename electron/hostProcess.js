@@ -19,7 +19,7 @@ class HostProcessServer extends EventEmitter {
   ensureChild() {
     if (this.spawned) return this.spawned;
     const child = utilityProcess.fork(path.join(__dirname, 'hostWorker.js'), [], {
-      serviceName: 'PulseCord Servidor',
+      serviceName: 'Waver Servidor',
       stdio: 'pipe',
     });
     this.child = child;

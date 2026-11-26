@@ -1,7 +1,7 @@
-# Assinatura digital do PulseCord (Windows)
+# Assinatura digital do Waver (Windows)
 
 Sem assinatura, o Windows mostra **"O Windows protegeu o computador" / "Editor desconhecido"** ao abrir o
-`PulseCord-Portable.exe` ou o instalador. Para isso sumir é preciso assinar o .exe com um certificado de
+`Waver-Portable.exe` ou o instalador. Para isso sumir é preciso assinar o .exe com um certificado de
 *code signing* emitido por uma autoridade certificadora (CA). **Não existe certificado gratuito para isso**.
 
 O projeto já está pronto: basta ter o certificado e rodar
@@ -68,5 +68,5 @@ e também `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` e `AZURE_CLIENT_SECRET` do *App R
   `$env:PULSECORD_SIGN_TIMESTAMP = "http://timestamp.sectigo.com"` (ou o do seu fornecedor). Com carimbo,
   o .exe continua válido depois que o certificado vence.
 - Algoritmo: SHA-256.
-- Conferir manualmente: `Get-AuthenticodeSignature .\dist-app\PulseCord-Portable.exe`
+- Conferir manualmente: `Get-AuthenticodeSignature .\dist-app\Waver-Portable.exe`
 - `npm run build:exe` continua gerando a versão **sem** assinatura, como antes.

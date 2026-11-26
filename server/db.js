@@ -381,7 +381,7 @@ function createInitialDb(soundsDir) {
   const starterSounds = ensureStarterSounds(soundsDir);
   return {
     server: {
-      name: 'PulseCord da Galera',
+      name: 'Waver da Galera',
       description: 'Servidor privado estilo Discord com 1080p120, Parsec, Whiteboard, Trello e chamadas em grupo',
       iconColor: '#5865F2',
       iconUrl: null,
@@ -408,11 +408,11 @@ function createInitialDb(soundsDir) {
           id: 'msg-welcome',
           channelId: 'ch-geral',
           authorId: 'system',
-          authorName: 'PulseCord',
+          authorName: 'Waver',
           authorAvatar: null,
           authorColor: '#5865F2',
           content:
-            'Bem-vindo ao PulseCord 4.0! 🎉\n• Configure cargos, permissões granulares, canais privados, registro de auditoria, Whiteboard colaborativa com suporte a mesa digitalizadora, Quadros Trello e chamadas em grupo!\n• Histórico salvo com compressão e criptografia AES-256-GCM!',
+            'Bem-vindo ao Waver! 🎉\n• Configure cargos, permissões granulares, canais privados, registro de auditoria, Whiteboard colaborativa com suporte a mesa digitalizadora, Quadros Trello e chamadas em grupo!\n• Histórico salvo com compressão e criptografia AES-256-GCM!',
           attachments: [],
           gifUrl: null,
           replyTo: null,

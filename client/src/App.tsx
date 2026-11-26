@@ -62,6 +62,7 @@ import {
   ThemeConfig,
   TrelloBoard,
   UpdateManifest,
+  GithubUpdateState,
   User,
   VideoState,
   VoiceParticipant,
@@ -98,6 +99,7 @@ import { EventsModal } from './components/EventsModal';
 import { SearchModal } from './components/SearchModal';
 import { PollComposerModal, PollDraft } from './components/PollComposerModal';
 import { StageBar } from './components/StageBar';
+import { WaverLogo } from './components/WaverLogo';
 import { CallRecording, ClipBuffer, RecSource } from './lib/callRecorder';
 import { getDesktopPrefs, prettyAccelerator, useDesktopPrefs } from './lib/desktopPrefs';
 
@@ -419,6 +421,10 @@ export default function App() {
     isPortable: boolean;
   } | null>(null);
   const [updateManifest, setUpdateManifest] = useState<UpdateManifest | null>(null);
+  // atualização pelo GitHub: baixa sozinha em segundo plano e avisa quando está pronta
+  const [githubUpdate, setGithubUpdate] = useState<GithubUpdateState | null>(null);
+  const [githubUpdateDismissed, setGithubUpdateDismissed] = useState(false);
+  const [githubInstalling, setGithubInstalling] = useState(false);
   const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
   const [updateApplying, setUpdateApplying] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{
@@ -433,7 +439,7 @@ export default function App() {
   const [profilePopout, setProfilePopout] = useState<{ userId: string; x: number; y: number } | null>(null);
   const [profileModal, setProfileModal] = useState<{ userId: string; edit: boolean } | null>(null);
   const [mentionRequest, setMentionRequest] = useState<{ text: string; seq: number } | null>(null);
-  // arquivos vindos do "Compartilhar no PulseCord" do Explorer
+  // arquivos vindos do "Compartilhar no Waver" do Explorer
   const [incomingFilesRequest, setIncomingFilesRequest] = useState<{ files: File[]; seq: number } | null>(null);
   const [pendingShareFiles, setPendingShareFiles] = useState<SharedFileInfo[]>([]);
   const [shareBusy, setShareBusy] = useState(false);
@@ -667,6 +673,38 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const e = window.electronAPI;
+    if (!e?.onGithubUpdateState) return;
+    e.getGithubUpdateState?.().then(setGithubUpdate).catch(() => {});
+    return e.onGithubUpdateState((st) => setGithubUpdate(st));
+  }, []);
+  // em chamada, o download da atualização espera (não disputa a internet com a voz/vídeo)
+  useEffect(() => {
+    window.electronAPI?.setUpdateBusy?.(Boolean(activeVoiceChannelId));
+  }, [activeVoiceChannelId]);
+  // ícone da bandeja: linha de som enquanto está em chamada; mexe quando você fala, vermelha se mutado
+  useEffect(() => {
+    const inCall = Boolean(activeVoiceChannelId);
+    window.electronAPI?.setTrayVoiceState?.({
+      inCall,
+      muted: inCall && (muted || deafened),
+      speaking: inCall && !muted && !deafened && localSpeaking,
+    });
+  }, [activeVoiceChannelId, muted, deafened, localSpeaking]);
+
+  const handleInstallGithubUpdate = useCallback(async () => {
+    if (!window.electronAPI?.installGithubUpdate) return;
+    if (activeVoiceChannelIdRef.current && !window.confirm('Atualizar agora vai fechar o Waver e tirar você da chamada. Continuar?')) return;
+    setGithubInstalling(true);
+    try {
+      await window.electronAPI.installGithubUpdate();
+    } catch (err: unknown) {
+      setGithubInstalling(false);
+      showError((err as Error).message || 'Não foi possível instalar a atualização.');
+    }
+  }, [showError]);
+
   const checkUpdates = useCallback(async () => {
     if (!token || !api) return;
     try {
@@ -798,13 +836,13 @@ export default function App() {
     return true;
   };
 
-  // Atalhos globais (funcionam com o PulseCord em segundo plano, inclusive dentro de jogos)
+  // Atalhos globais (funcionam com o Waver em segundo plano, inclusive dentro de jogos)
   useEffect(() => {
     if (!window.electronAPI?.setGlobalShortcuts) return;
     window.electronAPI
       .setGlobalShortcuts({ ...desktopPrefs.shortcuts })
       .then((r) => {
-        if (r && !r.ok && r.failed?.length) console.warn('[PulseCord] Atalhos em uso por outro programa:', r.failed.join(', '));
+        if (r && !r.ok && r.failed?.length) console.warn('[Waver] Atalhos em uso por outro programa:', r.failed.join(', '));
       })
       .catch(() => {});
   }, [desktopPrefs.shortcuts.mute, desktopPrefs.shortcuts.deafen, desktopPrefs.shortcuts.overlay, desktopPrefs.shortcuts.clip]);
@@ -2476,7 +2514,7 @@ export default function App() {
     password: string;
   }) => {
     if (!window.electronAPI?.isElectron) {
-      throw new Error('Criar servidor só está disponível no aplicativo PulseCord (.exe).');
+      throw new Error('Criar servidor só está disponível no aplicativo Waver (.exe).');
     }
     revokeRemoteControlInternal(true);
     disconnectLanCallSocket();
@@ -2957,7 +2995,7 @@ export default function App() {
       if (prefs.notificationSound && !deafened && !(focused && viewing)) audioEngine.playUiTone(kind === 'dm' ? 'message_dm' : 'message');
     };
     if (kind === 'dm') playSound();
-    let title = msg.authorName || 'PulseCord';
+    let title = msg.authorName || 'Waver';
     let route: NotificationRoute = null;
     if (kind === 'dm') {
       route = { type: 'dm', userId: msg.authorId };
@@ -3488,7 +3526,7 @@ export default function App() {
   const handleInviteRemoteControl = useCallback(
     (targetSocketId: string) => {
       if (!isElectron) {
-        showError('Controle remoto (Parsec/AnyDesk) requer o app Desktop PulseCord (.exe) no PC que compartilha a tela.');
+        showError('Controle remoto (Parsec/AnyDesk) requer o app Desktop Waver (.exe) no PC que compartilha a tela.');
         return;
       }
       if (!localScreenStream) {
@@ -3520,7 +3558,7 @@ export default function App() {
     if (kind === 'request') {
       // Someone asked to control MY screen
       if (!isElectron) {
-        showError('Controle remoto do PC requer o app Desktop PulseCord (.exe).');
+        showError('Controle remoto do PC requer o app Desktop Waver (.exe).');
         activeSock?.emit('rc:decline', { targetSocketId: fromSocketId });
         return;
       }
@@ -3652,7 +3690,7 @@ export default function App() {
 
     if (useLan) {
       if (!window.electronAPI?.lanPeersSaveGroup) {
-        throw new Error('Grupos LAN P2P requerem o app PulseCord (.exe).');
+        throw new Error('Grupos LAN P2P requerem o app Waver (.exe).');
       }
       const res = await window.electronAPI.lanPeersSaveGroup({
         id: payload.id,
@@ -4003,7 +4041,7 @@ export default function App() {
         clipBufferRef.current = new ClipBuffer(recSourcesRef.current(), localScreenVideoRef.current);
         setClipsActive(true);
       } catch (err) {
-        console.warn('[PulseCord] Clipes indisponíveis:', err);
+        console.warn('[Waver] Clipes indisponíveis:', err);
       }
     } else if (!want && clipBufferRef.current) {
       clipBufferRef.current.stop();
@@ -4104,7 +4142,7 @@ export default function App() {
       const r = await buf.save();
       if (!r.seconds) return;
       audioEngine.playUiTone('unmute');
-      showToast(r.path ? `Clipe de ${r.seconds} s salvo em Vídeos\\PulseCord\\Clipes.` : `Clipe de ${r.seconds} s baixado.`, 'info');
+      showToast(r.path ? `Clipe de ${r.seconds} s salvo em Vídeos\\Waver\\Clipes.` : `Clipe de ${r.seconds} s baixado.`, 'info');
     } catch {
       showError('Não foi possível salvar o clipe.');
     }
@@ -4262,7 +4300,8 @@ export default function App() {
     isElectron ? (
       <div className="h-6 shrink-0 bg-[#1e1f22] pc-titlebar px-3 flex items-center justify-between select-none app-drag">
         <div className="flex items-center gap-2">
-          <span className="text-[11px] font-bold tracking-widest uppercase text-[#949ba4]">PulseCord</span>
+          <WaverLogo className="w-3.5 h-3.5 shrink-0" />
+          <span className="text-[11px] font-bold tracking-widest uppercase text-[#949ba4]">Waver</span>
           {appMode === 'host' && hostStatus?.running && (
             <span className="text-[10px] font-bold text-[#23a55a] bg-[#23a55a]/15 px-1.5 rounded">
               HOST ONLINE
@@ -4306,7 +4345,7 @@ export default function App() {
         {renderTitlebar()}
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[#b5bac1]">
           <Loader2 className="w-8 h-8 animate-spin text-[#5865f2]" />
-          <span className="text-sm font-medium">Iniciando PulseCord...</span>
+          <span className="text-sm font-medium">Iniciando Waver...</span>
         </div>
       </div>
     );
@@ -4341,7 +4380,44 @@ export default function App() {
       {renderTitlebar()}
 
       {/* Automatic LAN Update Available Banner */}
-      {updateKindAvailable !== 'none' && !updateBannerDismissed && updateManifest && (
+      {githubUpdate?.status === 'ready' && githubUpdate.version && !githubUpdateDismissed && (
+        <div className="bg-[#248046] text-white text-sm font-medium px-4 py-1.5 flex items-center justify-center gap-3 shrink-0">
+          <Download className="w-4 h-4 shrink-0" />
+          <span className="truncate" title={githubUpdate.notes || undefined}>
+            {githubInstalling
+              ? 'Instalando a atualização… o Waver vai reabrir sozinho.'
+              : `Waver v${githubUpdate.version} já foi baixado e conferido. Atualize quando quiser.`}
+          </span>
+          {!githubInstalling && (
+            <>
+              <button
+                type="button"
+                onClick={handleInstallGithubUpdate}
+                className="px-3 py-0.5 rounded-full bg-white text-[#111214] font-bold hover:bg-white/90 cursor-pointer shrink-0"
+              >
+                Reiniciar e atualizar
+              </button>
+              <button
+                type="button"
+                title="Depois"
+                onClick={() => setGithubUpdateDismissed(true)}
+                className="p-0.5 text-white/80 hover:text-white cursor-pointer shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {updateKindAvailable !== 'none' &&
+        !updateBannerDismissed &&
+        updateManifest &&
+        !(
+          githubUpdate?.status === 'ready' &&
+          githubUpdate.version &&
+          compareVersions(githubUpdate.version, updateManifest.version) >= 0
+        ) && (
         <div className="bg-[#5865f2] text-white text-sm font-medium px-4 py-1.5 flex items-center justify-center gap-3 shrink-0">
           <Download className="w-4 h-4 shrink-0" />
           <span>

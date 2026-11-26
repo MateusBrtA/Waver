@@ -9,7 +9,7 @@ function formatSize(n: number) {
   return `${(n / 1048576).toFixed(1)} MB`;
 }
 
-/** Destino dos arquivos enviados pelo "Compartilhar no PulseCord" do Explorer. */
+/** Destino dos arquivos enviados pelo "Compartilhar no Waver" do Explorer. */
 export const ShareTargetModal: React.FC<{
   files: SharedFileInfo[];
   channels: Channel[];
@@ -45,7 +45,7 @@ export const ShareTargetModal: React.FC<{
             <FileUp className="w-5 h-5 text-white" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2 className="text-white font-semibold">Compartilhar no PulseCord</h2>
+            <h2 className="text-white font-semibold">Compartilhar no Waver</h2>
             <p className="text-xs text-[#b5bac1] truncate">
               {files.length === 1 ? files[0].name : `${files.length} arquivos`} · {formatSize(total)}
             </p>

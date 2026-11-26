@@ -321,7 +321,7 @@ export class WebRTCManager {
 
   private serverIceServers: RTCIceServer[] = [];
 
-  /** Servidores STUN/TURN informados pelo servidor PulseCord conectado (credenciais temporárias). */
+  /** Servidores STUN/TURN informados pelo servidor Waver conectado (credenciais temporárias). */
   setServerIceServers(list: RTCIceServer[] | null | undefined) {
     this.serverIceServers = Array.isArray(list) ? list.filter((s) => s && s.urls) : [];
   }
@@ -502,7 +502,7 @@ export class WebRTCManager {
   async acquireMicrophone(opts: { auto?: boolean } = {}): Promise<MediaStream | null> {
     if (!navigator.mediaDevices?.getUserMedia) {
       this.callbacks.onError(
-        'Microfone bloqueado pelo navegador em HTTP. Use o app Desktop PulseCord (.exe) para falar por voz em LAN!'
+        'Microfone bloqueado pelo navegador em HTTP. Use o app Desktop Waver (.exe) para falar por voz em LAN!'
       );
       return null;
     }

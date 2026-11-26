@@ -232,7 +232,7 @@ export function generateOfflineCssFromPrompt(prompt: string): {
     : "'Inter', 'Segoe UI', system-ui, sans-serif";
 
   const chunks: string[] = [
-    `/* Tema gerado por IA PulseCord: "${prompt.slice(0, 60)}" */`,
+    `/* Tema gerado por IA Waver: "${prompt.slice(0, 60)}" */`,
     `:root {`,
     `  --pc-bg-rail: ${bgRail};`,
     `  --pc-bg-sidebar: ${bgSidebar};`,
@@ -289,7 +289,7 @@ export async function generateOnlineAiCss(opts: {
   apiKey: string;
   model: string;
 }): Promise<string> {
-  const systemPrompt = `You are an expert UI theme designer for PulseCord (a Discord-like desktop app).
+  const systemPrompt = `You are an expert UI theme designer for Waver (a Discord-like desktop app).
 Return ONLY valid CSS (no markdown code fences, no explanations).
 Target these CSS variables in :root:
 --pc-bg-rail, --pc-bg-sidebar, --pc-bg-main, --pc-bg-surface, --pc-bg-elevated, --pc-bg-dock, --pc-border, --pc-text, --pc-text-muted, --pc-accent, --pc-radius
@@ -338,7 +338,7 @@ function stripCodeFences(text: string): string {
 }
 
 export function buildExternalAiPromptTemplate(userWish: string): string {
-  return `Gere apenas código CSS puro para personalizar o app PulseCord (estilo Discord / ricing Linux).
+  return `Gere apenas código CSS puro para personalizar o app Waver (estilo Discord / ricing Linux).
 Variáveis CSS disponíveis em :root:
 --pc-bg-rail, --pc-bg-sidebar, --pc-bg-main, --pc-bg-surface, --pc-bg-dock, --pc-border, --pc-text, --pc-text-muted, --pc-accent, --pc-radius
 Classes disponíveis:

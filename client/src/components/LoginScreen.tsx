@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { ApiClient, normalizeServerUrl } from '../lib/api';
 import { AppMode, GlobalProfile, LanServer, ServerInfo, User } from '../types';
+import { WaverLogo } from './WaverLogo';
 
 interface LoginScreenProps {
   initialServerUrl: string;
@@ -279,7 +280,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
           >
             <div className="px-8 pt-8 pb-2 text-center">
               <h1 className="text-2xl font-semibold text-[#f2f3f5]">Boas-vindas!</h1>
-              <p className="mt-2 text-base text-[#b5bac1]">Escolha seu nome e sua foto para entrar no PulseCord.</p>
+              <p className="mt-2 text-base text-[#b5bac1]">Escolha seu nome e sua foto para entrar no Waver.</p>
             </div>
 
             <div className="px-8 pt-5 pb-8 space-y-5">
@@ -383,8 +384,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </button>
               ) : (
                 <div className="flex items-center gap-2 text-white font-bold text-sm">
-                  <Headphones className="w-4 h-4 text-[#5865f2]" />
-                  PulseCord
+                  <WaverLogo className="w-5 h-5" />
+                  Waver
                 </div>
               )}
 

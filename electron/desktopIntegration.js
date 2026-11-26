@@ -1,4 +1,4 @@
-// Integração com o Windows: atalhos globais, notificações nativas, "Compartilhar no PulseCord" no Explorer.
+// Integração com o Windows: atalhos globais, notificações nativas, "Compartilhar no Waver" no Explorer.
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
@@ -6,6 +6,7 @@ const { app, BrowserWindow, globalShortcut, ipcMain, nativeImage, Notification, 
 const { MediaWatcher } = require('./mediaWatcher');
 
 const APP_ID = 'com.pulsecord.app';
+// a chave mantém o nome antigo (quem já ligou a opção continua com ela); o texto mostrado é o novo
 const SHARE_KEY = 'HKCU\\Software\\Classes\\*\\shell\\PulseCord';
 const MAX_SHARE_BYTES = 1024 * 1024 * 1024; // 1 GB por arquivo
 
@@ -58,7 +59,13 @@ function setupDesktopIntegration({ getWindow, showWindow, iconPath, getActivityD
     if (process.platform !== 'win32' || !app.isPackaged) return;
     try {
       const target = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
-      const lnk = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'PulseCord.lnk');
+      const programs = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+      const lnk = path.join(programs, 'Waver.lnk');
+      // atalho do nome antigo apontando para este mesmo app: sai (senão ficariam dois no Menu Iniciar)
+      try {
+        const old = path.join(programs, 'PulseCord.lnk');
+        if (fs.existsSync(old) && shell.readShortcutLink(old).target === target) fs.rmSync(old, { force: true });
+      } catch {}
       let current = null;
       try {
         current = shell.readShortcutLink(lnk);
@@ -67,12 +74,12 @@ function setupDesktopIntegration({ getWindow, showWindow, iconPath, getActivityD
       shell.writeShortcutLink(lnk, current ? 'replace' : 'create', {
         target,
         appUserModelId: APP_ID,
-        description: 'PulseCord',
+        description: 'Waver',
         icon: target,
         iconIndex: 0,
       });
     } catch (err) {
-      console.warn('[PulseCord] Não foi possível criar o atalho do Menu Iniciar:', err?.message || err);
+      console.warn('[Waver] Não foi possível criar o atalho do Menu Iniciar:', err?.message || err);
     }
   }
   ensureStartMenuShortcut();
@@ -87,7 +94,7 @@ function setupDesktopIntegration({ getWindow, showWindow, iconPath, getActivityD
     } catch {}
     if (!icon && iconPath && fs.existsSync(iconPath)) icon = iconPath;
     const n = new Notification({
-      title: String(title || 'PulseCord').slice(0, 120),
+      title: String(title || 'Waver').slice(0, 120),
       body: String(body || '').slice(0, 300),
       icon,
       silent: Boolean(silent),
@@ -124,7 +131,7 @@ function setupDesktopIntegration({ getWindow, showWindow, iconPath, getActivityD
     }
     const exe = exePath();
     const steps = [
-      ['add', SHARE_KEY, '/ve', '/d', 'Compartilhar no PulseCord', '/f'],
+      ['add', SHARE_KEY, '/ve', '/d', 'Compartilhar no Waver', '/f'],
       ['add', SHARE_KEY, '/v', 'Icon', '/d', `"${exe}",0`, '/f'],
       ['add', `${SHARE_KEY}\\command`, '/ve', '/d', `"${exe}" --share "%1"`, '/f'],
     ];
@@ -178,7 +185,7 @@ function setupDesktopIntegration({ getWindow, showWindow, iconPath, getActivityD
     return true;
   });
 
-  // ---------------- Gravações e clipes da chamada (pasta Vídeos\PulseCord)
+  // ---------------- Gravações e clipes da chamada (pasta Vídeos\Waver)
   const mediaDir = (kind) => {
     let base;
     try {
@@ -186,10 +193,10 @@ function setupDesktopIntegration({ getWindow, showWindow, iconPath, getActivityD
     } catch {
       base = app.getPath('documents');
     }
-    return path.join(base, 'PulseCord', kind === 'clip' ? 'Clipes' : 'Gravações');
+    return path.join(base, 'Waver', kind === 'clip' ? 'Clipes' : 'Gravações');
   };
   const safeName = (name) => {
-    const n = path.basename(String(name || 'PulseCord.webm')).replace(/[<>:"/\|?*\u0000-\u001f]/g, '_').slice(0, 120);
+    const n = path.basename(String(name || 'Waver.webm')).replace(/[<>:"/\|?*\u0000-\u001f]/g, '_').slice(0, 120);
     return /\.webm$/i.test(n) ? n : `${n}.webm`;
   };
   const openRecordings = new Map(); // token -> { fh, file }

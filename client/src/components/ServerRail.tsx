@@ -187,7 +187,7 @@ export const ServerRail: React.FC<ServerRailProps> = ({
       {!isElectron && Boolean(serverUrl) && (
         <a
           href={`${serverUrl}/api/download-client`}
-          title="Baixar PulseCord (.exe) para Windows"
+          title="Baixar Waver (.exe) para Windows"
           className="w-12 h-12 rounded-[24px] hover:rounded-[16px] bg-[#2b2d31] hover:bg-[#23a55a] text-[#23a55a] hover:text-white flex items-center justify-center transition-all"
         >
           <Download className="w-5 h-5" />

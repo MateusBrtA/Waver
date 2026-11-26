@@ -49,7 +49,7 @@ if (env.PULSECORD_SIGN_THUMBPRINT) {
     sign: async (cfg) => {
       execFileSync(
         signtool,
-        ['sign', '/sha1', thumb, '/fd', 'sha256', '/tr', TIMESTAMP, '/td', 'sha256', '/d', 'PulseCord', cfg.path],
+        ['sign', '/sha1', thumb, '/fd', 'sha256', '/tr', TIMESTAMP, '/td', 'sha256', '/d', 'Waver', cfg.path],
         { stdio: 'inherit' }
       );
     },
@@ -92,7 +92,7 @@ await build({
 
 // confere a assinatura do que saiu
 const outDir = path.join(root, pkg.build?.directories?.output || 'dist');
-for (const f of ['PulseCord-Portable.exe', 'PulseCord-Setup.exe']) {
+for (const f of ['Waver-Portable.exe', 'Waver-Setup.exe']) {
   const p = path.join(outDir, f);
   if (!fs.existsSync(p)) continue;
   try {

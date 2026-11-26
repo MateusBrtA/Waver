@@ -94,10 +94,10 @@ function signExe() {
   }
   if (!fs.existsSync(DIST_APP)) return;
   // só assina o que saiu deste build: um .exe mais velho que o app empacotado agora é de outra versão
-  const unpacked = path.join(DIST_APP, 'win-unpacked', 'PulseCord.exe');
+  const unpacked = path.join(DIST_APP, 'win-unpacked', `${pkg.build?.productName || 'Waver'}.exe`);
   const buildTime = fs.existsSync(unpacked) ? fs.statSync(unpacked).mtimeMs - 60_000 : 0;
   for (const name of fs.readdirSync(DIST_APP)) {
-    if (!/^PulseCord-(Setup|Portable)\.exe$/i.test(name)) continue;
+    if (!/^(Waver|PulseCord)-(Setup|Portable)\.exe$/i.test(name)) continue;
     const full = path.join(DIST_APP, name);
     if (fs.statSync(full).mtimeMs < buildTime) {
       fs.rmSync(`${full}.sig.json`, { force: true });

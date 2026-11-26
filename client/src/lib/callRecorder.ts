@@ -78,7 +78,7 @@ export class CallRecording {
     this.mixer.sync(sources);
     this.hasVideo = Boolean(video);
     const mime = pickMime(this.hasVideo);
-    this.fileName = `PulseCord-chamada-${stamp()}.webm`;
+    this.fileName = `Waver-chamada-${stamp()}.webm`;
     const stream = buildStream(this.mixer, video);
     this.rec = new MediaRecorder(stream, {
       mimeType: mime || undefined,
@@ -197,7 +197,7 @@ export class ClipBuffer {
     const blob = new Blob(best.chunks, { type: withVideo ? 'video/webm' : 'audio/webm' });
     this.slots[idx] = null;
     this.startSlot(idx);
-    const path = await saveBlob(blob, `PulseCord-clipe-${stamp()}.webm`, 'clip');
+    const path = await saveBlob(blob, `Waver-clipe-${stamp()}.webm`, 'clip');
     return { path, seconds };
   }
 

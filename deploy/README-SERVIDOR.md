@@ -1,17 +1,18 @@
-# PulseCord: servidor dedicado (Debian ou Windows)
+# Waver: servidor dedicado (Debian ou Windows)
 
-O servidor dedicado roda o PulseCord 24 h por dia, sem precisar de alguém com o app aberto como Host.
+O servidor dedicado roda o Waver 24 h por dia, sem precisar de alguém com o app aberto como Host.
 Os amigos entram pelo app normal digitando o endereço do servidor.
 
 - Escuta em **IPv6 e IPv4 ao mesmo tempo** (`::`, dual-stack). Se a máquina não tiver IPv6, usa só IPv4.
-- A interface web vem junto: `http://endereço:3000` também abre o PulseCord no navegador.
+- A interface web vem junto: `http://endereço:3000` também abre o Waver no navegador.
 - Dados (mensagens, arquivos, usuários) ficam numa pasta só: faça backup dela.
+- O Waver se chamava PulseCord. Os nomes técnicos continuam os antigos para não quebrar instalações existentes: serviço `pulsecord`, usuário `pulsecord`, pastas `/opt/pulsecord` e `/var/lib/pulsecord`, variáveis `PULSECORD_*`.
 
 ## Portas
 
 | Para quê | Protocolo | Porta | Direção | Obrigatória |
 |---|---|---|---|---|
-| PulseCord (site, API, WebSocket) | TCP | 3000 (configurável) | entrada | sim |
+| Waver (site, API, WebSocket) | TCP | 3000 (configurável) | entrada | sim |
 | HTTPS com Caddy (opção `--https`) | TCP / UDP | 80, 443 | entrada | só com `--https` (aí a 3000 não precisa ficar aberta) |
 | TURN (opção `--with-turn`) | TCP + UDP | 3478 | entrada | recomendado |
 | Relay do TURN | UDP | 49160–49200 | entrada | com o TURN |
@@ -87,7 +88,7 @@ curl -6 http://[::1]:3000/api/health
 ### Atualizar
 Gere um pacote novo, extraia no servidor e rode o mesmo `install.sh` de novo.
 Os dados e a configuração são mantidos.
-Se o pacote trouxer o `PulseCord-Portable.exe` novo, os amigos recebem a atualização do app pelo próprio PulseCord.
+Se o pacote trouxer o `Waver-Portable.exe` novo, os amigos recebem a atualização do app pelo próprio Waver.
 
 ### Backup
 Pare o serviço, copie `/var/lib/pulsecord` e `/etc/pulsecord` e inicie de novo:

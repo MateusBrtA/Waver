@@ -154,7 +154,7 @@ export function startLanScanner(onServersChanged) {
       const prev = servers.get(data.instanceId);
       const next = {
         id: data.instanceId,
-        serverName: String(data.serverName || 'PulseCord'),
+        serverName: String(data.serverName || 'Waver'),
         hostName: String(data.hostName || ''),
         ip: reachableIp,
         port: Number(data.port),

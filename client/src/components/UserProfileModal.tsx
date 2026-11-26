@@ -577,7 +577,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 <div className="bg-[#232428] rounded-lg p-4 border border-[#2b2d31] space-y-2">
                   <div className="text-xs font-bold uppercase tracking-wider text-[#949ba4]">Perfil Global LAN</div>
                   <p className="text-xs text-[#b5bac1]">
-                    Foto de perfil, banner, decoração, status e conexões ficam salvos no app e sincronizam automaticamente em qualquer servidor PulseCord da LAN!
+                    Foto de perfil, banner, decoração, status e conexões ficam salvos no app e sincronizam automaticamente em qualquer servidor Waver da LAN!
                   </p>
                 </div>
               </div>

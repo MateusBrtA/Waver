@@ -1,4 +1,4 @@
-# coturn para o PulseCord (gerado pelo install.sh --with-turn)
+# coturn para o Waver (gerado pelo install.sh --with-turn)
 # Sem listening-ip: escuta em todos os IPv4 e IPv6 da máquina.
 listening-port=3478
 
@@ -6,7 +6,7 @@ listening-port=3478
 min-port=49160
 max-port=49200
 
-# Credenciais temporárias geradas pelo servidor PulseCord (mesmo segredo de PULSECORD_TURN_SECRET)
+# Credenciais temporárias geradas pelo servidor Waver (mesmo segredo de PULSECORD_TURN_SECRET)
 use-auth-secret
 static-auth-secret=__SECRET__
 realm=__REALM__

@@ -28,7 +28,7 @@ class Boundary extends React.Component<{ children: React.ReactNode; label?: stri
   }
 
   componentDidCatch(err: unknown) {
-    console.error('[PulseCord] Falha ao abrir', this.props.label || 'parte da interface', err);
+    console.error('[Waver] Falha ao abrir', this.props.label || 'parte da interface', err);
     if (isChunkLoadError(err)) reloadOnceForNewBuild();
   }
 

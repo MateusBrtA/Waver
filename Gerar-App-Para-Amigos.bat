@@ -1,28 +1,27 @@
 @echo off
 chcp 65001 >nul
-title PulseCord - Gerar Instalador e Portatil (.EXE)
+title Waver - Gerar Instalador e Portatil (.EXE)
 cd /d "%~dp0"
 
 echo ========================================================
-echo   PulseCord - Gerando Instalador + Portatil (.EXE)
+echo   Waver - Gerando Instalador + Portatil (.EXE)
 echo ========================================================
 echo.
 echo Isso vai gerar:
-echo   1) PulseCord-Setup.exe    (Instalador do Windows)
-echo   2) PulseCord-Portable.exe (Versao portatil sem instalar)
+echo   1) Waver-Setup.exe    (Instalador do Windows)
+echo   2) Waver-Portable.exe (Versao portatil sem instalar)
 echo.
 echo Ambos ja vem com o Servidor Host embutido automaticamente!
 echo.
 
 call npm run build:win
+set BUILD_ERR=%ERRORLEVEL%
 
 echo.
-if exist "dist-app\PulseCord-Setup.exe" (
-  copy /Y "dist-app\PulseCord-Setup.exe" "PulseCord-Setup.exe" >nul
-  copy /Y "dist-app\PulseCord-Portable.exe" "PulseCord-Portable.exe" >nul
-  echo SUCESSO! Executaveis prontos na pasta do projeto e em dist-app\:
-  echo   - PulseCord-Setup.exe
-  echo   - PulseCord-Portable.exe
+if "%BUILD_ERR%"=="0" (
+  echo SUCESSO! Na pasta do projeto fica so o portatil mais recente:
+  echo   - Waver-Portable.exe
+  echo O instalador desta versao fica em dist-app\Waver-Setup.exe
   echo.
   explorer "."
 ) else (

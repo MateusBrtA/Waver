@@ -54,6 +54,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update:progress', listener);
     return () => ipcRenderer.removeListener('update:progress', listener);
   },
+  // Atualização pelo GitHub Releases (baixa sozinha em segundo plano; instala quando a pessoa mandar)
+  getGithubUpdateState: () => ipcRenderer.invoke('update:github-state'),
+  checkGithubUpdate: () => ipcRenderer.invoke('update:github-check'),
+  installGithubUpdate: () => ipcRenderer.invoke('update:github-install'),
+  setUpdateBusy: (busy) => ipcRenderer.send('update:set-busy', Boolean(busy)),
+  // ícone da bandeja: em chamada / falando / mutado
+  setTrayVoiceState: (st) => ipcRenderer.send('tray:voice-state', st || {}),
+  onGithubUpdateState: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('update:github-state', listener);
+    return () => ipcRenderer.removeListener('update:github-state', listener);
+  },
   // 3D Blender fallback & Theme persistence
   convertLocalBlend: (opts) => ipcRenderer.invoke('blender:convert-local', opts),
   loadThemeConfig: () => ipcRenderer.invoke('theme:load'),

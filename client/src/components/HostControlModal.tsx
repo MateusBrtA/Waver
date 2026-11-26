@@ -270,7 +270,7 @@ export const HostControlModal: React.FC<HostControlModalProps> = ({
                         Distribuir Atualizações pelo App (para seus amigos)
                       </div>
                       <p className="text-[10px] text-[#949ba4]">
-                        Selecione o novo <code>PulseCord-Setup.exe</code> junto com o <code>.exe.sig.json</code> dele (os
+                        Selecione o novo <code>Waver-Setup.exe</code> junto com o <code>.exe.sig.json</code> dele (os
                         dois ficam em dist-app). Sem a assinatura, os apps dos amigos recusam instalar.
                       </p>
                     </div>

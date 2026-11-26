@@ -99,7 +99,7 @@ export const WindowsIntegrationSettings: React.FC = () => {
   }, [api]);
 
   if (!api) {
-    return <p className="text-[13px] text-[#949ba4]">Essas opções existem só no app do PulseCord para Windows.</p>;
+    return <p className="text-[13px] text-[#949ba4]">Essas opções existem só no app do Waver para Windows.</p>;
   }
 
   return (
@@ -107,18 +107,18 @@ export const WindowsIntegrationSettings: React.FC = () => {
       <div className="text-[12px] font-bold uppercase tracking-wide text-[#b5bac1]">Notificações</div>
       <Row
         title="Notificações do Windows"
-        desc="Mostra um aviso no canto da tela quando chega uma mensagem e o PulseCord não está em foco. Respeita o nível de notificação de cada canal e o modo Não perturbe."
+        desc="Mostra um aviso no canto da tela quando chega uma mensagem e o Waver não está em foco. Respeita o nível de notificação de cada canal e o modo Não perturbe."
       >
         <Switch on={prefs.notifications} onChange={(v) => updateDesktopPrefs({ notifications: v })} />
       </Row>
-      <Row title="Som nas notificações de canais" desc="As mensagens diretas já tocam o som do PulseCord.">
+      <Row title="Som nas notificações de canais" desc="As mensagens diretas já tocam o som do Waver.">
         <Switch on={prefs.notificationSound} disabled={!prefs.notifications} onChange={(v) => updateDesktopPrefs({ notificationSound: v })} />
       </Row>
       <button
         type="button"
         disabled={!prefs.notifications}
         onClick={() =>
-          api.showNotification?.({ title: 'PulseCord', body: 'As notificações estão funcionando.', route: null }).catch(() => {})
+          api.showNotification?.({ title: 'Waver', body: 'As notificações estão funcionando.', route: null }).catch(() => {})
         }
         className="h-8 px-3 rounded bg-[#4e5058] hover:bg-[#6d6f78] text-white text-[13px] font-medium cursor-pointer disabled:opacity-40"
       >
@@ -128,7 +128,7 @@ export const WindowsIntegrationSettings: React.FC = () => {
       <div className="h-px bg-[#3f4147]" />
       <div className="text-[12px] font-bold uppercase tracking-wide text-[#b5bac1]">Atalhos globais</div>
       <p className="text-[13px] text-[#949ba4] -mt-2 leading-snug">
-        Funcionam com o PulseCord minimizado ou dentro de um jogo. Use uma combinação com Ctrl, Alt ou Shift para não atrapalhar outros programas.
+        Funcionam com o Waver minimizado ou dentro de um jogo. Use uma combinação com Ctrl, Alt ou Shift para não atrapalhar outros programas.
       </p>
       <div>
         {(Object.keys(SHORTCUT_LABELS) as Array<keyof DesktopPrefs['shortcuts']>).map((a) => (
@@ -169,7 +169,7 @@ export const WindowsIntegrationSettings: React.FC = () => {
           <Row title="Só quem está falando">
             <Switch on={prefs.overlayOnlySpeaking} onChange={(v) => updateDesktopPrefs({ overlayOnlySpeaking: v })} />
           </Row>
-          <Row title="Só quando um jogo for detectado" desc="Desligado, o overlay aparece sempre que você sai da janela do PulseCord durante uma chamada.">
+          <Row title="Só quando um jogo for detectado" desc="Desligado, o overlay aparece sempre que você sai da janela do Waver durante uma chamada.">
             <Switch on={prefs.overlayOnlyInGames} onChange={(v) => updateDesktopPrefs({ overlayOnlyInGames: v })} />
           </Row>
         </div>
@@ -181,16 +181,16 @@ export const WindowsIntegrationSettings: React.FC = () => {
         title="Clipes da chamada"
         desc={
           <>
-            Enquanto você está numa chamada, o PulseCord guarda o último minuto (áudio de todos e, se você estiver transmitindo, a sua tela).
+            Enquanto você está numa chamada, o Waver guarda o último minuto (áudio de todos e, se você estiver transmitindo, a sua tela).
             Aperte <strong className="text-white">{prettyAccelerator(prefs.shortcuts.clip) || 'o atalho'}</strong> para salvar os últimos 30 a 60 segundos
-            em Vídeos\PulseCord\Clipes. Os outros participantes veem o aviso "CLIPES" ao lado do seu nome. Usa um pouco mais de processador.
+            em Vídeos\Waver\Clipes. Os outros participantes veem o aviso "CLIPES" ao lado do seu nome. Usa um pouco mais de processador.
           </>
         }
       >
         <Switch on={prefs.clipsEnabled} onChange={(v) => updateDesktopPrefs({ clipsEnabled: v })} />
       </Row>
       <p className="text-[12px] text-[#949ba4]">
-        Para gravar a chamada inteira, use o botão de gravar no painel da chamada. Todos veem o aviso "REC" enquanto grava; o arquivo vai para Vídeos\PulseCord\Gravações.
+        Para gravar a chamada inteira, use o botão de gravar no painel da chamada. Todos veem o aviso "REC" enquanto grava; o arquivo vai para Vídeos\Waver\Gravações.
       </p>
 
       <div className="h-px bg-[#3f4147]" />
@@ -205,7 +205,7 @@ export const WindowsIntegrationSettings: React.FC = () => {
       <div className="h-px bg-[#3f4147]" />
       <div className="text-[12px] font-bold uppercase tracking-wide text-[#b5bac1]">Explorador de Arquivos</div>
       <Row
-        title='"Compartilhar no PulseCord" no botão direito'
+        title='"Compartilhar no Waver" no botão direito'
         desc={
           shareMenu && !shareMenu.supported
             ? 'Disponível só no app instalado ou portable (não no modo de desenvolvimento).'

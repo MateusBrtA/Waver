@@ -964,12 +964,17 @@ function sanitizeActivity(a) {
     const candidates =
       kind === 'portable'
         ? [
+            path.join(downloadsDir, 'Waver-Portable.exe'),
+            path.join(__dirname, '..', 'Waver-Portable.exe'),
             path.join(downloadsDir, 'PulseCord-Portable.exe'),
             path.join(__dirname, '..', 'PulseCord-Portable.exe'),
           ]
         : [
+            path.join(downloadsDir, 'Waver-Setup.exe'),
+            path.join(__dirname, '..', 'Waver-Setup.exe'),
             path.join(downloadsDir, 'PulseCord-Setup.exe'),
             path.join(__dirname, '..', 'PulseCord-Setup.exe'),
+            path.join(downloadsDir, 'Waver-Portable.exe'),
             path.join(downloadsDir, 'PulseCord-Portable.exe'),
           ];
     return candidates.find((p) => fs.existsSync(p)) || null;
@@ -1305,7 +1310,7 @@ function sanitizeActivity(a) {
     }
     if (!exeFile) {
       cleanup();
-      return res.status(400).json({ error: 'Envie o arquivo PulseCord-Setup.exe ou PulseCord-Portable.exe.' });
+      return res.status(400).json({ error: 'Envie o arquivo Waver-Setup.exe ou Waver-Portable.exe.' });
     }
     let signatureJson = null;
     if (sigFile) {
@@ -5027,7 +5032,7 @@ function sanitizeActivity(a) {
         // máquina sem IPv6: tenta de novo só em IPv4
         server.once('error', (err) => {
           if (err?.code === 'EAFNOSUPPORT' || err?.code === 'EADDRNOTAVAIL' || err?.code === 'EINVAL') {
-            console.warn('[PulseCord] IPv6 indisponível nesta máquina; escutando só em IPv4.');
+            console.warn('[Waver] IPv6 indisponível nesta máquina; escutando só em IPv4.');
             server.once('error', onError);
             server.listen(listenPort, '0.0.0.0');
           } else {
@@ -5096,7 +5101,7 @@ if (isDirectRun) {
     .start()
     .then(({ port, addresses }) => {
       console.log('\n=======================================================');
-      console.log('  PulseCord Server iniciado (modo dedicado)');
+      console.log('  Waver Server iniciado (modo dedicado)');
       console.log('=======================================================');
       console.log(`  Local:        http://localhost:${port}`);
       for (const a of addresses) {
@@ -5110,7 +5115,7 @@ if (isDirectRun) {
       console.log('=======================================================\n');
     })
     .catch((err) => {
-      console.error('Erro ao iniciar servidor PulseCord:', err);
+      console.error('Erro ao iniciar servidor Waver:', err);
       process.exit(1);
     });
 
@@ -5129,5 +5134,5 @@ if (isDirectRun) {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   // um erro inesperado não deve derrubar o servidor 24 h: registra e segue (o systemd reinicia se cair)
-  process.on('unhandledRejection', (err) => console.error('[PulseCord] Promessa rejeitada sem tratamento:', err));
+  process.on('unhandledRejection', (err) => console.error('[Waver] Promessa rejeitada sem tratamento:', err));
 }

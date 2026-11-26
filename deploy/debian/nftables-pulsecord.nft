@@ -9,7 +9,7 @@ table inet pulsecord {
 	chain input {
 		type filter hook input priority 0; policy accept;
 
-		# PulseCord (troque 3000 se mudou a porta)
+		# Waver (troque 3000 se mudou a porta)
 		tcp dport 3000 accept
 
 		# HTTPS com Caddy (se usar --https)

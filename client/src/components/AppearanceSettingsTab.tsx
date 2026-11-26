@@ -87,7 +87,7 @@ export const AppearanceSettingsTab: React.FC<AppearanceSettingsTabProps> = ({
   };
 
   const handleExportCss = () => {
-    const content = `/* PulseCord Theme Preset (${themeConfig.presetId}) */\n${themeConfig.customCss || ''}`;
+    const content = `/* Waver Theme Preset (${themeConfig.presetId}) */\n${themeConfig.customCss || ''}`;
     const blob = new Blob([content], { type: 'text/css' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

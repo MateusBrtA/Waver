@@ -1,4 +1,4 @@
-# HTTPS automático (Let's Encrypt) na frente do PulseCord. IPv6 e IPv4 funcionam sozinhos
+# HTTPS automático (Let's Encrypt) na frente do Waver. IPv6 e IPv4 funcionam sozinhos
 # se o domínio tiver registros AAAA e A apontando para esta máquina.
 __DOMAIN__ {
 	encode zstd gzip

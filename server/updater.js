@@ -61,7 +61,10 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
   }
 
   function findInstallerMeta(kind = 'any') {
-    const names = kind === 'portable' ? ['PulseCord-Portable.exe', 'PulseCord-Setup.exe'] : ['PulseCord-Setup.exe', 'PulseCord-Portable.exe'];
+    const names =
+      kind === 'portable'
+        ? ['Waver-Portable.exe', 'PulseCord-Portable.exe', 'Waver-Setup.exe', 'PulseCord-Setup.exe']
+        : ['Waver-Setup.exe', 'PulseCord-Setup.exe', 'Waver-Portable.exe', 'PulseCord-Portable.exe'];
     const candidates = [];
     if (updatesDir && fs.existsSync(updatesDir)) {
       for (const name of names) {
@@ -143,7 +146,7 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
       installerSize: inst?.size || 0,
       installerSha256: inst?.sha256 || '',
       installerSigned: Boolean(inst?.signature),
-      releaseNotes: inst?.notes || 'Interface e recursos atualizados do PulseCord.',
+      releaseNotes: inst?.notes || 'Interface e recursos atualizados do Waver.',
       updatedAt: inst?.mtimeMs || Date.now(),
     };
   }
@@ -152,7 +155,7 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
     if (!updatesDir) throw new Error('Diretório de atualizações não configurado.');
     fs.mkdirSync(updatesDir, { recursive: true });
     const isPortable = /portable/i.test(originalName || '');
-    const targetName = isPortable ? 'PulseCord-Portable.exe' : 'PulseCord-Setup.exe';
+    const targetName = isPortable ? 'Waver-Portable.exe' : 'Waver-Setup.exe';
     const targetPath = path.join(updatesDir, targetName);
 
     // Compute SHA-256 of uploaded installer

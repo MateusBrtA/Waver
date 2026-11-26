@@ -17,6 +17,7 @@ const {
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const releaseVerify = require('./releaseVerify');
+const { GithubUpdater } = require('./githubUpdater');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -53,12 +54,15 @@ process.on('uncaughtException', (err) => {
   } catch {}
   // Erro real: mostra ao usuário (comportamento padrão do Electron) em vez de engolir em silêncio
   try {
-    require('electron').dialog.showErrorBox('PulseCord - erro inesperado', String(err?.stack || err));
+    require('electron').dialog.showErrorBox('Waver - erro inesperado', String(err?.stack || err));
   } catch {}
 });
 
 const IS_DEV = process.env.PULSECORD_DEV === '1';
 const DIST_DIR = path.join(__dirname, '..', 'client', 'dist');
+// O app se chamava PulseCord: continua usando a mesma pasta de dados (%APPDATA%\PulseCord), senão quem
+// atualizar perderia login, configurações e servidores salvos.
+app.setPath('userData', path.join(app.getPath('appData'), 'PulseCord'));
 const LIVE_UI_DIR = path.join(app.getPath('userData'), 'live-ui');
 
 function getActiveDistDir() {
@@ -612,6 +616,61 @@ function registerEmergencyRemoteStopShortcut() {
   }
 }
 
+// ===== Ícone da bandeja: em chamada mostra a linha de som (parada; mexendo enquanto você fala; vermelha mutado)
+const TRAY_DIR = path.join(__dirname, 'tray');
+const TRAY_TALK_FRAMES = 8;
+const trayImages = new Map();
+let trayVoice = { inCall: false, speaking: false, muted: false };
+let trayAnimTimer = null;
+let traySpeakingOffTimer = null;
+function trayImage(name) {
+  if (!trayImages.has(name)) {
+    // createFromPath pega sozinho as versões @1.5x/@2x para telas com escala
+    const img = nativeImage.createFromPath(path.join(TRAY_DIR, `${name}.png`));
+    trayImages.set(name, img.isEmpty() ? null : img);
+  }
+  return trayImages.get(name);
+}
+function applyTrayVoice() {
+  if (!tray || tray.isDestroyed()) return;
+  clearInterval(trayAnimTimer);
+  trayAnimTimer = null;
+  const set = (name, tip) => {
+    const img = trayImage(name);
+    if (img) tray.setImage(img);
+    tray.setToolTip(tip);
+  };
+  if (!trayVoice.inCall) return set('tray', 'Waver');
+  if (trayVoice.muted) return set('call-muted', 'Waver — em chamada (microfone mutado)');
+  if (!trayVoice.speaking) return set('call-idle', 'Waver — em chamada');
+  let frame = 0;
+  set(`call-talk-0`, 'Waver — falando');
+  trayAnimTimer = setInterval(() => {
+    frame = (frame + 1) % TRAY_TALK_FRAMES;
+    const img = trayImage(`call-talk-${frame}`);
+    if (img && tray && !tray.isDestroyed()) tray.setImage(img);
+  }, 110);
+}
+function setTrayVoice(st) {
+  const next = { inCall: Boolean(st?.inCall), speaking: Boolean(st?.speaking), muted: Boolean(st?.muted) };
+  // parou de falar: segura a animação um instante (pausas entre palavras não fazem o ícone piscar)
+  if (trayVoice.speaking && !next.speaking && next.inCall && !next.muted) {
+    if (!traySpeakingOffTimer) {
+      traySpeakingOffTimer = setTimeout(() => {
+        traySpeakingOffTimer = null;
+        trayVoice = { ...trayVoice, speaking: false };
+        applyTrayVoice();
+      }, 450);
+    }
+    return;
+  }
+  clearTimeout(traySpeakingOffTimer);
+  traySpeakingOffTimer = null;
+  if (next.inCall === trayVoice.inCall && next.speaking === trayVoice.speaking && next.muted === trayVoice.muted) return;
+  trayVoice = next;
+  applyTrayVoice();
+}
+
 function createTray() {
   if (tray) return tray;
   try {
@@ -619,8 +678,8 @@ function createTray() {
       process.platform === 'win32' && fs.existsSync(path.join(__dirname, 'icon.ico'))
         ? path.join(__dirname, 'icon.ico')
         : path.join(__dirname, 'icon.png');
-    tray = new Tray(iconCandidate);
-    tray.setToolTip('PulseCord — Conectado');
+    tray = new Tray(trayImage('tray') || iconCandidate);
+    tray.setToolTip('Waver');
     const restoreWindow = () => {
       if (!mainWindow || mainWindow.isDestroyed()) {
         createWindow();
@@ -632,7 +691,7 @@ function createTray() {
       mainWindow.focus();
     };
     const menu = Menu.buildFromTemplate([
-      { label: 'Abrir PulseCord', click: restoreWindow },
+      { label: 'Abrir Waver', click: restoreWindow },
       { type: 'separator' },
       {
         label: 'Mutar / Desmutar Microfone',
@@ -644,7 +703,7 @@ function createTray() {
       },
       { type: 'separator' },
       {
-        label: 'Sair do PulseCord',
+        label: 'Sair do Waver',
         click: () => {
           isQuitting = true;
           app.quit();
@@ -658,6 +717,102 @@ function createTray() {
     console.warn('[Tray] Não foi possível criar ícone na bandeja:', err?.message);
   }
   return tray;
+}
+
+// Instala um .exe de atualização já verificado: o portátil troca o próprio arquivo; o instalador roda em
+// silêncio. Um script do PowerShell espera o app fechar, aplica e abre o PulseCord de novo.
+function launchExeUpdate(targetExe, installerName) {
+  const osTmp = os.tmpdir();
+  const portableTarget = process.env.PORTABLE_EXECUTABLE_FILE || '';
+  const isPortableDownload = /portable/i.test(installerName || '');
+  const psScriptPath = path.join(osTmp, `pulsecord-apply-${Date.now()}.ps1`);
+
+  let psContent = '';
+  if (portableTarget) {
+    psContent = `
+Start-Sleep -Milliseconds 1400
+for ($i = 0; $i -lt 20; $i++) {
+  try {
+Copy-Item -Force "${targetExe.replace(/"/g, '""')}" "${portableTarget.replace(/"/g, '""')}"
+Remove-Item -Force "${targetExe.replace(/"/g, '""')}" -ErrorAction SilentlyContinue
+Start-Process "${portableTarget.replace(/"/g, '""')}"
+break
+  } catch {
+Start-Sleep -Milliseconds 500
+  }
+}
+Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
+`;
+  } else if (isPortableDownload && !app.isPackaged) {
+    throw new Error('Atualização por EXE requer versão empacotada do app.');
+  } else {
+    psContent = `
+Start-Sleep -Milliseconds 1400
+Start-Process -FilePath "${targetExe.replace(/"/g, '""')}" -ArgumentList "/S" -Wait
+$candidates = @(
+  "$env:LOCALAPPDATA\\Programs\\Waver\\Waver.exe",
+  "$env:ProgramFiles\\Waver\\Waver.exe",
+  "$env:LOCALAPPDATA\\Programs\\PulseCord\\PulseCord.exe",
+  "$env:LOCALAPPDATA\\Programs\\PulseCord\\Waver.exe",
+  "$env:ProgramFiles\\PulseCord\\PulseCord.exe",
+  "$env:ProgramFiles\\PulseCord\\Waver.exe",
+  "${process.execPath.replace(/"/g, '""')}"
+)
+foreach ($p in $candidates) {
+  if (Test-Path $p) {
+Start-Process $p
+break
+  }
+}
+Remove-Item -Force "${targetExe.replace(/"/g, '""')}" -ErrorAction SilentlyContinue
+Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
+`;
+  }
+
+  fs.writeFileSync(psScriptPath, psContent, 'utf8');
+  const updater = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScriptPath], {
+    detached: true,
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+  updater.unref();
+  isQuitting = true;
+  setTimeout(() => app.quit(), 300);
+}
+
+// ===== Atualização pelo GitHub Releases =====
+// Repositório em package.json -> "pulsecordUpdate": { "githubRepo": "dono/repo" }. Só no app empacotado
+// (PULSECORD_GH_UPDATE_TEST=1 liga em desenvolvimento, para testar).
+let githubUpdater = null;
+let updateBusy = false; // em chamada: o download espera
+function startGithubUpdater() {
+  if (githubUpdater) return;
+  if (!app.isPackaged && process.env.PULSECORD_GH_UPDATE_TEST !== '1') return;
+  let repo = '';
+  try {
+    repo = require('../package.json')?.pulsecordUpdate?.githubRepo || '';
+  } catch {}
+  if (!repo || !releaseVerify.hasReleaseKey()) return;
+  githubUpdater = new GithubUpdater({
+    repo,
+    currentVersion: app.getVersion(),
+    kind: process.env.PORTABLE_EXECUTABLE_FILE ? 'portable' : 'setup',
+    downloadDir: path.join(app.getPath('userData'), 'updates'),
+    verifySignature: (sig, current) => releaseVerify.verifyInstallerSignatureObject(sig, current),
+    compareVersions: releaseVerify.compareVersions,
+    isBusy: () => updateBusy,
+    maxBytesPerSec: 3 * 1024 * 1024,
+    log: (m) => console.log(m),
+    onState: (st) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:github-state', publicGithubState(st));
+    },
+  });
+  githubUpdater.start({ firstDelayMs: 30_000, intervalMs: 4 * 60 * 60 * 1000 });
+}
+function publicGithubState(st) {
+  if (!st) return { status: 'idle' };
+  const { path: _p, ...rest } = st; // o caminho local não vai para a interface
+  return rest;
 }
 
 function createWindow() {
@@ -754,7 +909,7 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', (_event, argv) => {
-    desktopIntegration?.handleArgv(argv); // "Compartilhar no PulseCord" com o app já aberto
+    desktopIntegration?.handleArgv(argv); // "Compartilhar no Waver" com o app já aberto
     if (mainWindow) {
       if (!mainWindow.isVisible()) mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -861,7 +1016,7 @@ if (!gotLock) {
       });
 
       return sources
-        .filter((s) => s.name && !s.name.startsWith('PulseCord'))
+        .filter((s) => s.name && !/^(Waver|PulseCord)/.test(s.name))
         .map((s) => ({
           id: s.id,
           name: s.name,
@@ -938,6 +1093,24 @@ if (!gotLock) {
       return { ok: true, uiHash: parsed.uiHash };
     });
 
+    ipcMain.on('tray:voice-state', (_event, st) => setTrayVoice(st));
+    ipcMain.handle('update:github-state', () => publicGithubState(githubUpdater?.state));
+    ipcMain.handle('update:github-check', async () => publicGithubState(await githubUpdater?.checkNow()));
+    ipcMain.on('update:set-busy', (_event, busy) => {
+      updateBusy = Boolean(busy);
+    });
+    ipcMain.handle('update:github-install', () => {
+      const st = githubUpdater?.state;
+      if (!st || st.status !== 'ready' || !st.path || !fs.existsSync(st.path)) {
+        throw new Error('A atualização ainda não está pronta.');
+      }
+      // copia para a pasta temporária: o script de instalação apaga o arquivo depois de aplicar
+      const tmpExe = path.join(os.tmpdir(), `PulseCord-Update-${Date.now()}.exe`);
+      fs.copyFileSync(st.path, tmpExe);
+      launchExeUpdate(tmpExe, st.kind === 'portable' ? 'Waver-Portable.exe' : 'Waver-Setup.exe');
+      return { ok: true };
+    });
+
     ipcMain.handle('update:download-and-install', async (_event, { serverUrl, expectedSha256, installerName }) => {
       const osTmp = require('node:os').tmpdir();
       const targetExe = path.join(osTmp, `PulseCord-Update-${Date.now()}.exe`);
@@ -949,7 +1122,7 @@ if (!gotLock) {
       const servedName = resp.headers.get('x-pulsecord-installer-name') || installerName || '';
       if (portableSelf && servedName && !/portable/i.test(servedName)) {
         resp.body.cancel().catch(() => {});
-        throw new Error('O Host só tem o instalador (Setup), não o PulseCord-Portable.exe. Peça ao Host para colocar o portable novo na pasta dist-app.');
+        throw new Error('O Host só tem o instalador (Setup), não o Waver-Portable.exe. Peça ao Host para colocar o portable novo na pasta dist-app.');
       }
       // o .exe tem que vir assinado por quem publica o PulseCord e ser mais novo que este app
       let signed;
@@ -1009,57 +1182,7 @@ if (!gotLock) {
         throw new Error('Falha na verificação de integridade (SHA-256) da atualização.');
       }
 
-      const portableTarget = process.env.PORTABLE_EXECUTABLE_FILE || '';
-      const isPortableDownload = /portable/i.test(installerName || '');
-      const psScriptPath = path.join(osTmp, `pulsecord-apply-${Date.now()}.ps1`);
-
-      let psContent = '';
-      if (portableTarget) {
-        psContent = `
-Start-Sleep -Milliseconds 1400
-for ($i = 0; $i -lt 20; $i++) {
-  try {
-    Copy-Item -Force "${targetExe.replace(/"/g, '""')}" "${portableTarget.replace(/"/g, '""')}"
-    Remove-Item -Force "${targetExe.replace(/"/g, '""')}" -ErrorAction SilentlyContinue
-    Start-Process "${portableTarget.replace(/"/g, '""')}"
-    break
-  } catch {
-    Start-Sleep -Milliseconds 500
-  }
-}
-Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
-`;
-      } else if (isPortableDownload && !app.isPackaged) {
-        throw new Error('Atualização por EXE requer versão empacotada do app.');
-      } else {
-        psContent = `
-Start-Sleep -Milliseconds 1400
-Start-Process -FilePath "${targetExe.replace(/"/g, '""')}" -ArgumentList "/S" -Wait
-$candidates = @(
-  "$env:LOCALAPPDATA\\Programs\\PulseCord\\PulseCord.exe",
-  "$env:ProgramFiles\\PulseCord\\PulseCord.exe",
-  "${process.execPath.replace(/"/g, '""')}"
-)
-foreach ($p in $candidates) {
-  if (Test-Path $p) {
-    Start-Process $p
-    break
-  }
-}
-Remove-Item -Force "${targetExe.replace(/"/g, '""')}" -ErrorAction SilentlyContinue
-Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
-`;
-      }
-
-      fs.writeFileSync(psScriptPath, psContent, 'utf8');
-      const updater = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScriptPath], {
-        detached: true,
-        windowsHide: true,
-        stdio: 'ignore',
-      });
-      updater.unref();
-      isQuitting = true;
-      setTimeout(() => app.quit(), 300);
+      launchExeUpdate(targetExe, installerName);
       return { ok: true };
     });
 
@@ -1399,6 +1522,7 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
     ensureLanScanner();
     createTray();
     createWindow();
+    startGithubUpdater();
     desktopIntegration = setupDesktopIntegration({
       getWindow: () => mainWindow,
       getActivityDetector: () => activityDetector,

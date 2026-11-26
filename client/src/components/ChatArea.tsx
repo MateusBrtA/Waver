@@ -285,7 +285,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     textAreaRef.current?.focus();
   }, [mentionRequest?.seq]);
 
-  // Arquivos do "Compartilhar no PulseCord" (Explorer): entram como anexos pendentes, prontos para enviar
+  // Arquivos do "Compartilhar no Waver" (Explorer): entram como anexos pendentes, prontos para enviar
   useEffect(() => {
     if (!incomingFilesRequest?.files?.length || incomingFilesRequest.seq === lastIncomingFilesSeq) return;
     lastIncomingFilesSeq = incomingFilesRequest.seq;

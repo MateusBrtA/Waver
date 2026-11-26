@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title PulseCord - Servidor Host (Radmin / ZeroTier / Rede Local)
+title Waver - Servidor Host (Radmin / ZeroTier / Rede Local)
 cd /d "%~dp0"
 
 echo ========================================================
-echo   PulseCord - Iniciando Servidor Host neste PC
+echo   Waver - Iniciando Servidor Host neste PC
 echo ========================================================
 echo.
 

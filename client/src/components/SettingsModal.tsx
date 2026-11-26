@@ -751,7 +751,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   )}
 
                   <p className="text-[#949ba4] leading-relaxed">
-                    O PulseCord limpa automaticamente os arquivos de mídia mais antigos antes de atingir 2 GB —{' '}
+                    O Waver limpa automaticamente os arquivos de mídia mais antigos antes de atingir 2 GB —{' '}
                     <strong>mas nunca apaga seu histórico de mensagens de texto antigas!</strong>
                   </p>
 
@@ -781,11 +781,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="text-[12px] font-bold uppercase tracking-wide text-[#b5bac1]">Comportamento do sistema</div>
                 <label className="flex items-start justify-between gap-4 cursor-pointer">
                   <div>
-                    <div className="text-[15px] font-medium text-[#dbdee1]">Fechar o PulseCord ao clicar no X</div>
+                    <div className="text-[15px] font-medium text-[#dbdee1]">Fechar o Waver ao clicar no X</div>
                     <p className="text-[13px] text-[#949ba4] mt-1 leading-snug">
                       {closeToTray
-                        ? 'Desligado: o X só esconde a janela. O PulseCord continua rodando nos ícones ocultos da barra de tarefas (chamada e servidor continuam ativos).'
-                        : 'Ligado: o X encerra o PulseCord por completo, saindo da chamada e parando o servidor se você estiver hospedando.'}
+                        ? 'Desligado: o X só esconde a janela. O Waver continua rodando nos ícones ocultos da barra de tarefas (chamada e servidor continuam ativos).'
+                        : 'Ligado: o X encerra o Waver por completo, saindo da chamada e parando o servidor se você estiver hospedando.'}
                     </p>
                   </div>
                   <button
@@ -811,7 +811,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </label>
                 <div className="h-px bg-[#3f4147]" />
                 <p className="text-[12px] text-[#949ba4]">
-                  Com o app nos ícones ocultos, clique com o botão direito no ícone do PulseCord e escolha "Sair do PulseCord" para fechar de vez.
+                  Com o app nos ícones ocultos, clique com o botão direito no ícone do Waver e escolha "Sair do Waver" para fechar de vez.
                 </p>
                 <div className="h-px bg-[#3f4147]" />
                 <WindowsIntegrationSettings />
@@ -857,7 +857,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                   </div>
                   <p className="text-[11px] text-[#949ba4]">
-                    Sempre que o Host gerar ou carregar uma nova versão do PulseCord, você atualiza com 1 clique aqui
+                    Sempre que o Host gerar ou carregar uma nova versão do Waver, você atualiza com 1 clique aqui
                     mesmo sem precisar reinstalar manualmente!
                   </p>
                 </div>

@@ -1,4 +1,4 @@
-# PulseCord - servidor dedicado no Windows (sem abrir o app).
+# Waver - servidor dedicado no Windows (sem abrir o app).
 #
 #   .\Iniciar-Servidor.ps1                      inicia na porta 3000 (IPv6 + IPv4)
 #   .\Iniciar-Servidor.ps1 -Porta 4000
@@ -97,6 +97,6 @@ if ($IniciarComWindows) {
   return
 }
 
-Write-Host "Iniciando PulseCord na porta $Porta (Ctrl+C para parar)..."
+Write-Host "Iniciando Waver na porta $Porta (Ctrl+C para parar)..."
 Push-Location $Servidor
 try { & node @nodeArgs } finally { Pop-Location }

@@ -1,17 +1,25 @@
 {
   "name": "pulsecord",
-  "version": "4.4.0",
-  "description": "PulseCord 4.0 - App estilo Discord com Sincronização Ultra-Rápida, YouTube Player, Parsec 60-120fps + Controle Xbox Virtual, Áudio no Chat, Fixação e Mensagens Privadas P2P em LAN",
+  "version": "4.4.1",
+  "description": "Waver: chat de texto, voz, vídeo e tela para grupos de amigos, com servidor próprio",
   "main": "electron/main.js",
-  "author": "PulseCord",
+  "author": "Waver",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MateusBrtA/Waver.git"
+  },
+  "pulsecordUpdate": {
+    "githubRepo": "MateusBrtA/Waver"
+  },
   "scripts": {
     "setup": "npm install && npm --prefix server install && npm --prefix client install",
     "dev:server": "node server/index.js",
     "dev:client": "npm --prefix client run dev",
     "dev": "concurrently -n SERVER,CLIENT -c cyan,magenta \"npm run dev:server\" \"npm run dev:client\"",
     "dev:electron": "concurrently -n CLIENT,ELECTRON -c magenta,green \"npm run dev:client\" \"wait-on http://localhost:5173 && cross-env PULSECORD_DEV=1 electron .\"",
-    "build:icon": "node scripts/generate-icon.mjs",
+    "build:icon": "electron scripts/render-brand.cjs",
     "build:loopback": "node scripts/build-loopback.mjs",
     "build:native": "node scripts/build-loopback.mjs && node scripts/build-native-core.mjs",
     "build:client": "npm --prefix client run build && node scripts/release-signing.mjs sign-ui",
@@ -19,11 +27,12 @@
     "start:host": "node server/index.js",
     "start:server": "node server/index.js",
     "pack:server": "npm run build:client && node scripts/pack-server.mjs",
-    "build:exe": "npm run build && electron-builder --win portable && node scripts/release-signing.mjs sign-exe",
-    "build:installer": "npm run build && electron-builder --win nsis && node scripts/release-signing.mjs sign-exe",
-    "build:win": "npm run build && electron-builder --win nsis portable && node scripts/release-signing.mjs sign-exe",
-    "build:signed": "npm run build && node scripts/build-signed.mjs && node scripts/release-signing.mjs sign-exe",
-    "release:key": "node scripts/release-signing.mjs init"
+    "build:exe": "npm run build && electron-builder --win portable && node scripts/release-signing.mjs sign-exe && node scripts/keep-latest.mjs",
+    "build:installer": "npm run build && electron-builder --win nsis && node scripts/release-signing.mjs sign-exe && node scripts/keep-latest.mjs",
+    "build:win": "npm run build && electron-builder --win nsis portable && node scripts/release-signing.mjs sign-exe && node scripts/keep-latest.mjs",
+    "build:signed": "npm run build && node scripts/build-signed.mjs && node scripts/release-signing.mjs sign-exe && node scripts/keep-latest.mjs",
+    "release:key": "node scripts/release-signing.mjs init",
+    "release:github": "node scripts/publish-github-release.mjs"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -42,7 +51,7 @@
   },
   "build": {
     "appId": "com.pulsecord.app",
-    "productName": "PulseCord",
+    "productName": "Waver",
     "npmRebuild": false,
     "directories": {
       "output": "dist-app"
@@ -85,17 +94,17 @@
       "icon": "electron/icon.ico"
     },
     "portable": {
-      "artifactName": "PulseCord-Portable.exe"
+      "artifactName": "Waver-Portable.exe"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "PulseCord",
+      "shortcutName": "Waver",
       "installerIcon": "electron/icon.ico",
       "uninstallerIcon": "electron/icon.ico",
-      "artifactName": "PulseCord-Setup.exe"
+      "artifactName": "Waver-Setup.exe"
     }
   }
 }

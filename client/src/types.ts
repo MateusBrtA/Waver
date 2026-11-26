@@ -767,6 +767,17 @@ export interface Model3DViewerTarget {
   companions?: { name: string; url: string }[];
 }
 
+/** Estado da atualização pelo GitHub Releases (vem do processo principal do Electron). */
+export interface GithubUpdateState {
+  status: 'idle' | 'downloading' | 'paused' | 'ready' | 'error';
+  version?: string;
+  kind?: 'portable' | 'setup';
+  notes?: string;
+  loaded?: number;
+  total?: number;
+  error?: string;
+}
+
 export interface UpdateManifest {
   version: string;
   serverAppVersion: string;
@@ -950,6 +961,12 @@ export interface ElectronAPI {
     installerName?: string | null;
   }) => Promise<{ ok: boolean }>;
   onUpdateProgress: (cb: (p: { percent: number; loaded: number; total: number; speedMBps: number }) => void) => () => void;
+  getGithubUpdateState?: () => Promise<GithubUpdateState>;
+  checkGithubUpdate?: () => Promise<GithubUpdateState>;
+  installGithubUpdate?: () => Promise<{ ok: boolean }>;
+  setUpdateBusy?: (busy: boolean) => void;
+  setTrayVoiceState?: (st: { inCall: boolean; speaking: boolean; muted: boolean }) => void;
+  onGithubUpdateState?: (cb: (s: GithubUpdateState) => void) => () => void;
   // 3D Blender & Theme Persistence
   convertLocalBlend: (opts: {
     bytes: ArrayBuffer | Uint8Array;

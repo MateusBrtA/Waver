@@ -205,7 +205,7 @@ class LanPeerMessenger {
     this.identity = {
       peerId: this.peerId,
       username: 'pulsecord_user',
-      displayName: 'Usuário PulseCord',
+      displayName: 'Usuário Waver',
       avatarColor: '#5865F2',
       avatarDataUrl: '',
       bannerColor: '#5865F2',

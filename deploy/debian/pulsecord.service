@@ -1,5 +1,5 @@
 [Unit]
-Description=PulseCord Server (voz, vídeo e chat)
+Description=Waver Server (voz, vídeo e chat)
 Documentation=file:///opt/pulsecord/deploy/README-SERVIDOR.md
 After=network-online.target
 Wants=network-online.target

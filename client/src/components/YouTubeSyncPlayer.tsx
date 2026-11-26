@@ -280,7 +280,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         title="YouTube Player"
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         allowFullScreen
-        // sem foco/clique no iframe: os controles são os do PulseCord (e o teclado do PTT continua na página)
+        // sem foco/clique no iframe: os controles são os do Waver (e o teclado do PTT continua na página)
         tabIndex={-1}
         className={`w-full h-full border-0 ${interactiveControls ? '' : 'pointer-events-none'}`}
       />

@@ -1,4 +1,4 @@
-// Conexão com o SFU (mediasoup) do servidor PulseCord.
+// Conexão com o SFU (mediasoup) do servidor Waver.
 //
 // Na malha cada pessoa envia uma cópia da sua mídia para cada outra; aqui cada fonte (microfone, câmera,
 // tela, áudio da tela) sobe UMA vez para o servidor, que repassa para os outros. Esta classe cuida só do

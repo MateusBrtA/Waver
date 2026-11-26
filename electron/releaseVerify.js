@@ -37,7 +37,7 @@ function exeSignedMessage(kind, version, sha256) {
 }
 
 const NOT_SIGNED =
-  'Esta atualização não tem a assinatura oficial do PulseCord e foi recusada (proteção contra servidor malicioso). Instale a versão nova manualmente.';
+  'Esta atualização não tem a assinatura oficial do Waver e foi recusada (proteção contra servidor malicioso). Instale a versão nova manualmente.';
 
 /**
  * Pacote de interface: `files` = { caminho: base64 }. Confere assinatura, versão (igual à do app) e o hash de
@@ -69,14 +69,23 @@ function verifyUiBundle(files, appVersion) {
 
 /** Cabeçalho X-PulseCord-Signature (base64 de JSON). Devolve { kind, version, sha256 } se válido e mais novo. */
 function verifyInstallerSignature(headerB64, currentVersion) {
-  const key = loadPublicKey();
-  if (!key || !headerB64) throw new Error(NOT_SIGNED);
+  if (!headerB64) throw new Error(NOT_SIGNED);
   let sig;
   try {
     sig = JSON.parse(Buffer.from(String(headerB64), 'base64').toString('utf8'));
   } catch {
     throw new Error(NOT_SIGNED);
   }
+  return verifyInstallerSignatureObject(sig, currentVersion);
+}
+
+/**
+ * Conteúdo de um PulseCord-*.exe.sig.json (o objeto já lido). Mesmas regras: assinatura da chave oficial e
+ * versão assinada mais nova que a deste app. `publicKey` só é passado nos testes.
+ */
+function verifyInstallerSignatureObject(sig, currentVersion, publicKey = loadPublicKey()) {
+  const key = publicKey;
+  if (!key) throw new Error(NOT_SIGNED);
   if (!sig || sig.v !== 1 || !['portable', 'setup'].includes(sig.kind) || !/^[a-f0-9]{64}$/.test(String(sig.sha256))) {
     throw new Error(NOT_SIGNED);
   }
@@ -89,4 +98,4 @@ function verifyInstallerSignature(headerB64, currentVersion) {
   return { kind: sig.kind, version: String(sig.version), sha256: sig.sha256 };
 }
 
-module.exports = { verifyUiBundle, verifyInstallerSignature, compareVersions, UI_SIG_NAME, hasReleaseKey: () => Boolean(loadPublicKey()) };
+module.exports = { verifyUiBundle, verifyInstallerSignature, verifyInstallerSignatureObject, compareVersions, UI_SIG_NAME, hasReleaseKey: () => Boolean(loadPublicKey()) };
