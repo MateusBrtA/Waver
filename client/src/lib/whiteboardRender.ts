@@ -1,4 +1,5 @@
 import type { WhiteboardElement, WhiteboardPoint } from '../types';
+import { artBrushPad, drawGradient, isArtBrush, paintArtBrush } from './artEngine';
 
 /**
  * Renderização do whiteboard (canvas 2D). Tudo aqui trabalha em coordenadas de "mundo":
@@ -84,10 +85,29 @@ export function elementBounds(el: WhiteboardElement): Bounds {
     if (y + pad > y1) y1 = y + pad;
   };
 
-  if (el.kind === 'stroke') {
+  if (el.kind === 'gradient' || el.kind === 'artboard') {
+    const isG = el.kind === 'gradient';
+    const x = isG ? el.rx ?? (el.x || 0) : el.x || 0;
+    const y = isG ? el.ry ?? (el.y || 0) : el.y || 0;
+    const w = isG ? el.rw ?? 0 : el.w || 0;
+    const h = isG ? el.rh ?? 0 : el.h || 0;
+    add(Math.min(x, x + w), Math.min(y, y + h), 0);
+    add(Math.max(x, x + w), Math.max(y, y + h), 0);
+  } else if (el.kind === 'stroke') {
     const brush = el.brush || 'pen';
-    const pad = brush === 'airbrush' ? s * 0.8 + 2 : brush === 'spray' ? s * 1.3 + 2 : brush === 'pixel' ? s + 2 : s / 2 + 2;
+    const pad = isArtBrush(brush)
+      ? artBrushPad(brush, s)
+      : brush === 'airbrush' ? s * 0.8 + 2 : brush === 'spray' ? s * 1.3 + 2 : brush === 'pixel' ? s + 2 : s / 2 + 2;
     for (const p of el.points || []) add(p.x, p.y, pad);
+  } else if (el.kind === 'path') {
+    const pad = s / 2 + 2;
+    for (const b of pathBeziers(el.points || [], Boolean(el.closed))) {
+      add(b[0], b[1], pad);
+      add(b[2], b[3], pad);
+      add(b[4], b[5], pad);
+      add(b[6], b[7], pad);
+    }
+    for (const pt of el.points || []) add(pt.x, pt.y, pad);
   } else if (el.kind === 'line' || el.kind === 'arrow') {
     const pad = s / 2 + (el.kind === 'arrow' ? Math.max(10, s * 3) : 0) + 2;
     add(el.x || 0, el.y || 0, pad);
@@ -170,6 +190,13 @@ function distToSegment(px: number, py: number, ax: number, ay: number, bx: numbe
 /** Teste de clique preciso (tol em unidades de mundo). */
 export function hitTestElement(el: WhiteboardElement, x: number, y: number, tol: number) {
   if (el.kind === 'stroke' && el.brush === 'eraser') return false;
+  // prancheta se pega pelo nome (ver artEngine.hitArtboardLabel); degradê pela linha que o criou
+  if (el.kind === 'artboard') return false;
+  if (el.kind === 'gradient') {
+    const gx = x - (el.tx || 0);
+    const gy = y - (el.ty || 0);
+    return distToSegment(gx, gy, el.x || 0, el.y || 0, el.x2 || 0, el.y2 || 0) <= tol * 2 + 3;
+  }
   const b = elementBounds(el);
   if (x < b.x - tol || x > b.x + b.w + tol || y < b.y - tol || y > b.y + b.h + tol) return false;
   if (el.kind === 'image') {
@@ -191,7 +218,95 @@ export function hitTestElement(el: WhiteboardElement, x: number, y: number, tol:
   if (el.kind === 'line' || el.kind === 'arrow') {
     return distToSegment(lx, ly, el.x || 0, el.y || 0, el.x2 || 0, el.y2 || 0) <= (el.size || 4) / 2 + tol;
   }
+  if (el.kind === 'path') {
+    const poly = pathPolyline(el.points || [], Boolean(el.closed));
+    const r = Math.max(1, el.size || 4) / 2 + tol;
+    for (let i = 1; i < poly.length; i++) {
+      if (distToSegment(lx, ly, poly[i - 1][0], poly[i - 1][1], poly[i][0], poly[i][1]) <= r) return true;
+    }
+    if (el.filled && el.closed) {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i];
+        const [xj, yj] = poly[j];
+        if (yi > ly !== yj > ly && lx < ((xj - xi) * (ly - yi)) / (yj - yi || 1e-9) + xi) inside = !inside;
+      }
+      return inside;
+    }
+    return false;
+  }
   return true;
+}
+
+/* ------------------------------------------------------------------ curvas vetoriais */
+
+/**
+ * Curva suave pelos pontos-âncora (Catmull-Rom → Bézier). Ponto com p <= 0.5 é canto (sem alça).
+ * Cada item: [x0, y0, c1x, c1y, c2x, c2y, x1, y1].
+ */
+export function pathBeziers(pts: WhiteboardPoint[], closed: boolean) {
+  const n = pts.length;
+  const out: number[][] = [];
+  if (n < 2) return out;
+  const get = (i: number) => (closed ? pts[((i % n) + n) % n] : pts[Math.max(0, Math.min(n - 1, i))]);
+  const segs = closed ? n : n - 1;
+  for (let i = 0; i < segs; i++) {
+    const p0 = get(i - 1);
+    const p1 = get(i);
+    const p2 = get(i + 1);
+    const p3 = get(i + 2);
+    const sharp1 = (p1.p ?? 1) <= 0.5;
+    const sharp2 = (p2.p ?? 1) <= 0.5;
+    const c1x = sharp1 ? p1.x : p1.x + (p2.x - p0.x) / 6;
+    const c1y = sharp1 ? p1.y : p1.y + (p2.y - p0.y) / 6;
+    const c2x = sharp2 ? p2.x : p2.x - (p3.x - p1.x) / 6;
+    const c2y = sharp2 ? p2.y : p2.y - (p3.y - p1.y) / 6;
+    out.push([p1.x, p1.y, c1x, c1y, c2x, c2y, p2.x, p2.y]);
+  }
+  return out;
+}
+
+export function pathPolyline(pts: WhiteboardPoint[], closed: boolean, steps = 10) {
+  const poly: Array<[number, number]> = [];
+  for (const [x0, y0, ax, ay, bx, by, x1, y1] of pathBeziers(pts, closed)) {
+    for (let k = poly.length ? 1 : 0; k <= steps; k++) {
+      const t = k / steps;
+      const u = 1 - t;
+      poly.push([
+        u * u * u * x0 + 3 * u * u * t * ax + 3 * u * t * t * bx + t * t * t * x1,
+        u * u * u * y0 + 3 * u * u * t * ay + 3 * u * t * t * by + t * t * t * y1,
+      ]);
+    }
+  }
+  return poly;
+}
+
+/** Simplifica um traço à mão (Ramer–Douglas–Peucker) em poucos pontos-âncora suaves. */
+export function simplifyPoints(pts: WhiteboardPoint[], tolerance: number): WhiteboardPoint[] {
+  if (pts.length <= 2) return pts.map((p) => ({ x: p.x, y: p.y, p: 1 }));
+  const keep = new Uint8Array(pts.length);
+  keep[0] = 1;
+  keep[pts.length - 1] = 1;
+  const stack: Array<[number, number]> = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    let best = -1;
+    let bestD = tolerance;
+    for (let i = a + 1; i < b; i++) {
+      const d = distToSegment(pts[i].x, pts[i].y, pts[a].x, pts[a].y, pts[b].x, pts[b].y);
+      if (d > bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best !== -1) {
+      keep[best] = 1;
+      stack.push([a, best], [best, b]);
+    }
+  }
+  const out: WhiteboardPoint[] = [];
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push({ x: Math.round(pts[i].x * 10) / 10, y: Math.round(pts[i].y * 10) / 10, p: 1 });
+  return out;
 }
 
 /* ------------------------------------------------------------------ drawing */
@@ -225,11 +340,12 @@ function getDabSprite(color: string, hardness: number) {
 function forEachDab(
   pts: WhiteboardPoint[],
   spacing: (p: number) => number,
-  cb: (x: number, y: number, p: number) => void
+  cb: (x: number, y: number, p: number) => void,
+  from = 0
 ) {
   if (!pts.length) return;
-  cb(pts[0].x, pts[0].y, pts[0].p || 1);
-  for (let i = 1; i < pts.length; i++) {
+  if (from <= 0) cb(pts[0].x, pts[0].y, pts[0].p || 1);
+  for (let i = Math.max(1, from); i < pts.length; i++) {
     const a = pts[i - 1];
     const b = pts[i];
     const dx = b.x - a.x;
@@ -365,18 +481,77 @@ function drawIsolated(
   ctx.restore();
 }
 
+function paintAirbrush(ctx: CanvasRenderingContext2D, el: WhiteboardElement, alpha: number, from: number) {
+  const base = Math.max(1, el.size || 6);
+  const sprite = getDabSprite(el.color, clamp(el.hardness ?? 0.3, 0.05, 1));
+  ctx.globalAlpha = clamp(alpha * 0.22, 0.01, 1);
+  forEachDab(
+    el.points || [],
+    (p) => Math.max(0.75, base * p * 0.2),
+    (x, y, p) => {
+      const r = Math.max(1.5, base * p * 0.75);
+      ctx.drawImage(sprite, x - r, y - r, r * 2, r * 2);
+    },
+    from
+  );
+}
+
+/**
+ * Traços em andamento que dá para desenhar aos pedaços (só os pontos novos a cada quadro), com o
+ * mesmo resultado de desenhar tudo de novo. Evita o custo crescente do aerógrafo enquanto pinta.
+ */
+export function isIncrementalStroke(el: WhiteboardElement) {
+  return el.kind === 'stroke' && el.brush === 'airbrush' && (!el.comp || el.comp === 'source-over');
+}
+
+/** Pinta só a parte do traço a partir do ponto `from` (0 = do começo). O ctx já deve estar na escala do mundo. */
+export function drawStrokeFrom(ctx: CanvasRenderingContext2D, el: WhiteboardElement, from: number) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.translate(el.tx || 0, el.ty || 0);
+  paintAirbrush(ctx, el, clamp(el.opacity ?? 1, 0.02, 1), from);
+  ctx.restore();
+}
+
 export function drawElement(ctx: CanvasRenderingContext2D, el: WhiteboardElement, env: DrawEnv) {
   const alpha = clamp(el.opacity ?? 1, 0.02, 1);
   const tx = el.tx || 0;
   const ty = el.ty || 0;
 
+  const comp = (el.comp as GlobalCompositeOperation) || 'source-over';
+  if (el.kind === 'artboard') return; // desenhada à parte, embaixo das camadas
+  if (el.kind === 'gradient') {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.globalCompositeOperation = comp;
+    ctx.translate(tx, ty);
+    drawGradient(ctx, el);
+    ctx.restore();
+    return;
+  }
+
   if (el.kind === 'stroke') {
     const pts = el.points;
     if (!pts || !pts.length) return;
     const brush = el.brush || 'pen';
+    if (isArtBrush(brush)) {
+      // carimbos se sobrepõem: pinta isolado e aplica a opacidade uma vez só
+      drawIsolated(
+        ctx,
+        el,
+        alpha,
+        comp,
+        (c) => {
+          c.translate(tx, ty);
+          paintArtBrush(c, el);
+        },
+        env.scratch
+      );
+      return;
+    }
     if (brush === 'pen' || brush === 'marker' || brush === 'calligraphy' || brush === 'eraser') {
       const a = brush === 'marker' ? Math.min(alpha, 0.5) : alpha;
-      const op: GlobalCompositeOperation = brush === 'eraser' ? 'destination-out' : 'source-over';
+      const op: GlobalCompositeOperation = brush === 'eraser' ? 'destination-out' : comp;
       if (a >= 0.999) {
         ctx.save();
         ctx.globalCompositeOperation = op;
@@ -400,18 +575,10 @@ export function drawElement(ctx: CanvasRenderingContext2D, el: WhiteboardElement
     }
     const base = Math.max(1, el.size || 6);
     ctx.save();
+    ctx.globalCompositeOperation = comp;
     ctx.translate(tx, ty);
     if (brush === 'airbrush') {
-      const sprite = getDabSprite(el.color, clamp(el.hardness ?? 0.3, 0.05, 1));
-      ctx.globalAlpha = clamp(alpha * 0.22, 0.01, 1);
-      forEachDab(
-        pts,
-        (p) => Math.max(0.75, base * p * 0.2),
-        (x, y, p) => {
-          const r = Math.max(1.5, base * p * 0.75);
-          ctx.drawImage(sprite, x - r, y - r, r * 2, r * 2);
-        }
-      );
+      paintAirbrush(ctx, el, alpha, 0);
     } else if (brush === 'spray') {
       const rand = mulberry32(el.seed || 1337);
       ctx.fillStyle = el.color;
@@ -454,6 +621,7 @@ export function drawElement(ctx: CanvasRenderingContext2D, el: WhiteboardElement
 
   ctx.save();
   ctx.globalAlpha = alpha;
+  ctx.globalCompositeOperation = comp;
   if (el.kind !== 'image') ctx.translate(tx, ty);
 
   if (el.kind === 'line' || el.kind === 'arrow') {
@@ -480,6 +648,21 @@ export function drawElement(ctx: CanvasRenderingContext2D, el: WhiteboardElement
       ctx.lineTo(x2 - headLen * Math.cos(ang + Math.PI / 7), y2 - headLen * Math.sin(ang + Math.PI / 7));
       ctx.closePath();
       ctx.fill();
+    }
+  } else if (el.kind === 'path') {
+    const segs = pathBeziers(el.points || [], Boolean(el.closed));
+    if (segs.length) {
+      ctx.strokeStyle = el.color;
+      ctx.fillStyle = el.color;
+      ctx.lineWidth = el.size || 4;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(segs[0][0], segs[0][1]);
+      for (const b of segs) ctx.bezierCurveTo(b[2], b[3], b[4], b[5], b[6], b[7]);
+      if (el.closed) ctx.closePath();
+      if (el.filled && el.closed) ctx.fill();
+      else ctx.stroke();
     }
   } else if (el.kind === 'rect' || el.kind === 'ellipse') {
     const x = Math.min(el.x || 0, (el.x || 0) + (el.w || 0));
@@ -535,14 +718,16 @@ export function renderElements(
   view: View,
   dpr: number,
   env: DrawEnv,
-  visible: Bounds | null
+  visible: Bounds | null,
+  append = false
 ) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
-  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  if (!append) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   ctx.setTransform(dpr * view.z, 0, 0, dpr * view.z, dpr * view.x, dpr * view.y);
   for (const el of els) {
+    if (el.kind === 'artboard') continue;
     if (visible && !boundsIntersect(elementBounds(el), visible)) continue;
     drawElement(ctx, el, env);
   }
@@ -699,4 +884,61 @@ export function floodFillMask(
   }
   octx.putImageData(img, 0, 0);
   return { canvas: out, x: x0, y: y0 };
+}
+
+/* ------------------------------------------------------------------ guias (pontos / linhas) */
+
+export type GuideMode = 'off' | 'dots' | 'lines';
+
+/**
+ * Pontos ou linhas espaçados no mundo (por cima do fundo) para dar noção de medida e posição.
+ * O espaçamento acompanha o zoom (40, 80, 160... unidades) e cada 5º é mais forte.
+ */
+export function drawGuides(ctx: CanvasRenderingContext2D, mode: GuideMode, view: View, dpr: number, light: boolean) {
+  if (mode === 'off') return;
+  const W = ctx.canvas.width;
+  const H = ctx.canvas.height;
+  let step = 40;
+  while (step * view.z < 18) step *= 2;
+  while (step * view.z > 140 && step > 5) step /= 2;
+  const sp = step * view.z * dpr;
+  const firstX = Math.floor(-view.x / view.z / step);
+  const firstY = Math.floor(-view.y / view.z / step);
+  const ink = light ? '0,0,0' : '255,255,255';
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const cols = Math.ceil(W / sp) + 2;
+  const rows = Math.ceil(H / sp) + 2;
+  if (cols * rows > 40000) {
+    ctx.restore();
+    return;
+  }
+  for (let i = 0; i < cols; i++) {
+    const gx = firstX + i;
+    const sx = (gx * step * view.z + view.x) * dpr;
+    for (let j = 0; j < rows; j++) {
+      const gy = firstY + j;
+      const sy = (gy * step * view.z + view.y) * dpr;
+      const major = gx % 5 === 0 && gy % 5 === 0;
+      const origin = gx === 0 && gy === 0;
+      if (mode === 'dots') {
+        ctx.fillStyle = origin ? 'rgba(88,101,242,0.9)' : `rgba(${ink},${major ? 0.32 : 0.14})`;
+        const r = (origin ? 3 : major ? 1.6 : 1) * dpr;
+        ctx.fillRect(Math.round(sx - r), Math.round(sy - r), Math.ceil(r * 2), Math.ceil(r * 2));
+      }
+    }
+    if (mode === 'lines') {
+      ctx.fillStyle = gx === 0 ? 'rgba(88,101,242,0.5)' : `rgba(${ink},${gx % 5 === 0 ? 0.12 : 0.05})`;
+      ctx.fillRect(Math.round(sx), 0, Math.max(1, Math.round(dpr)), H);
+    }
+  }
+  if (mode === 'lines') {
+    for (let j = 0; j < rows; j++) {
+      const gy = firstY + j;
+      const sy = (gy * step * view.z + view.y) * dpr;
+      ctx.fillStyle = gy === 0 ? 'rgba(88,101,242,0.5)' : `rgba(${ink},${gy % 5 === 0 ? 0.12 : 0.05})`;
+      ctx.fillRect(0, Math.round(sy), W, Math.max(1, Math.round(dpr)));
+    }
+  }
+  ctx.restore();
 }

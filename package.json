@@ -1,6 +1,6 @@
 {
   "name": "pulsecord",
-  "version": "4.3.0",
+  "version": "4.4.0",
   "description": "PulseCord 4.0 - App estilo Discord com Sincronização Ultra-Rápida, YouTube Player, Parsec 60-120fps + Controle Xbox Virtual, Áudio no Chat, Fixação e Mensagens Privadas P2P em LAN",
   "main": "electron/main.js",
   "author": "PulseCord",
@@ -14,15 +14,16 @@
     "build:icon": "node scripts/generate-icon.mjs",
     "build:loopback": "node scripts/build-loopback.mjs",
     "build:native": "node scripts/build-loopback.mjs && node scripts/build-native-core.mjs",
-    "build:client": "npm --prefix client run build",
+    "build:client": "npm --prefix client run build && node scripts/release-signing.mjs sign-ui",
     "build": "npm run build:icon && npm run build:native && npm run build:client",
     "start:host": "node server/index.js",
     "start:server": "node server/index.js",
     "pack:server": "npm run build:client && node scripts/pack-server.mjs",
-    "build:exe": "npm run build && electron-builder --win portable",
-    "build:installer": "npm run build && electron-builder --win nsis",
-    "build:win": "npm run build && electron-builder --win nsis portable",
-    "build:signed": "npm run build && node scripts/build-signed.mjs"
+    "build:exe": "npm run build && electron-builder --win portable && node scripts/release-signing.mjs sign-exe",
+    "build:installer": "npm run build && electron-builder --win nsis && node scripts/release-signing.mjs sign-exe",
+    "build:win": "npm run build && electron-builder --win nsis portable && node scripts/release-signing.mjs sign-exe",
+    "build:signed": "npm run build && node scripts/build-signed.mjs && node scripts/release-signing.mjs sign-exe",
+    "release:key": "node scripts/release-signing.mjs init"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -50,6 +51,7 @@
       "electron/**/*",
       "!electron/bin/**",
       "server/**/*.js",
+      "server/**/*.cjs",
       "server/package.json",
       "client/dist/**/*",
       "package.json",

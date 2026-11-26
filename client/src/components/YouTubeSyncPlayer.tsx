@@ -25,7 +25,8 @@ interface YouTubeSyncPlayerProps {
   captionsLang?: string;
   interactiveControls?: boolean;
   onTimeUpdate?: (curSec: number, durSec: number) => void;
-  onEnded?: () => void;
+  /** o player chegou ao fim (manda a duração para o servidor conferir com o tempo da sala) */
+  onEnded?: (durationSec: number) => void;
   onFallbackNeeded: () => void;
   onCaptionTracks?: (tracks: CaptionTrack[]) => void;
   className?: string;
@@ -83,6 +84,9 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const durRef = useRef(0);
   const endedSentRef = useRef(false);
   const fallbackCalledRef = useRef(false);
+  // player parado sozinho enquanto a sala está tocando (janela em segundo plano, buffer, YouTube travou)
+  const stalledSinceRef = useRef(0);
+  const lastResumeRef = useRef(0);
 
   // valores mais recentes para o handler de "ready" (que é registrado uma vez por vídeo)
   const latest = useRef({ isPlaying, positionSec, serverNow, clockOffsetMs, receivedAt, rate, volume, deafened, captionsOn, captionsLang });
@@ -175,9 +179,26 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         cbs.current.onTimeUpdate?.(c, d);
         if (data.event === 'state' && data.state === 0 && !endedSentRef.current) {
           endedSentRef.current = true;
-          cbs.current.onEnded?.();
+          cbs.current.onEnded?.(d);
         } else if (data.event === 'state' && data.state === 1) {
           endedSentRef.current = false;
+        }
+        // A sala está tocando mas este player parou sozinho (pausado=2, não iniciado=-1, carregado=5, ou "fim"
+        // antes da hora): volta a tocar na posição da sala. Nada disso é enviado para os outros.
+        const st = Number(data.state);
+        const target = expectedVideoPosition(L.positionSec, L.serverNow, L.clockOffsetMs, L.isPlaying, L.rate, L.receivedAt);
+        const stoppedEarly = st === 0 && d > 0 && target < d - 6;
+        if (L.isPlaying && (st === 2 || st === -1 || st === 5 || stoppedEarly)) {
+          const now = Date.now();
+          if (!stalledSinceRef.current) stalledSinceRef.current = now;
+          if (now - stalledSinceRef.current > 1200 && now - lastResumeRef.current > 2500) {
+            lastResumeRef.current = now;
+            if (Number.isFinite(target) && Math.abs(c - target) > 1.5) sendCmd('seek', { sec: target });
+            sendCmd('play');
+            if (stoppedEarly) endedSentRef.current = false;
+          }
+        } else {
+          stalledSinceRef.current = 0;
         }
       } else if (data.event === 'captions') {
         cbs.current.onCaptionTracks?.(Array.isArray(data.tracks) ? data.tracks : []);
@@ -196,6 +217,25 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [youtubeId, iframeSrc]);
+
+  // Voltou do segundo plano (janela restaurada/focada): confere a posição e retoma se a sala está tocando
+  useEffect(() => {
+    const resync = () => {
+      if (!readyRef.current || document.visibilityState === 'hidden') return;
+      const L = latest.current;
+      const target = expectedVideoPosition(L.positionSec, L.serverNow, L.clockOffsetMs, L.isPlaying, L.rate, L.receivedAt);
+      if (Number.isFinite(target) && Math.abs(curTimeRef.current - target) > 1.5) sendCmd('seek', { sec: target });
+      sendCmd(L.isPlaying ? 'play' : 'pause');
+      sendCmd('volume', { volume: L.deafened ? 0 : Math.max(0, Math.min(1, L.volume)) });
+    };
+    window.addEventListener('focus', resync);
+    document.addEventListener('visibilitychange', resync);
+    return () => {
+      window.removeEventListener('focus', resync);
+      document.removeEventListener('visibilitychange', resync);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [iframeSrc]);
 
   // Volume individual: não mexe em posição
   useEffect(() => {

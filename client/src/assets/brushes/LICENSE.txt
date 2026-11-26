@@ -1,0 +1,4 @@
+60 free gimp / krita brushes, por rubberduck
+https://opengameart.org/content/60-free-gimp-krita-brushes
+Licença: CC0 1.0 (domínio público) — https://creativecommons.org/publicdomain/zero/1.0/
+Convertidos dos .gbr/.gih originais para máscaras PNG (branco + transparência, até 128 px).

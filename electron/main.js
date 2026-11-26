@@ -16,6 +16,7 @@ const {
 } = require('electron');
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
+const releaseVerify = require('./releaseVerify');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -121,7 +122,26 @@ app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-zero-copy');
 // Menos processos/memória: sem renderer "reserva" pré-aberto, sem Cast/Media Router e sem
 // downloads de dicas de otimização do Chrome (nada disso é usado pelo PulseCord).
-app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess,MediaRouter,OptimizationHints,Translate');
+// Vídeo/áudio em segundo plano: com a janela minimizada, escondida na bandeja ou coberta por um jogo, o Chromium
+// pausava o vídeo sem som (o "assistir junto" usa vídeo mudo + áudio separado) e desligava a trilha de vídeo
+// (tela preta ao voltar). Estes recursos ficam desligados para o player continuar como numa janela visível.
+app.commandLine.appendSwitch(
+  'disable-features',
+  [
+    'SpareRendererForSitePerProcess',
+    'MediaRouter',
+    'OptimizationHints',
+    'Translate',
+    'CalculateNativeWinOcclusion',
+    'BackgroundVideoTrackOptimization',
+    'BackgroundVideoPauseOptimization',
+    'BackgroundMediaSuspend',
+  ].join(',')
+);
+app.commandLine.appendSwitch('disable-background-media-suspend');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
 }
@@ -465,6 +485,24 @@ async function stopEmbeddedHost() {
   return { ...hostState };
 }
 
+/** Assinatura Authenticode de um .exe (Windows): { ok: assinatura válida e confiável, subject: quem assinou } */
+function verifyAuthenticode(file) {
+  return new Promise((resolve) => {
+    const { execFile } = require('node:child_process');
+    const ps = "$s = Get-AuthenticodeSignature -LiteralPath $env:PC_SIG_FILE; Write-Output ($s.Status.ToString() + '|' + $s.SignerCertificate.Subject)";
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', ps],
+      { env: { ...process.env, PC_SIG_FILE: file }, windowsHide: true, timeout: 30000 },
+      (err, stdout) => {
+        if (err) return resolve({ ok: false, subject: '' });
+        const [status, subject = ''] = String(stdout || '').trim().split('|');
+        resolve({ ok: status === 'Valid', subject });
+      }
+    );
+  });
+}
+
 async function ensureCloudflaredBinary() {
   const binDir = path.join(app.getPath('userData'), 'bin');
   const binPath = path.join(binDir, 'cloudflared.exe');
@@ -480,10 +518,18 @@ async function ensureCloudflaredBinary() {
 
   const url =
     'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
-  const resp = await fetch(url);
+  const resp = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120000) });
   if (!resp.ok) throw new Error(`Falha ao baixar cloudflared (HTTP ${resp.status}).`);
   const arrBuf = await resp.arrayBuffer();
-  fs.writeFileSync(binPath, Buffer.from(arrBuf));
+  const partPath = `${binPath}.${process.pid}.part`;
+  fs.writeFileSync(partPath, Buffer.from(arrBuf));
+  // só roda se for o cloudflared original, assinado pela Cloudflare
+  const signer = await verifyAuthenticode(partPath);
+  if (!signer.ok || !/cloudflare/i.test(signer.subject)) {
+    try { fs.unlinkSync(partPath); } catch {}
+    throw new Error('O cloudflared baixado não tem a assinatura digital da Cloudflare; nada foi executado.');
+  }
+  fs.renameSync(partPath, binPath);
   return binPath;
 }
 
@@ -640,6 +686,24 @@ function createWindow() {
     }
     return { action: 'deny' };
   });
+  // A janela principal tem acesso ao controle remoto, atualizações e arquivos: nunca deixa ela virar outro site.
+  // Um link ou redirecionamento para fora abre no navegador padrão.
+  const isAppUrl = (u) => u.startsWith('app://pulsecord/') || (IS_DEV && u.startsWith('http://localhost:5173'));
+  const guardNavigation = (event, url) => {
+    if (isAppUrl(url)) return;
+    event.preventDefault();
+    if (!/^https?:\/\//i.test(url)) return;
+    // links de arquivo do servidor (anexos, transferências, o .exe) viram download dentro do app, como antes
+    let isFileLink = false;
+    try {
+      isFileLink = /^\/(api\/transfers\/[^/]+\/download|api\/download-client|uploads\/)/.test(new URL(url).pathname);
+    } catch {}
+    if (isFileLink) mainWindow.webContents.downloadURL(url);
+    else shell.openExternal(url).catch(() => {});
+  };
+  mainWindow.webContents.on('will-navigate', guardNavigation);
+  mainWindow.webContents.on('will-redirect', guardNavigation);
+  mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
 
   if (IS_DEV) {
     mainWindow.loadURL('http://localhost:5173');
@@ -842,10 +906,12 @@ if (!gotLock) {
       const resp = await fetch(`${serverUrl}/api/update/ui-bundle`, { signal: AbortSignal.timeout(30000) });
       if (!resp.ok) throw new Error(`Falha ao baixar pacote de interface (HTTP ${resp.status}).`);
       const gz = Buffer.from(await resp.arrayBuffer());
-      const parsed = JSON.parse(zlib.gunzipSync(gz).toString('utf8'));
+      const parsed = JSON.parse(zlib.gunzipSync(gz, { maxOutputLength: 512 * 1024 * 1024 }).toString('utf8'));
       if (!parsed?.files || typeof parsed.files['index.html'] !== 'string') {
         throw new Error('Pacote de interface inválido.');
       }
+      // só aplica interface assinada por quem publica o PulseCord, da mesma versão deste app
+      releaseVerify.verifyUiBundle(parsed.files, app.getVersion());
 
       const stageDir = `${LIVE_UI_DIR}.staging`;
       fs.rmSync(stageDir, { recursive: true, force: true });
@@ -853,7 +919,7 @@ if (!gotLock) {
 
       for (const [rel, b64] of Object.entries(parsed.files)) {
         const safeTarget = path.normalize(path.join(stageDir, rel));
-        if (!safeTarget.startsWith(stageDir)) continue;
+        if (!safeTarget.startsWith(stageDir + path.sep)) continue; // sem o separador, "live-ui.stagingX" passaria
         fs.mkdirSync(path.dirname(safeTarget), { recursive: true });
         fs.writeFileSync(safeTarget, Buffer.from(String(b64), 'base64'));
       }
@@ -885,8 +951,19 @@ if (!gotLock) {
         resp.body.cancel().catch(() => {});
         throw new Error('O Host só tem o instalador (Setup), não o PulseCord-Portable.exe. Peça ao Host para colocar o portable novo na pasta dist-app.');
       }
-      const headerSha = resp.headers.get('x-pulsecord-sha256') || '';
-      if (headerSha || servedName !== installerName) expectedSha256 = headerSha;
+      // o .exe tem que vir assinado por quem publica o PulseCord e ser mais novo que este app
+      let signed;
+      try {
+        signed = releaseVerify.verifyInstallerSignature(resp.headers.get('x-pulsecord-signature') || '', app.getVersion());
+      } catch (err) {
+        resp.body.cancel().catch(() => {});
+        throw err;
+      }
+      if (signed.kind !== (/portable/i.test(servedName) ? 'portable' : 'setup')) {
+        resp.body.cancel().catch(() => {});
+        throw new Error('A assinatura não é deste instalador.');
+      }
+      expectedSha256 = signed.sha256;
 
       const total = Number(resp.headers.get('content-length') || 0);
       let loaded = 0;
@@ -927,7 +1004,7 @@ if (!gotLock) {
       });
 
       const actualSha = hash.digest('hex');
-      if (expectedSha256 && expectedSha256.toLowerCase() !== actualSha.toLowerCase()) {
+      if (!expectedSha256 || expectedSha256.toLowerCase() !== actualSha.toLowerCase()) {
         try { fs.unlinkSync(targetExe); } catch {}
         throw new Error('Falha na verificação de integridade (SHA-256) da atualização.');
       }
@@ -1087,12 +1164,16 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
     });
     ipcMain.handle('rc:install-vigembus', async () => {
       try {
-        const tmpExe = path.join(os.tmpdir(), 'ViGEmBus_Setup_PulseCord.exe');
-        if (!fs.existsSync(tmpExe) || fs.statSync(tmpExe).size < 100000) {
-          const url = 'https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe';
-          const resp = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(45000) });
-          if (!resp.ok) throw new Error(`Falha ao baixar driver ViGEmBus (HTTP ${resp.status}).`);
-          fs.writeFileSync(tmpExe, Buffer.from(await resp.arrayBuffer()));
+        // sempre um arquivo novo (nada reaproveitado da pasta temporária) e só abre se a assinatura digital for válida
+        const tmpExe = path.join(os.tmpdir(), `ViGEmBus_Setup_PulseCord_${crypto.randomBytes(6).toString('hex')}.exe`);
+        const url = 'https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe';
+        const resp = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(45000) });
+        if (!resp.ok) throw new Error(`Falha ao baixar driver ViGEmBus (HTTP ${resp.status}).`);
+        fs.writeFileSync(tmpExe, Buffer.from(await resp.arrayBuffer()));
+        const signer = await verifyAuthenticode(tmpExe);
+        if (!signer.ok) {
+          try { fs.unlinkSync(tmpExe); } catch {}
+          throw new Error('O instalador do ViGEmBus baixado não tem assinatura digital válida; nada foi executado.');
         }
         const err = await shell.openPath(tmpExe);
         if (err) throw new Error(err);
@@ -1198,6 +1279,7 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
     ipcMain.handle('lan-peers:pin-dm', (_e, payload) => lanPeerMessenger.pinDm(payload));
     ipcMain.handle('lan-peers:call-invite', (_e, payload) => lanPeerMessenger.sendCallInvite(payload));
     ipcMain.handle('lan-peers:call-respond', (_e, payload) => lanPeerMessenger.sendCallRespond(payload));
+    ipcMain.handle('lan-peers:call-ticket', (_e, p) => lanPeerMessenger.requestCallTicket(p?.url, p?.room));
     ipcMain.handle('lan-peers:get-groups', () => lanPeerMessenger?.getGroupsList() || []);
     ipcMain.handle('lan-peers:save-group', (_e, g) => lanPeerMessenger.saveGroup(g));
     ipcMain.handle('lan-peers:send-group-dm', (_e, p) => lanPeerMessenger.sendGroupMessage(p));

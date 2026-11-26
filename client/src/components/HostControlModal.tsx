@@ -270,8 +270,8 @@ export const HostControlModal: React.FC<HostControlModalProps> = ({
                         Distribuir Atualizações pelo App (para seus amigos)
                       </div>
                       <p className="text-[10px] text-[#949ba4]">
-                        Quando você tiver um novo <code>PulseCord-Setup.exe</code>, selecione-o aqui e todos os amigos
-                        atualizam pelo próprio app com 1 clique!
+                        Selecione o novo <code>PulseCord-Setup.exe</code> junto com o <code>.exe.sig.json</code> dele (os
+                        dois ficam em dist-app). Sem a assinatura, os apps dos amigos recusam instalar.
                       </p>
                     </div>
                     <label className="px-2.5 py-1.5 rounded bg-[#23a55a] hover:bg-[#1a8245] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0">
@@ -279,22 +279,38 @@ export const HostControlModal: React.FC<HostControlModalProps> = ({
                       {publishingUpdate ? 'Enviando...' : 'Publicar .exe'}
                       <input
                         type="file"
-                        accept=".exe"
+                        accept=".exe,.json"
+                        multiple
                         disabled={publishingUpdate}
                         className="hidden"
                         onChange={async (e) => {
-                          const f = e.target.files?.[0];
+                          const picked = Array.from(e.target.files || []);
                           e.target.value = '';
+                          const f = picked.find((x) => /\.exe$/i.test(x.name));
+                          const sigFile = picked.find((x) => /\.sig\.json$/i.test(x.name)) || null;
                           if (!f) return;
                           setPublishingUpdate(true);
                           setPublishStatus('');
                           try {
-                            const ver = window.prompt('Qual a versão desta atualização?', '3.0.1') || '3.0.1';
+                            let ver = '';
+                            if (sigFile) {
+                              try {
+                                ver = String(JSON.parse(await sigFile.text())?.version || '');
+                              } catch {}
+                            }
+                            if (!ver) ver = window.prompt('Qual a versão desta atualização?', '3.0.1') || '3.0.1';
                             const res = await api.publishInstallerUpdate(
                               f,
                               ver,
-                              `Atualização v${ver} publicada pelo Host.`
+                              `Atualização v${ver} publicada pelo Host.`,
+                              sigFile
                             );
+                            if (!sigFile) {
+                              setPublishStatus(
+                                'Publicado SEM assinatura: os apps vão recusar instalar. Envie de novo com o arquivo .exe.sig.json.'
+                              );
+                              return;
+                            }
                             setPublishStatus(`Atualização v${res.manifest.version} publicada para todos os amigos!`);
                           } catch (err: unknown) {
                             setPublishStatus((err as Error).message || 'Erro ao publicar atualização.');

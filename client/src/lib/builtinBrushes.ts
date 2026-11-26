@@ -1,0 +1,73 @@
+/// <reference types="vite/client" />
+// Pincéis embutidos: 60 pontas do pacote "60 free gimp / krita brushes" de rubberduck
+// (https://opengameart.org/content/60-free-gimp-krita-brushes), licença CC0 (domínio público).
+// Os .gbr/.gih originais viraram máscaras PNG brancas de até 128 px em ../assets/brushes.
+import type { WhiteboardBrushTip } from '../types';
+
+const urls = import.meta.glob('../assets/brushes/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
+
+const LIST: Array<[string, string, string, number]> = [
+  ["builtin-bark", "Bark", "bark.png", 0.4],
+  ["builtin-blocky", "Blocky", "blocky.png", 0.5],
+  ["builtin-bubbles", "Bubbles", "bubbles.png", 0.2],
+  ["builtin-bubbles2", "Bubbles2", "bubbles2.png", 0.4],
+  ["builtin-circles", "Circles", "circles.png", 0.4],
+  ["builtin-cracks", "Cracks", "cracks.png", 0.2],
+  ["builtin-cracks2", "Cracks2", "cracks2.png", 0.5],
+  ["builtin-crosses", "Crosses", "crosses.png", 0.45],
+  ["builtin-crystallix", "Crystallix", "crystallix.png", 0.2],
+  ["builtin-crystals", "Crystals", "crystals.png", 0.5],
+  ["builtin-dirt", "Dirt", "dirt.png", 0.4],
+  ["builtin-dots", "Dots", "dots.png", 0.6],
+  ["builtin-explode", "Explode", "explode.png", 0.5],
+  ["builtin-explode-particles", "Explode particles", "explode-particles.png", 0.5],
+  ["builtin-exploding-sparks", "Exploding sparks", "exploding-sparks.png", 0.4],
+  ["builtin-exploding-sparks-small", "Exploding sparks small", "exploding-sparks-small.png", 0.3],
+  ["builtin-fine-grain", "Fine grain", "fine-grain.png", 0.2],
+  ["builtin-flocks", "Flocks", "flocks.png", 0.2],
+  ["builtin-fractale1", "Fractale1", "fractale1.png", 0.2],
+  ["builtin-fractale2", "Fractale2", "fractale2.png", 0.2],
+  ["builtin-fractale3", "Fractale3", "fractale3.png", 0.3],
+  ["builtin-fuzzy", "Fuzzy", "fuzzy.png", 0.5],
+  ["builtin-glowing-fragments", "Glowing fragments", "glowing-fragments.png", 0.35],
+  ["builtin-hand-drawn-star", "Hand drawn star", "hand-drawn-star.png", 0.5],
+  ["builtin-lava", "Lava", "lava.png", 0.45],
+  ["builtin-microbes", "Microbes", "microbes.png", 0.5],
+  ["builtin-multi-star", "Multi star", "multi-star.png", 0.3],
+  ["builtin-nature1", "Nature1", "nature1.png", 0.4],
+  ["builtin-painted-style", "Painted style", "painted-style.png", 0.55],
+  ["builtin-patches", "Patches", "patches.png", 0.45],
+  ["builtin-pixel-star", "Pixel star", "pixel-star.png", 0.2],
+  ["builtin-plasmaball", "Plasmaball", "plasmaball.png", 0.2],
+  ["builtin-polarized", "Polarized", "polarized.png", 0.5],
+  ["builtin-radioactive", "Radioactive", "radioactive.png", 0.6],
+  ["builtin-rippled-glass", "Rippled glass", "rippled-glass.png", 0.35],
+  ["builtin-rocky1", "Rocky1", "rocky1.png", 0.5],
+  ["builtin-saw", "Saw", "saw.png", 0.6],
+  ["builtin-scratches", "Scratches", "scratches.png", 0.45],
+  ["builtin-scratches2", "Scratches2", "scratches2.png", 0.5],
+  ["builtin-spikeball", "Spikeball", "spikeball.png", 0.35],
+  ["builtin-spiky", "Spiky", "spiky.png", 0.5],
+  ["builtin-splat-sun", "Splat sun", "splat-sun.png", 0.2],
+  ["builtin-splatters", "Splatters", "splatters.png", 0.5],
+  ["builtin-splatters2", "Splatters2", "splatters2.png", 0.6],
+  ["builtin-structure", "Structure", "structure.png", 0.4],
+  ["builtin-structure-glass", "Structure glass", "structure-glass.png", 0.5],
+  ["builtin-structure2", "Structure2", "structure2.png", 0.45],
+  ["builtin-structure3", "Structure3", "structure3.png", 0.6],
+  ["builtin-symmetric-flower", "Symmetric flower", "symmetric-flower.png", 0.5],
+  ["builtin-turbine", "Turbine", "turbine.png", 0.5],
+  ["builtin-vegetal", "Vegetal", "vegetal.png", 0.4],
+  ["builtin-wall-struct", "Wall struct", "wall-struct.png", 0.45],
+  ["builtin-waterfall", "Waterfall", "waterfall.png", 0.6],
+  ["builtin-weird", "Weird", "weird.png", 0.4],
+  ["builtin-weird-mirror", "Weird mirror", "weird-mirror.png", 0.6],
+  ["builtin-weird-smoke", "Weird smoke", "weird-smoke.png", 0.5],
+  ["builtin-weird2", "Weird2", "weird2.png", 0.3],
+  ["builtin-weird3", "Weird3", "weird3.png", 0.45],
+  ["builtin-wood1", "Wood1", "wood1.png", 0.4],
+  ["builtin-wood1b", "Wood1b", "wood1b.png", 0.4],
+];
+
+export const BUILTIN_BRUSHES: WhiteboardBrushTip[] = LIST.map(([id, name, file, spacing]) => ({ id, name, tip: urls[`../assets/brushes/${file}`], spacing })).filter((b) => Boolean(b.tip));
+export const BUILTIN_IDS = new Set(BUILTIN_BRUSHES.map((b) => b.id));

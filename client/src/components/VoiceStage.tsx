@@ -157,6 +157,8 @@ const SpeakingOutline: React.FC<{ socketId: string }> = React.memo(({ socketId }
 });
 
 interface VoiceStageProps {
+  /** a pessoa foi para o chat: a call continua montada (vídeo e som seguem tocando), só fora da tela */
+  backgrounded?: boolean;
   api?: ApiClient | null;
   socket?: Socket | null;
   channelId?: string;
@@ -253,7 +255,7 @@ interface VoiceStageProps {
   spotlightRequest?: { key: string; seq: number } | null;
   onVideoNext: () => void;
   onVideoPrev: () => void;
-  onVideoEnded: (queueId: string) => void;
+  onVideoEnded: (queueId: string, durationSec?: number) => void;
   onVideoRemove: (index: number) => void;
   onVideoClear: () => void;
   /** faixa no topo (modo palco) e botões extras no painel (gravar, clipe) */
@@ -262,6 +264,7 @@ interface VoiceStageProps {
 }
 
 export const VoiceStage: React.FC<VoiceStageProps> = ({
+  backgrounded = false,
   api,
   socket = null,
   channelId,
@@ -483,6 +486,52 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     if (el) el.playbackRate = videoRate;
     if (aud) aud.playbackRate = videoRate;
   }, [videoRate, currentWatchVideo, useYouTubeWatchPlayer]);
+
+  // Segundo plano: se a sala está tocando e o vídeo (ou o áudio separado) parou sozinho — janela minimizada,
+  // escondida na bandeja, rede engasgou —, volta a tocar na posição da sala. Só local: ninguém mais é pausado.
+  const watchLatestRef = useRef({ videoState, clockOffsetMs, currentWatchVideo, useYouTubeWatchPlayer });
+  watchLatestRef.current = { videoState, clockOffsetMs, currentWatchVideo, useYouTubeWatchPlayer };
+  useEffect(() => {
+    const kick = (force: boolean) => {
+      const L = watchLatestRef.current;
+      if (L.useYouTubeWatchPlayer || !L.videoState?.isPlaying || !L.currentWatchVideo) return;
+      if (L.videoState.queue[L.videoState.currentIndex]?.queueId !== L.currentWatchVideo.queueId) return;
+      const el = watchVideoRef.current;
+      if (!el || el.readyState < 1) return;
+      const aud = L.currentWatchVideo.audioStreamPath ? watchAudioRef.current : null;
+      const target = expectedVideoPosition(
+        L.videoState.positionSec,
+        L.videoState.serverNow,
+        L.clockOffsetMs,
+        true,
+        L.videoState.rate || 1,
+        L.videoState.receivedAt
+      );
+      const dur = el.duration || 0;
+      if (dur > 0 && target >= dur - 0.5) return; // acabou de verdade
+      const stopped = el.paused || el.ended || (aud ? aud.paused : false);
+      if (!stopped && !force) return;
+      if (Number.isFinite(target) && Math.abs((el.currentTime || 0) - target) > 1.5) {
+        try {
+          el.currentTime = target;
+          if (aud) aud.currentTime = target;
+        } catch {}
+      }
+      el.play().catch(() => {});
+      aud?.play().catch(() => {});
+    };
+    const timer = window.setInterval(() => kick(false), 1500);
+    const onBack = () => {
+      if (document.visibilityState !== 'hidden') kick(true);
+    };
+    window.addEventListener('focus', onBack);
+    document.addEventListener('visibilitychange', onBack);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onBack);
+      document.removeEventListener('visibilitychange', onBack);
+    };
+  }, []);
 
   // Sync Watch-Party HTMLVideoElement (and companion DASH <audio>) state with server VideoState
   useEffect(() => {
@@ -821,7 +870,18 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   const currentMusic = musicState && musicState.currentIndex >= 0 ? musicState.queue[musicState.currentIndex] : null;
 
   return (
-    <div className="flex-1 flex h-full min-w-0 bg-[#313338] pc-voice-stage relative overflow-hidden">
+    <div
+      className="flex-1 flex h-full min-w-0 bg-[#313338] pc-voice-stage relative overflow-hidden"
+      // Fora da tela (e não display:none): o player do "assistir junto" e o áudio continuam tocando enquanto
+      // a pessoa lê o chat; inert impede foco/clique/teclado em qualquer coisa aqui dentro.
+      style={
+        backgrounded
+          ? { position: 'fixed', left: -20000, top: 0, width: 960, height: 540, pointerEvents: 'none', flex: 'none' }
+          : undefined
+      }
+      aria-hidden={backgrounded || undefined}
+      inert={backgrounded || undefined}
+    >
       <div className="flex-1 flex flex-col min-w-0 h-full relative bg-[#1e1f22]">
         {/* Top Bar (48px authentic Discord bar) */}
         <header className="@container h-12 shrink-0 px-4 bg-[#2b2d31]/95 border-b border-white/10 flex items-center justify-between gap-3 z-10">
@@ -1203,7 +1263,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
 
         {/* Main Video / Screen / Watch-Party / Whiteboard Stage */}
         <div className="flex-1 flex flex-col p-4 gap-3 overflow-y-auto min-h-0">
-          {showWhiteboard && (
+          {showWhiteboard && !backgrounded && (
             socket ? (
               // mesma altura do palco (igual ao player de vídeo); o resto da call fica abaixo, rolando
               <div className="shrink-0 h-full min-h-[420px] flex flex-col">
@@ -1260,7 +1320,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                       });
                     }
                   }}
-                  onEnded={() => onVideoEnded(currentWatchVideo.queueId)}
+                  onEnded={(dur) => onVideoEnded(currentWatchVideo.queueId, dur)}
                   onFallbackNeeded={() => {
                     if (!currentWatchVideo.streamPath) {
                       // sem stream direto (YouTube bloqueou o download): avisa em vez de trocar
@@ -1383,9 +1443,9 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                         }
                       }
                     }}
-                    onEnded={() => {
+                    onEnded={(e) => {
                       watchAudioRef.current?.pause();
-                      onVideoEnded(currentWatchVideo.queueId);
+                      onVideoEnded(currentWatchVideo.queueId, (e.currentTarget as HTMLVideoElement).duration || 0);
                     }}
                     onClick={() => (videoState?.isPlaying ? onVideoPause() : onVideoPlay())}
                     className="w-full h-full object-contain cursor-pointer"

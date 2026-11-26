@@ -109,6 +109,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lanPeersPinDm: (payload) => ipcRenderer.invoke('lan-peers:pin-dm', payload),
   lanPeersCallInvite: (payload) => ipcRenderer.invoke('lan-peers:call-invite', payload),
   lanPeersCallRespond: (payload) => ipcRenderer.invoke('lan-peers:call-respond', payload),
+  lanCallTicket: (url, room) => ipcRenderer.invoke('lan-peers:call-ticket', { url, room }),
   onLanPeersUpdated: (cb) => {
     const listener = (_e, list) => cb(list);
     ipcRenderer.on('lan-peers:list', listener);

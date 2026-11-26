@@ -775,6 +775,15 @@ export default function App() {
   const isStageModRef = useRef(false);
   const localMicStreamRef = useRef<MediaStream | null>(null);
   const desktopNotifyRef = useRef<(msg: ChatMessage, kind: 'channel' | 'dm') => void>(() => {});
+  // Controle remoto: só aceita um "aceito" de quem EU convidei/pedi há pouco (um servidor ou membro mal-intencionado
+  // não consegue ligar o controle do meu PC mandando um aceite falso)
+  const rcOutgoingRef = useRef(new Map<string, { kind: 'invite' | 'request'; at: number }>());
+  const takeRcOutgoing = (socketId: string, kind: 'invite' | 'request') => {
+    const p = rcOutgoingRef.current.get(socketId);
+    if (!p || p.kind !== kind || Date.now() - p.at > 3 * 60 * 1000) return false;
+    rcOutgoingRef.current.delete(socketId);
+    return true;
+  };
 
   // Atalhos globais (funcionam com o PulseCord em segundo plano, inclusive dentro de jogos)
   useEffect(() => {
@@ -785,7 +794,7 @@ export default function App() {
         if (r && !r.ok && r.failed?.length) console.warn('[PulseCord] Atalhos em uso por outro programa:', r.failed.join(', '));
       })
       .catch(() => {});
-  }, [desktopPrefs.shortcuts.mute, desktopPrefs.shortcuts.deafen, desktopPrefs.shortcuts.overlay]);
+  }, [desktopPrefs.shortcuts.mute, desktopPrefs.shortcuts.deafen, desktopPrefs.shortcuts.overlay, desktopPrefs.shortcuts.clip]);
 
   useEffect(() => {
     const api = window.electronAPI;
@@ -1763,7 +1772,7 @@ export default function App() {
             if (m.transfer && m.transfer.id === transfer.id) {
               chDirty = true;
               changed = true;
-              return { ...m, transfer };
+              return { ...m, transfer: { ...m.transfer, ...transfer } };
             }
             return m;
           });
@@ -1780,7 +1789,7 @@ export default function App() {
             if (m.transfer && m.transfer.id === transfer.id) {
               pairDirty = true;
               changed = true;
-              return { ...m, transfer };
+              return { ...m, transfer: { ...m.transfer, ...transfer } };
             }
             return m;
           });
@@ -1897,6 +1906,8 @@ export default function App() {
     socket.on(
       'rc:accepted',
       async ({ fromSocketId, fromName, role }: { fromSocketId: string; fromName: string; role: string }) => {
+        // convite meu aceito -> o outro passa a me controlar; pedido meu aceito -> eu passo a controlar o outro
+        if (!takeRcOutgoing(fromSocketId, role === 'controller' ? 'invite' : 'request')) return;
         if (role === 'controller') {
           const enabled = window.electronAPI?.rcEnable ? await window.electronAPI.rcEnable() : false;
           if (!enabled && isElectron) {
@@ -1928,7 +1939,8 @@ export default function App() {
       }
     );
 
-    socket.on('rc:declined', ({ fromName }: { fromName: string }) => {
+    socket.on('rc:declined', ({ fromSocketId, fromName }: { fromSocketId: string; fromName: string }) => {
+      rcOutgoingRef.current.delete(fromSocketId);
       showToast(`${fromName} recusou o pedido de controle remoto.`, 'info');
     });
 
@@ -2648,12 +2660,20 @@ export default function App() {
       disconnectLanCallSocket();
       revokeRemoteControlInternal(true);
 
+      const baseAuth = {
+        userId: curUser.id,
+        displayName: curUser.displayName,
+        avatarColor: curUser.avatarColor,
+        avatarUrl: curUser.avatarUrl || null,
+      };
       const p2pSock = io(callServerUrl, {
-        auth: {
-          userId: curUser.id,
-          displayName: curUser.displayName,
-          avatarColor: curUser.avatarColor,
-          avatarUrl: curUser.avatarUrl || null,
+        // a cada (re)conexão pede um ingresso novo ao anfitrião: só quem é da DM/grupo entra na call
+        auth: (cb: (data: object) => void) => {
+          const getTicket = window.electronAPI?.lanCallTicket;
+          if (!getTicket) return cb(baseAuth);
+          getTicket(callServerUrl, dmRoomId)
+            .then((ticket) => cb({ ...baseAuth, ticket }))
+            .catch(() => cb(baseAuth));
         },
         transports: ['websocket', 'polling'],
       });
@@ -2697,6 +2717,7 @@ export default function App() {
       p2pSock.on(
         'rc:accepted',
         async ({ fromSocketId, fromName, role }: { fromSocketId: string; fromName: string; role: string }) => {
+          if (!takeRcOutgoing(fromSocketId, role === 'controller' ? 'invite' : 'request')) return;
           if (role === 'controller') {
             const enabled = window.electronAPI?.rcEnable ? await window.electronAPI.rcEnable() : false;
             if (!enabled && isElectron) {
@@ -2735,7 +2756,8 @@ export default function App() {
           showToast(`Permissões do Host: ${allowed.join(', ') || 'Somente visão'}`, 'info');
         }
       });
-      p2pSock.on('rc:declined', ({ fromName }: { fromName: string }) => {
+      p2pSock.on('rc:declined', ({ fromSocketId, fromName }: { fromSocketId: string; fromName: string }) => {
+        rcOutgoingRef.current.delete(fromSocketId);
         showToast(`${fromName} recusou o controle remoto.`, 'info');
       });
       p2pSock.on('rc:revoked', ({ fromSocketId }: { fromSocketId: string }) => {
@@ -3315,6 +3337,7 @@ export default function App() {
         showError('Compartilhe sua tela primeiro para convidar alguém a controlá-la.');
         return;
       }
+      rcOutgoingRef.current.set(targetSocketId, { kind: 'invite', at: Date.now() });
       (p2pCallSocketRef.current || socketRef.current)?.emit('rc:invite', { targetSocketId });
       showToast('Convite de controle remoto enviado! Aguardando aceitação.', 'info');
     },
@@ -3323,6 +3346,7 @@ export default function App() {
 
   const handleRequestRemoteControl = useCallback(
     (targetSocketId: string) => {
+      rcOutgoingRef.current.set(targetSocketId, { kind: 'request', at: Date.now() });
       (p2pCallSocketRef.current || socketRef.current)?.emit('rc:request', { targetSocketId });
       showToast('Pedido de controle remoto enviado! Aguardando permissão.', 'info');
     },
@@ -4547,8 +4571,10 @@ export default function App() {
           />
 
           {/* Main Area: Voice Stage OR Private Group/DM Chat OR Server Text Channel + Member List */}
-          {viewMode === 'voice' && activeVoiceChannelId ? (
+          {/* A call fica montada mesmo com o chat aberto: o vídeo do "assistir junto" não para nem fica preto */}
+          {activeVoiceChannelId && (
             <VoiceStage
+              backgrounded={viewMode !== 'voice'}
               topBanner={
                 activeVoiceChannel?.isStage ? (
                   <StageBar
@@ -4785,10 +4811,11 @@ export default function App() {
               onVideoPrev={() =>
                 (p2pCallSocketRef.current || socketRef.current)?.emit('video:prev', { channelId: activeVoiceChannelId })
               }
-              onVideoEnded={(queueId) =>
+              onVideoEnded={(queueId, durationSec) =>
                 (p2pCallSocketRef.current || socketRef.current)?.emit('video:ended', {
                   channelId: activeVoiceChannelId,
                   queueId,
+                  durationSec,
                 })
               }
               onVideoRemove={(index) =>
@@ -4801,7 +4828,8 @@ export default function App() {
                 (p2pCallSocketRef.current || socketRef.current)?.emit('video:clear', { channelId: activeVoiceChannelId })
               }
             />
-          ) : navArea === 'dms' || !server ? (
+          )}
+          {viewMode === 'voice' && activeVoiceChannelId ? null : navArea === 'dms' || !server ? (
             activeGroup ? (
               <ChatArea
                 api={api}

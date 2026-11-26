@@ -217,8 +217,49 @@ export interface Channel {
   createdBy: string;
 }
 
-export type WhiteboardBrush = 'pen' | 'airbrush' | 'marker' | 'calligraphy' | 'spray' | 'pixel' | 'eraser';
-export type WhiteboardTool = WhiteboardBrush | 'select' | 'line' | 'arrow' | 'rect' | 'ellipse' | 'text' | 'eyedropper' | 'fill';
+export type WhiteboardBrush =
+  | 'pen'
+  | 'airbrush'
+  | 'marker'
+  | 'calligraphy'
+  | 'spray'
+  | 'pixel'
+  | 'eraser'
+  | 'charcoal'
+  | 'watercolor'
+  | 'ink'
+  | 'splatter'
+  | 'crayon'
+  | 'neon'
+  | 'custom';
+export type WhiteboardTool =
+  | WhiteboardBrush
+  | 'select'
+  | 'line'
+  | 'arrow'
+  | 'rect'
+  | 'ellipse'
+  | 'text'
+  | 'eyedropper'
+  | 'fill'
+  | 'gradient'
+  | 'artboard'
+  | 'movelayer'
+  | 'path';
+
+/** Ajustes não destrutivos da camada (aplicados na hora de compor, iguais para todos) */
+export interface WhiteboardLayerFx {
+  brightness?: number; // %  (100 = normal)
+  contrast?: number; // %
+  saturate?: number; // %
+  hue?: number; // graus
+  blur?: number; // px de mundo
+  invert?: number; // %
+  grayscale?: number; // %
+  sepia?: number; // %
+}
+
+export type WhiteboardGradientType = 'linear' | 'radial' | 'reflected' | 'angle';
 
 export interface WhiteboardLayer {
   id: string;
@@ -228,6 +269,14 @@ export interface WhiteboardLayer {
   opacity: number;
   /** modo de mesclagem (globalCompositeOperation): normal, multiply, screen... */
   blend?: string;
+  /** ajustes (brilho, contraste, matiz, desfoque...) */
+  fx?: WhiteboardLayerFx;
+  /** máscara de recorte: só aparece onde a camada de baixo tem pixels */
+  clip?: boolean;
+  /** bloquear transparência: pinta só onde a camada já tem pixels */
+  alphaLock?: boolean;
+  /** quadro de animação da prancheta com este id */
+  anim?: string;
 }
 
 export interface WhiteboardPoint {
@@ -238,7 +287,7 @@ export interface WhiteboardPoint {
 
 export interface WhiteboardElement {
   id: string;
-  kind: 'stroke' | 'line' | 'arrow' | 'rect' | 'ellipse' | 'text' | 'image';
+  kind: 'stroke' | 'line' | 'arrow' | 'rect' | 'ellipse' | 'text' | 'image' | 'gradient' | 'artboard' | 'path';
   layerId: string;
   color: string;
   size: number;
@@ -264,13 +313,40 @@ export interface WhiteboardElement {
   rot?: number;
   /** retângulo/elipse preenchidos */
   filled?: boolean;
+  /** modo do pincel dentro da camada (multiply, screen, source-atop...) */
+  comp?: string;
+  /** degradê: segunda cor, tipo, opacidade do fim e área preenchida (rx, ry, rw, rh) */
+  color2?: string;
+  gradType?: WhiteboardGradientType;
+  gradAlpha2?: number;
+  rx?: number;
+  ry?: number;
+  rw?: number;
+  rh?: number;
+  /** prancheta animada: quadros por segundo */
+  fps?: number;
+  /** pincel importado: id da ponta na biblioteca da sala, espaçamento (× tamanho) e variação */
+  tipId?: string;
+  spacing?: number;
+  jitter?: number;
+  /** curva vetorial fechada */
+  closed?: boolean;
   authorId: string;
   authorName: string;
   createdAt: number;
 }
 
+export interface WhiteboardBrushTip {
+  id: string;
+  name: string;
+  /** PNG: máscara branca com transparência */
+  tip: string;
+  spacing: number;
+}
+
 export interface WhiteboardState {
   channelId: string;
+  brushes?: WhiteboardBrushTip[];
   background: 'dark' | 'light' | 'grid' | 'transparent';
   layers: WhiteboardLayer[];
   elements: WhiteboardElement[];
@@ -956,6 +1032,8 @@ export interface ElectronAPI {
   lanPeersPinGroupMessage?: (payload: { groupId: string; messageId: string; pinned: boolean }) => Promise<{ ok: boolean }>;
   lanPeersGroupCallInvite?: (payload: { groupId: string }) => Promise<{ ok: boolean; dmRoomId: string; callServerUrl: string }>;
   lanPeersGetTrello?: (scopeKey: string) => Promise<TrelloBoard[]>;
+  /** ingresso assinado para entrar numa call LAN (DM/grupo) hospedada em `url` */
+  lanCallTicket?: (url: string, room: string) => Promise<string>;
   lanPeersSyncTrello?: (payload: { scopeKey: string; boards: TrelloBoard[]; peerUrls?: string[] }) => Promise<{ ok: boolean; boards: TrelloBoard[] }>;
   onLanGroupUpdated?: (cb: (data: { group: PrivateGroup }) => void) => () => void;
   onLanGroupMessage?: (cb: (data: { groupId: string; message: ChatMessage }) => void) => () => void;

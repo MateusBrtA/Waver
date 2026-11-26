@@ -35,6 +35,7 @@ import {
 } from './mediaResolver.js';
 import { clearMediaCache, enforceStorageLimit, getStorageStats } from './storageManager.js';
 import { createUpdateHelper } from './updater.js';
+import wbRoom from './wbRoom.cjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -230,9 +231,19 @@ export function createPulseCordServer(options = {}) {
 
   app.use(
     '/uploads',
-    (_req, res, next) => {
+    (req, res, next) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      // arquivo enviado por membro nunca roda como página/script (mesmo aberto direto no navegador)
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'; sandbox"
+      );
+      if (/\.(html?|xhtml|shtml|svg|svgz|xml|xsl|js|mjs|cjs|wasm)$/i.test(req.path)) {
+        res.setHeader('Content-Disposition', 'attachment');
+        res.type('application/octet-stream');
+      }
       next();
     },
     express.static(UPLOADS_DIR, {
@@ -298,6 +309,90 @@ export function createPulseCordServer(options = {}) {
     return perms;
   }
 
+  // ---- Hierarquia de cargos: ninguém mexe em quem está no mesmo nível ou acima, nem dá o que não tem ----
+  function topRolePosition(dbObj, user) {
+    if (!user) return -1;
+    if (user.role === 'host') return Infinity;
+    let top = 0;
+    for (const rid of Array.isArray(user.roleIds) ? user.roleIds : []) {
+      const r = dbObj.roles.find((x) => x.id === rid);
+      if (r && !r.isEveryone && r.id !== 'role-everyone') top = Math.max(top, Number(r.position) || 0);
+    }
+    return top;
+  }
+  function canManageRole(dbObj, actor, role) {
+    if (!role || role.id === 'role-host') return false;
+    if (actor.role === 'host') return true;
+    if (role.isEveryone || role.id === 'role-everyone') return true;
+    return (Number(role.position) || 0) < topRolePosition(dbObj, actor);
+  }
+  function canManageMember(dbObj, actor, target) {
+    if (!actor || !target || target.role === 'host') return false;
+    if (actor.role === 'host') return true;
+    if (actor.id === target.id) return false;
+    return topRolePosition(dbObj, target) < topRolePosition(dbObj, actor);
+  }
+  /** Lista de permissões que o autor quer ligar/desligar e que ele mesmo não tem (vazio = ok). */
+  function permsBeyondActor(dbObj, actor, changedKeys) {
+    if (actor.role === 'host') return [];
+    const mine = computeServerPermissions(dbObj, actor);
+    return changedKeys.filter((k) => !mine[k]);
+  }
+  // Permissões que fazem sentido por canal/categoria (nada de administrador, banir, cargos etc.)
+  const OVERWRITE_KEYS = new Set([
+    'viewChannels', 'viewPrivateChannels', 'manageChannels', 'createInvite', 'sendMessages', 'attachFiles', 'embedLinks',
+    'pinMessages', 'manageMessages', 'connectVoice', 'speakVoice', 'streamVideo', 'useSoundboard', 'useMediaQueue',
+    'useWhiteboard', 'useTrello', 'muteMembers', 'deafenMembers', 'moveMembers',
+  ]);
+  function sanitizeOverwrites(dbObj, list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const o of list.slice(0, 200)) {
+      if (!o || typeof o !== 'object') continue;
+      const id = String(o.id || '').slice(0, 80);
+      if (!id || seen.has(id)) continue;
+      const isRole = dbObj.roles.some((r) => r.id === id);
+      const isMember = !isRole && dbObj.users.some((u) => u.id === id);
+      if (!isRole && !isMember) continue;
+      if (id === 'role-host') continue;
+      seen.add(id);
+      const keys = (arr) => Array.from(new Set((Array.isArray(arr) ? arr : []).filter((k) => OVERWRITE_KEYS.has(k))));
+      const allow = keys(o.allow);
+      const deny = keys(o.deny).filter((k) => !allow.includes(k));
+      out.push({ id, targetType: isRole ? 'role' : 'member', allow, deny });
+    }
+    return out;
+  }
+  /**
+   * Confere uma troca de overwrites: devolve { list } já limpa, ou { error }.
+   * Mexer em permissões de canal exige "Gerenciar cargos"; e só se mexe nas permissões que você mesmo tem.
+   */
+  function checkOverwriteChange(dbObj, actor, prevList, nextRaw) {
+    const next = sanitizeOverwrites(dbObj, nextRaw);
+    const flat = (list) => {
+      const m = new Set();
+      for (const o of list || []) {
+        for (const k of o.allow || []) m.add(`${o.id}|${k}|a`);
+        for (const k of o.deny || []) m.add(`${o.id}|${k}|d`);
+      }
+      return m;
+    };
+    const a = flat(prevList);
+    const b = flat(next);
+    const changed = new Set();
+    for (const x of a) if (!b.has(x)) changed.add(x.split('|')[1]);
+    for (const x of b) if (!a.has(x)) changed.add(x.split('|')[1]);
+    if (changed.size === 0) return { list: next };
+    const perms = computeServerPermissions(dbObj, actor);
+    if (actor.role !== 'host' && !perms.manageRoles && !perms.administrator) {
+      return { error: 'Mudar permissões de canal exige "Gerenciar cargos".' };
+    }
+    const beyond = permsBeyondActor(dbObj, actor, Array.from(changed));
+    if (beyond.length) return { error: `Você não pode mexer em permissões que não tem: ${beyond.join(', ')}.` };
+    return { list: next };
+  }
+
   function applyOverwritesList(perms, overwrites, user) {
     if (!Array.isArray(overwrites) || overwrites.length === 0) return;
     const roleIds = Array.isArray(user.roleIds) ? user.roleIds : [];
@@ -326,6 +421,17 @@ export function createPulseCordServer(options = {}) {
     }
   }
 
+  /** Conta com algum poder de administração/moderação (não pode ser assumida sem confirmação). */
+  function isPrivilegedUser(dbObj, user) {
+    if (!user) return false;
+    if (user.role === 'host') return true;
+    const p = computeServerPermissions(dbObj, user);
+    return [
+      'administrator', 'manageServer', 'manageRoles', 'manageChannels', 'manageExpressions', 'viewAuditLog',
+      'kickMembers', 'banMembers', 'manageMessages', 'muteMembers', 'deafenMembers', 'moveMembers',
+    ].some((k) => p[k]);
+  }
+
   function computeChannelPermissions(dbObj, user, channel) {
     const perms = computeServerPermissions(dbObj, user);
     if (!user || perms.administrator || user.role === 'host' || !channel) return perms;
@@ -342,8 +448,8 @@ export function createPulseCordServer(options = {}) {
     if (channel.overwrites) applyOverwritesList(perms, channel.overwrites, user);
 
     if (!perms.viewChannels) {
-      perms.sendMessages = false;
-      perms.connectVoice = false;
+      // sem ver o canal, nada mais vale nele (fixar, reagir, apagar, voz...)
+      for (const k of Object.keys(perms)) perms[k] = false;
     }
     return perms;
   }
@@ -416,7 +522,6 @@ export function createPulseCordServer(options = {}) {
   function getTokenFromReq(req) {
     const auth = req.headers.authorization || '';
     if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
-    if (typeof req.query.token === 'string') return req.query.token;
     return null;
   }
 
@@ -490,6 +595,11 @@ export function createPulseCordServer(options = {}) {
   });
   let sfuInitPromise = null;
 
+  // Para todos só vai o estado do arquivo (quem já tem a mensagem atualiza); nome e link de download não vazam
+  function transferStatus(t) {
+    return { id: t.id, burned: Boolean(t.burned), expiredByCache: Boolean(t.expiredByCache), downloadedCount: t.downloadedCount || 0 };
+  }
+
   function markFilePrunedInDb({ bucket, filename, relUrl }) {
     const db = getDb();
     let changed = false;
@@ -499,7 +609,7 @@ export function createPulseCordServer(options = {}) {
         if (t.filename === filename) {
           t.expiredByCache = true;
           changed = true;
-          io.emit('transfer:updated', t);
+          io.emit('transfer:updated', transferStatus(t));
         }
       }
     }
@@ -708,13 +818,7 @@ export function createPulseCordServer(options = {}) {
 
   function getOrCreateWhiteboardState(channelId) {
     if (!whiteboardStates.has(channelId)) {
-      whiteboardStates.set(channelId, {
-        channelId,
-        background: 'dark',
-        layers: [{ id: 'layer-1', name: 'Camada 1', visible: true, locked: false, opacity: 1 }],
-        elements: [],
-        seq: 0,
-      });
+      whiteboardStates.set(channelId, wbRoom.newState(channelId));
     }
     return whiteboardStates.get(channelId);
   }
@@ -792,6 +896,27 @@ function sanitizeActivity(a) {
       usersBroadcastTimer = null;
       io.emit('users:update', getMembersPayload());
     }, 50);
+  }
+
+  // convites/pedidos de controle remoto ainda sem resposta: `${de}|${para}` -> { kind, at }
+  const rcPending = new Map();
+  const RC_PENDING_TTL = 3 * 60 * 1000;
+  function rcPendingSet(from, to, kind) {
+    const now = Date.now();
+    if (rcPending.size > 500) {
+      for (const [k, v] of rcPending) if (now - v.at > RC_PENDING_TTL) rcPending.delete(k);
+    }
+    rcPending.set(`${from}|${to}`, { kind, at: now });
+  }
+  function rcPendingTake(from, to) {
+    const key = `${from}|${to}`;
+    const p = rcPending.get(key);
+    rcPending.delete(key);
+    if (!p || Date.now() - p.at > RC_PENDING_TTL) return null;
+    return p;
+  }
+  function rcPendingForget(socketId) {
+    for (const k of rcPending.keys()) if (k.startsWith(`${socketId}|`) || k.endsWith(`|${socketId}`)) rcPending.delete(k);
   }
 
   function broadcastVoiceRooms() {
@@ -1132,24 +1257,45 @@ function sanitizeActivity(a) {
     res.setHeader('Content-Disposition', `attachment; filename="${inst.name}"`);
     res.setHeader('X-PulseCord-Installer-Name', inst.name);
     if (inst.sha256) res.setHeader('X-PulseCord-Sha256', inst.sha256);
+    if (inst.signature) res.setHeader('X-PulseCord-Signature', Buffer.from(JSON.stringify(inst.signature)).toString('base64'));
     res.setHeader('Cache-Control', 'no-store');
     const stream = fs.createReadStream(inst.path, { highWaterMark: 1024 * 1024 });
     req.on('close', () => stream.destroy());
     stream.pipe(res);
   });
 
-  app.post('/api/update/publish-installer', requireAuth, uploadUpdateExe.single('installer'), (req, res) => {
+  const publishUpload = uploadUpdateExe.fields([
+    { name: 'installer', maxCount: 1 },
+    { name: 'signature', maxCount: 1 },
+  ]);
+  app.post('/api/update/publish-installer', requireAuth, publishUpload, (req, res) => {
+    const exeFile = req.files?.installer?.[0];
+    const sigFile = req.files?.signature?.[0];
+    const cleanup = () => {
+      for (const f of [exeFile, sigFile]) if (f?.path) try { fs.unlinkSync(f.path); } catch {}
+    };
     if (req.user.role !== 'host') {
-      if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
+      cleanup();
       return res.status(403).json({ error: 'Apenas o Host pode publicar atualizações do app.' });
     }
-    if (!req.file) return res.status(400).json({ error: 'Envie o arquivo PulseCord-Setup.exe ou PulseCord-Portable.exe.' });
+    if (!exeFile) {
+      cleanup();
+      return res.status(400).json({ error: 'Envie o arquivo PulseCord-Setup.exe ou PulseCord-Portable.exe.' });
+    }
+    let signatureJson = null;
+    if (sigFile) {
+      try {
+        signatureJson = JSON.parse(fs.readFileSync(sigFile.path, 'utf8'));
+      } catch {}
+      try { fs.unlinkSync(sigFile.path); } catch {}
+    }
     try {
       const manifest = updateHelper.savePublishedInstaller(
-        req.file.path,
-        req.file.originalname,
+        exeFile.path,
+        exeFile.originalname,
         String(req.body?.version || appVersion).trim().slice(0, 24),
-        String(req.body?.notes || '').trim().slice(0, 200)
+        String(req.body?.notes || '').trim().slice(0, 200),
+        signatureJson
       );
       io.emit('update:available', manifest);
       res.json({ ok: true, manifest });
@@ -1187,8 +1333,16 @@ function sanitizeActivity(a) {
         : `user-${crypto.createHash('md5').update(rawUsername).digest('hex').slice(0, 6)}`;
 
     const remoteAddr = req.socket?.remoteAddress || '';
+    // "Local" só vale para o app do próprio Host falando direto com o servidor. Pelo túnel (cloudflared) ou por um
+    // proxy (Caddy/nginx) TODO acesso chega de 127.0.0.1 — antes isso deixava qualquer um entrar como dono, sem senha.
+    // Os proxies sempre acrescentam um destes cabeçalhos, e quem está do lado de fora não consegue removê-los.
+    const viaProxy = ['x-forwarded-for', 'x-real-ip', 'forwarded', 'cf-connecting-ip', 'cf-ray', 'true-client-ip', 'x-forwarded-host'].some(
+      (h) => req.headers[h] !== undefined
+    );
     const isLoopbackReq =
-      remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+      !HEADLESS &&
+      !viaProxy &&
+      (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1');
     if (!isLoopbackReq && loginRateLimited(req.ip || remoteAddr)) {
       return res.status(429).json({ error: 'Muitas tentativas de entrar. Espere um minuto e tente de novo.' });
     }
@@ -1220,12 +1374,40 @@ function sanitizeActivity(a) {
       }
     }
 
+    // Chave de login: cada conta sem senha ganha uma chave aleatória que fica guardada no app de quem a criou.
+    // Sem ela, ninguém entra numa conta que já existe só digitando o mesmo nick.
+    const loginKeys = (Array.isArray(req.body?.loginKeys) ? req.body.loginKeys : [])
+      .filter((k) => typeof k === 'string' && k.length >= 32 && k.length <= 128)
+      .slice(0, 25);
+    const wantsLoginKey = req.body?.wantsLoginKey === true;
+    const loginKeyOk = (u) => {
+      if (!u.loginKeyHash) return false;
+      const want = Buffer.from(String(u.loginKeyHash), 'hex');
+      return loginKeys.some((k) => {
+        const got = crypto.createHash('sha256').update(k).digest();
+        return got.length === want.length && crypto.timingSafeEqual(got, want);
+      });
+    };
     let user = db.users.find((u) => u.username === normalized);
     if (user) {
       if (user.passwordHash && !isHostBypass) {
-        if (!password) return res.status(401).json({ error: 'Esta conta exige senha pessoal.' });
+        if (!password) return res.status(401).json({ error: 'Esta conta exige senha pessoal.', code: 'PERSONAL_PASSWORD_REQUIRED' });
         if (!bcrypt.compareSync(password, user.passwordHash)) {
-          return res.status(401).json({ error: 'Senha incorreta para este usuário.' });
+          return res.status(401).json({ error: 'Senha incorreta para este usuário.', code: 'PERSONAL_PASSWORD_REQUIRED' });
+        }
+      } else if (!user.passwordHash && !isHostBypass) {
+        const nickTaken = (msg) => res.status(409).json({ error: msg, code: 'NICK_TAKEN' });
+        if (user.loginKeyHash) {
+          if (!loginKeyOk(user)) {
+            return nickTaken(
+              'Esse nick já pertence a outra pessoa neste servidor. Se a conta é sua, entre pelo mesmo PC/app em que você a criou, ou peça a um administrador para liberar o nick.'
+            );
+          }
+        } else if ((user.role === 'host' || isPrivilegedUser(db, user)) && !(user.loginClaimable && wantsLoginKey)) {
+          // conta antiga (antes da chave) com cargo de administração: não pode ser assumida por quem digitar o nick
+          return nickTaken(
+            'Essa conta tem cargo de administração e ainda não foi confirmada neste PC. Entre pelo app que já estava conectado (ele confirma sozinho), use o código do dono, ou peça ao dono para liberar o nick.'
+          );
         }
       }
       if (displayNameInput && displayNameInput.length >= 2 && displayNameInput.length <= 28) {
@@ -1276,6 +1458,14 @@ function sanitizeActivity(a) {
       });
     }
 
+    // conta sem senha e ainda sem chave: emite a chave agora (só para apps que sabem guardá-la)
+    let issuedLoginKey = null;
+    if (wantsLoginKey && !user.passwordHash && !user.loginKeyHash) {
+      issuedLoginKey = crypto.randomBytes(32).toString('base64url');
+      user.loginKeyHash = crypto.createHash('sha256').update(issuedLoginKey).digest('hex');
+      user.loginClaimable = false;
+    }
+
     const token = crypto.randomBytes(24).toString('hex');
     db.sessions[token] = user.id;
     saveDb();
@@ -1286,11 +1476,49 @@ function sanitizeActivity(a) {
       token,
       user: sanitizeUser(user),
       server: getPublicServerInfo(),
+      ...(issuedLoginKey ? { loginKey: issuedLoginKey } : {}),
     });
   });
 
   app.get('/api/auth/me', requireAuth, (req, res) => {
-    res.json({ user: sanitizeUser(req.user), server: getPublicServerInfo() });
+    // quem já está conectado (token válido) confirma a própria conta antiga e recebe a chave
+    let issuedLoginKey = null;
+    if (req.query.wantLoginKey === '1' && !req.user.passwordHash && !req.user.loginKeyHash) {
+      issuedLoginKey = crypto.randomBytes(32).toString('base64url');
+      req.user.loginKeyHash = crypto.createHash('sha256').update(issuedLoginKey).digest('hex');
+      saveDb();
+    }
+    res.json({
+      user: sanitizeUser(req.user),
+      server: getPublicServerInfo(),
+      ...(issuedLoginKey ? { loginKey: issuedLoginKey } : {}),
+    });
+  });
+
+  // Liberar nick: apaga a chave/senha da conta e derruba as sessões dela (o próximo a entrar com o nick fica com ele)
+  app.post('/api/users/:userId/reset-login', requireAuth, (req, res) => {
+    const db = getDb();
+    const perms = computeServerPermissions(db, req.user);
+    if (req.user.role !== 'host' && !perms.administrator && !perms.manageServer) {
+      return res.status(403).json({ error: 'Só o Host ou um administrador pode liberar nicks.' });
+    }
+    const target = db.users.find((u) => u.id === req.params.userId);
+    if (!target) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    if (!canManageMember(db, req.user, target)) return res.status(403).json({ error: 'Esse membro está no seu nível ou acima.' });
+    target.loginKeyHash = null;
+    target.passwordHash = null;
+    target.loginClaimable = true; // o próximo login (app novo) fica com a conta, mesmo ela tendo cargo
+    for (const [tok, uid] of Object.entries(db.sessions)) if (uid === target.id) delete db.sessions[tok];
+    for (const sid of Array.from(onlineUsers.get(target.id) || [])) io.sockets.sockets.get(sid)?.disconnect(true);
+    appendAuditLog({
+      type: 'member_update',
+      actor: req.user,
+      targetId: target.id,
+      targetName: target.displayName,
+      details: `Liberou o nick @${target.username} (chave de login apagada)`,
+    });
+    saveDb();
+    res.json({ ok: true });
   });
 
   app.post('/api/auth/logout', requireAuth, (req, res) => {
@@ -1447,14 +1675,24 @@ function sanitizeActivity(a) {
     const name = String(req.body?.name || '').trim().slice(0, 28);
     const color = /^#[0-9a-f]{6}$/i.test(req.body?.color || '') ? req.body.color : '#5865f2';
     if (name.length < 1) return res.status(400).json({ error: 'Informe um nome para o cargo.' });
+    const wantedPerms = normalizeRolePermissions(req.body?.permissions || {}, DEFAULT_EVERYONE_PERMISSIONS);
+    const beyondNew = permsBeyondActor(db, req.user, Object.keys(wantedPerms).filter((k) => wantedPerms[k]));
+    if (beyondNew.length) {
+      return res.status(403).json({ error: `Você não pode criar um cargo com permissões que não tem: ${beyondNew.join(', ')}.` });
+    }
+    // o cargo novo fica abaixo do seu cargo mais alto (e sempre abaixo do Host)
+    const myTop = topRolePosition(db, req.user);
+    let newPos = typeof req.body?.position === 'number' && Number.isFinite(req.body.position) ? req.body.position : db.roles.length + 1;
+    newPos = Math.max(1, Math.min(99, myTop === Infinity ? newPos : Math.min(newPos, myTop - 1)));
+    if (myTop !== Infinity && myTop <= 1) return res.status(403).json({ error: 'Seu cargo não está alto o bastante para criar cargos.' });
     const role = {
       id: `role-${uuidv4().slice(0, 8)}`,
       name,
       color,
       isSystem: false,
       hoist: Boolean(req.body?.hoist),
-      position: typeof req.body?.position === 'number' ? req.body.position : db.roles.length + 1,
-      permissions: normalizeRolePermissions(req.body?.permissions || {}, DEFAULT_EVERYONE_PERMISSIONS),
+      position: newPos,
+      permissions: wantedPerms,
     };
     db.roles.push(role);
     appendAuditLog({
@@ -1477,7 +1715,25 @@ function sanitizeActivity(a) {
     }
     const role = db.roles.find((r) => r.id === req.params.id);
     if (!role) return res.status(404).json({ error: 'Cargo não encontrado.' });
+    if (!canManageRole(db, req.user, role)) {
+      return res.status(403).json({ error: 'Esse cargo está no seu nível ou acima: você não pode editá-lo.' });
+    }
     const b = req.body || {};
+    if (b.permissions && typeof b.permissions === 'object' && role.id !== 'role-host') {
+      const cur = role.permissions || {};
+      const changedKeys = Object.keys(b.permissions).filter(
+        (k) => typeof b.permissions[k] === 'boolean' && Boolean(cur[k]) !== b.permissions[k]
+      );
+      const beyond = permsBeyondActor(db, req.user, changedKeys);
+      if (beyond.length) return res.status(403).json({ error: `Você não pode mexer em permissões que não tem: ${beyond.join(', ')}.` });
+    }
+    if (typeof b.position === 'number' && !role.isSystem) {
+      const myTop = topRolePosition(db, req.user);
+      if (!Number.isFinite(b.position) || (myTop !== Infinity && b.position >= myTop)) {
+        return res.status(403).json({ error: 'Você não pode colocar um cargo no seu nível ou acima.' });
+      }
+      b.position = Math.max(1, Math.min(99, b.position));
+    }
     if (!role.isSystem && typeof b.name === 'string' && b.name.trim().length >= 1) {
       role.name = b.name.trim().slice(0, 28);
     }
@@ -1507,12 +1763,29 @@ function sanitizeActivity(a) {
     if (!computeServerPermissions(db, req.user).manageRoles) {
       return res.status(403).json({ error: 'Sem permissão para reordenar cargos.' });
     }
-    const order = Array.isArray(req.body?.roleIds) ? req.body.roleIds : [];
+    const order = (Array.isArray(req.body?.roleIds) ? req.body.roleIds : []).filter((x) => typeof x === 'string').slice(0, 250);
     const total = order.length;
+    const proposed = new Map();
     order.forEach((rid, i) => {
       const r = db.roles.find((x) => x.id === rid);
-      if (r && !r.isSystem) r.position = total - i + 1;
+      if (r && !r.isSystem && !proposed.has(r.id)) proposed.set(r.id, Math.min(99, total - i + 1));
     });
+    const myTop = topRolePosition(db, req.user);
+    if (myTop !== Infinity) {
+      // quem não é o Host só reordena o que está abaixo dele: os cargos do seu nível para cima ficam onde estão
+      const movable = db.roles.filter((r) => !r.isSystem && !r.isEveryone);
+      const newPos = (r) => (proposed.has(r.id) ? proposed.get(r.id) : Number(r.position) || 0);
+      const before = [...movable].sort((x, y) => (Number(y.position) || 0) - (Number(x.position) || 0)).map((r) => r.id);
+      const after = [...movable].sort((x, y) => newPos(y) - newPos(x)).map((r) => r.id);
+      const above = before.filter((id) => (Number(db.roles.find((r) => r.id === id)?.position) || 0) >= myTop);
+      if (after.slice(0, above.length).join('|') !== above.join('|')) {
+        return res.status(403).json({ error: 'Você só pode reordenar cargos abaixo do seu.' });
+      }
+    }
+    for (const [rid, pos] of proposed) {
+      const r = db.roles.find((x) => x.id === rid);
+      if (r) r.position = pos;
+    }
     saveDb();
     io.emit('roles:updated', db.roles);
     res.json({ roles: db.roles });
@@ -1525,6 +1798,9 @@ function sanitizeActivity(a) {
     }
     const role = db.roles.find((r) => r.id === req.params.id);
     if (!role || role.isSystem) return res.status(400).json({ error: 'Este cargo não pode ser removido.' });
+    if (!canManageRole(db, req.user, role)) {
+      return res.status(403).json({ error: 'Esse cargo está no seu nível ou acima: você não pode excluí-lo.' });
+    }
     db.roles = db.roles.filter((r) => r.id !== role.id);
     for (const u of db.users) {
       if (Array.isArray(u.roleIds)) u.roleIds = u.roleIds.filter((rid) => rid !== role.id);
@@ -1558,6 +1834,17 @@ function sanitizeActivity(a) {
     if (roleId === 'role-host' || roleId === 'role-everyone') {
       return res.status(400).json({ error: 'Este cargo de sistema não pode ser alterado.' });
     }
+    if (!canManageRole(db, req.user, roleObj)) {
+      return res.status(403).json({ error: 'Esse cargo está no seu nível ou acima: você não pode dá-lo nem tirá-lo.' });
+    }
+    if (target.id !== req.user.id && !canManageMember(db, req.user, target)) {
+      return res.status(403).json({ error: 'Esse membro está no seu nível ou acima.' });
+    }
+    if (action === 'add') {
+      const rp = roleObj.permissions || {};
+      const beyond = permsBeyondActor(db, req.user, Object.keys(rp).filter((k) => rp[k]));
+      if (beyond.length) return res.status(403).json({ error: `Esse cargo tem permissões que você não tem: ${beyond.join(', ')}.` });
+    }
     target.roleIds = Array.isArray(target.roleIds) ? target.roleIds : [];
     if (action === 'add' && !target.roleIds.includes(roleId)) target.roleIds.push(roleId);
     if (action === 'remove') target.roleIds = target.roleIds.filter((id) => id !== roleId);
@@ -1589,6 +1876,9 @@ function sanitizeActivity(a) {
     }
     const target = db.users.find((u) => u.id === targetUserId);
     if (!target) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    if (target.id !== req.user.id && !canManageMember(db, req.user, target)) {
+      return res.status(403).json({ error: 'Esse membro está no seu nível ou acima.' });
+    }
 
     if (typeof serverMuted === 'boolean') target.serverMuted = serverMuted;
     if (typeof serverDeafened === 'boolean') target.serverDeafened = serverDeafened;
@@ -1648,6 +1938,7 @@ function sanitizeActivity(a) {
     const target = db.users.find((u) => u.id === targetUserId);
     if (!target) return res.status(404).json({ error: 'Usuário não encontrado.' });
     if (target.role === 'host') return res.status(400).json({ error: 'Não é possível expulsar o Host do servidor.' });
+    if (!canManageMember(db, req.user, target)) return res.status(403).json({ error: 'Esse membro está no seu nível ou acima.' });
 
     for (const [tok, uid] of Object.entries(db.sessions)) {
       if (uid === target.id) delete db.sessions[tok];
@@ -1692,6 +1983,7 @@ function sanitizeActivity(a) {
     const target = db.users.find((u) => u.id === targetUserId);
     if (!target) return res.status(404).json({ error: 'Usuário não encontrado.' });
     if (target.role === 'host') return res.status(400).json({ error: 'Não é possível banir o Host do servidor.' });
+    if (!canManageMember(db, req.user, target)) return res.status(403).json({ error: 'Esse membro está no seu nível ou acima.' });
 
     const cleanReason = String(reason || '').trim().slice(0, 120);
     if (!db.bans.some((b) => b.userId === target.id)) {
@@ -1888,8 +2180,13 @@ function sanitizeActivity(a) {
       name,
       position: db.categories.length,
       isPrivate: Boolean(req.body?.isPrivate),
-      overwrites: Array.isArray(req.body?.overwrites) ? req.body.overwrites : [],
+      overwrites: [],
     };
+    if (Array.isArray(req.body?.overwrites)) {
+      const chk = checkOverwriteChange(db, req.user, [], req.body.overwrites);
+      if (chk.error) return res.status(403).json({ error: chk.error });
+      cat.overwrites = chk.list;
+    }
     db.categories.push(cat);
     saveDb();
     emitCategoriesUpdated();
@@ -1903,10 +2200,16 @@ function sanitizeActivity(a) {
     }
     const cat = (db.categories || []).find((c) => c.id === req.params.id);
     if (!cat) return res.status(404).json({ error: 'Categoria não encontrada.' });
+    let nextCatOverwrites = null;
+    if (Array.isArray(req.body?.overwrites)) {
+      const chk = checkOverwriteChange(db, req.user, cat.overwrites || [], req.body.overwrites);
+      if (chk.error) return res.status(403).json({ error: chk.error });
+      nextCatOverwrites = chk.list;
+    }
     if (typeof req.body?.name === 'string' && req.body.name.trim()) cat.name = req.body.name.trim().slice(0, 32);
-    if (typeof req.body?.position === 'number') cat.position = req.body.position;
+    if (typeof req.body?.position === 'number' && Number.isFinite(req.body.position)) cat.position = req.body.position;
     if (typeof req.body?.isPrivate === 'boolean') cat.isPrivate = req.body.isPrivate;
-    if (Array.isArray(req.body?.overwrites)) cat.overwrites = req.body.overwrites;
+    if (nextCatOverwrites) cat.overwrites = nextCatOverwrites;
     saveDb();
     emitCategoriesUpdated();
     emitChannelsUpdated();
@@ -1996,11 +2299,16 @@ function sanitizeActivity(a) {
       bitrateKbps: Math.max(32, Math.min(384, Number(req.body?.bitrateKbps || 128))),
       isStage: type === 'voice' && Boolean(req.body?.isStage),
       userLimit: Math.max(0, Math.min(99, Number(req.body?.userLimit || 0))),
-      overwrites: Array.isArray(req.body?.overwrites) ? req.body.overwrites : [],
+      overwrites: [],
       createdAt: Date.now(),
       createdBy: req.user.displayName,
     };
 
+    if (Array.isArray(req.body?.overwrites) && req.body.overwrites.length) {
+      const chk = checkOverwriteChange(db, req.user, [], req.body.overwrites);
+      if (chk.error) return res.status(403).json({ error: chk.error });
+      channel.overwrites = chk.list;
+    }
     db.channels.push(channel);
     if (type === 'text') db.messages[channel.id] = [];
     appendAuditLog({
@@ -2048,6 +2356,17 @@ function sanitizeActivity(a) {
       return res.status(403).json({ error: 'Sem permissão para editar este canal.' });
     }
     const b = req.body || {};
+    let nextChOverwrites = null;
+    if (Array.isArray(b.overwrites)) {
+      const chk = checkOverwriteChange(db, req.user, channel.overwrites || [], b.overwrites);
+      if (chk.error) return res.status(403).json({ error: chk.error });
+      nextChOverwrites = chk.list;
+    }
+    // trocar de categoria: precisa poder gerenciar canais na categoria de destino também
+    if (typeof b.categoryId === 'string' && b.categoryId !== channel.categoryId) {
+      const destCat = (db.categories || []).find((c) => c.id === b.categoryId);
+      if (!destCat) return res.status(400).json({ error: 'Categoria não encontrada.' });
+    }
     if (typeof b.name === 'string' && b.name.trim()) {
       channel.name =
         channel.type === 'text'
@@ -2056,16 +2375,19 @@ function sanitizeActivity(a) {
     }
     if (typeof b.topic === 'string') channel.topic = b.topic.slice(0, 1024);
     if (b.categoryId === null || typeof b.categoryId === 'string') channel.categoryId = b.categoryId;
-    if (typeof b.position === 'number') channel.position = b.position;
+    if (typeof b.position === 'number' && Number.isFinite(b.position)) channel.position = b.position;
     if (typeof b.slowModeSec === 'number') channel.slowModeSec = Math.max(0, Math.min(21600, b.slowModeSec));
     if (['default', 'spoiler', 'nsfw'].includes(b.visibility)) channel.visibility = b.visibility;
     if (typeof b.isPrivate === 'boolean') channel.isPrivate = b.isPrivate;
     if (typeof b.bitrateKbps === 'number') channel.bitrateKbps = Math.max(32, Math.min(384, b.bitrateKbps));
     if (typeof b.isStage === 'boolean' && channel.type === 'voice') channel.isStage = b.isStage;
     if (typeof b.userLimit === 'number') channel.userLimit = Math.max(0, Math.min(99, b.userLimit));
-    if (Array.isArray(b.overwrites)) channel.overwrites = b.overwrites;
+    if (nextChOverwrites) channel.overwrites = nextChOverwrites;
     if (b.syncWithCategory && channel.categoryId) {
       const cat = (db.categories || []).find((c) => c.id === channel.categoryId);
+      if (cat && checkOverwriteChange(db, req.user, channel.overwrites || [], cat.overwrites || []).error) {
+        return res.status(403).json({ error: 'Sincronizar com a categoria muda permissões que você não pode mexer.' });
+      }
       if (cat) {
         channel.isPrivate = Boolean(cat.isPrivate);
         channel.overwrites = JSON.parse(JSON.stringify(cat.overwrites || []));
@@ -2129,7 +2451,20 @@ function sanitizeActivity(a) {
     }
 
     db.channels = db.channels.filter((c) => c.id !== channel.id);
+    // threads das mensagens do canal também saem (antes ficavam órfãs no banco para sempre)
+    for (const m of db.messages[channel.id] || []) {
+      if (db.threadMessages?.[m.id]) delete db.threadMessages[m.id];
+    }
     delete db.messages[channel.id];
+    // eventos marcados neste canal de voz ficam como "outro lugar"
+    let eventsTouched = false;
+    for (const ev of db.events || []) {
+      if (ev.channelId === channel.id) {
+        ev.channelId = null;
+        ev.location = ev.location || `#${channel.name} (apagado)`;
+        eventsTouched = true;
+      }
+    }
     if (channel.type === 'voice') {
       voiceRooms.delete(channel.id);
       sfu.closeRoom(channel.id);
@@ -2148,6 +2483,7 @@ function sanitizeActivity(a) {
     });
     saveDb();
     emitChannelsUpdated();
+    if (eventsTouched) broadcastEvents();
     res.json({ ok: true });
   });
 
@@ -2713,7 +3049,7 @@ function sanitizeActivity(a) {
     if (!fs.existsSync(filePath)) {
       transfer.expiredByCache = true;
       saveDb();
-      io.emit('transfer:updated', transfer);
+      io.emit('transfer:updated', transferStatus(transfer));
       return res.status(410).json({ error: 'Arquivo não está mais disponível no disco.' });
     }
 
@@ -2770,7 +3106,7 @@ function sanitizeActivity(a) {
         }
       }
       saveDb();
-      io.emit('transfer:updated', transfer);
+      io.emit('transfer:updated', transferStatus(transfer));
     });
 
     res.on('close', () => {
@@ -2806,6 +3142,7 @@ function sanitizeActivity(a) {
       url: `/uploads/sounds/${req.file.filename}`,
       volume: 1,
       createdBy: req.user.displayName,
+      uploaderId: req.user.id,
       createdAt: Date.now(),
       isStarter: false,
     };
@@ -2817,6 +3154,15 @@ function sanitizeActivity(a) {
     res.status(201).json({ sound });
   });
 
+  // sons, músicas e GIFs salvos: apaga quem enviou ou quem gerencia expressões (antes qualquer membro apagava tudo)
+  const canManageUpload = (user, item) => {
+    if (!user || !item) return false;
+    const perms = computeServerPermissions(getDb(), user);
+    if (user.role === 'host' || perms.administrator || perms.manageExpressions) return true;
+    if (item.uploaderId) return item.uploaderId === user.id;
+    return Boolean((item.createdBy || item.addedBy) && (item.createdBy || item.addedBy) === user.displayName);
+  };
+
   app.delete('/api/sounds/:id', requireAuth, (req, res) => {
     const db = getDb();
     const idx = db.sounds.findIndex((s) => s.id === req.params.id);
@@ -2824,6 +3170,9 @@ function sanitizeActivity(a) {
     const sound = db.sounds[idx];
     if (sound.isStarter && req.user.role !== 'host') {
       return res.status(403).json({ error: 'Apenas o host pode remover sons padrão.' });
+    }
+    if (!sound.isStarter && !canManageUpload(req.user, sound)) {
+      return res.status(403).json({ error: 'Só quem enviou este som (ou quem gerencia expressões) pode removê-lo.' });
     }
     db.sounds.splice(idx, 1);
     if (!sound.isStarter && sound.url.startsWith('/uploads/sounds/')) {
@@ -2852,6 +3201,7 @@ function sanitizeActivity(a) {
       url: `/uploads/music/${req.file.filename}`,
       source: 'upload',
       addedBy: req.user.displayName,
+      uploaderId: req.user.id,
       createdAt: Date.now(),
     };
 
@@ -2867,6 +3217,9 @@ function sanitizeActivity(a) {
     const idx = db.musicLibrary.findIndex((t) => t.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'Faixa não encontrada.' });
     const track = db.musicLibrary[idx];
+    if (!canManageUpload(req.user, track)) {
+      return res.status(403).json({ error: 'Só quem enviou esta música (ou quem gerencia expressões) pode removê-la.' });
+    }
     db.musicLibrary.splice(idx, 1);
     if (track.url.startsWith('/uploads/music/')) {
       const filePath = path.join(MUSIC_DIR, path.basename(track.url));
@@ -2948,6 +3301,7 @@ function sanitizeActivity(a) {
       previewUrl: url,
       tags: String(req.body?.tags || '').trim().slice(0, 100),
       addedBy: req.user.displayName,
+      uploaderId: req.user.id,
       createdAt: Date.now(),
     };
 
@@ -2961,6 +3315,9 @@ function sanitizeActivity(a) {
     const db = getDb();
     const idx = db.savedGifs.findIndex((g) => g.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'GIF não encontrado.' });
+    if (!canManageUpload(req.user, db.savedGifs[idx])) {
+      return res.status(403).json({ error: 'Só quem salvou este GIF (ou quem gerencia expressões) pode removê-lo.' });
+    }
     db.savedGifs.splice(idx, 1);
     saveDb();
     io.emit('gifs:updated', db.savedGifs);
@@ -3598,7 +3955,7 @@ function sanitizeActivity(a) {
         participants: Array.from(roomMap.values()),
         musicState: serializeMusicState(channelId),
         videoState: serializeVideoState(channelId),
-        whiteboardState: getOrCreateWhiteboardState(channelId),
+        whiteboardState: wbRoom.publicState(getOrCreateWhiteboardState(channelId)),
         sfu: sfuInfo,
       });
     });
@@ -3720,44 +4077,48 @@ function sanitizeActivity(a) {
     // SFU (mediasoup): transportes, producers e consumers
     sfu.attachSocket(socket);
 
-    // WebRTC Signaling
-    socket.on('rtc:description', ({ targetSocketId, description }) => {
-      if (!targetSocketId || !description) return;
+    // WebRTC Signaling (só para conexões reais: um nome de sala aqui mandaria para todo mundo da sala)
+    const isLiveSocketId = (id) => typeof id === 'string' && id.length < 64 && io.sockets.sockets.has(id);
+    socket.on('rtc:description', ({ targetSocketId, description } = {}) => {
+      if (!isLiveSocketId(targetSocketId) || !description) return;
       io.to(targetSocketId).emit('rtc:description', { fromSocketId: socket.id, description });
     });
 
-    socket.on('rtc:ice-candidate', ({ targetSocketId, candidate }) => {
-      if (!targetSocketId || !candidate) return;
+    socket.on('rtc:ice-candidate', ({ targetSocketId, candidate } = {}) => {
+      if (!isLiveSocketId(targetSocketId) || !candidate) return;
       io.to(targetSocketId).emit('rtc:ice-candidate', { fromSocketId: socket.id, candidate });
     });
 
-    socket.on('rtc:streams-meta', ({ targetSocketId, meta }) => {
+    socket.on('rtc:streams-meta', ({ targetSocketId, meta } = {}) => {
       const channelId = socketVoiceChannel.get(socket.id);
       if (!channelId) return;
       const participant = voiceRooms.get(channelId)?.get(socket.id);
       if (participant) participant.streamsMeta = meta || null;
       if (targetSocketId) {
-        io.to(targetSocketId).emit('rtc:streams-meta', { fromSocketId: socket.id, meta });
+        if (isLiveSocketId(targetSocketId)) io.to(targetSocketId).emit('rtc:streams-meta', { fromSocketId: socket.id, meta });
       } else {
         socket.to(`voice:${channelId}`).emit('rtc:streams-meta', { fromSocketId: socket.id, meta });
       }
     });
 
-    // Remote Control (Parsec / AnyDesk) Permission & Fallback Relay
-    socket.on('rc:invite', ({ targetSocketId, permissions }) => {
+    // Controle remoto: o "aceitar" só passa se existir um convite/pedido de verdade entre as duas pessoas.
+    // Antes, qualquer membro podia mandar um "aceito" falso e o app do outro liberava mouse e teclado sem perguntar.
+    const rcPermsOf = (p) => ({ mouse: p?.mouse !== false, keyboard: p?.keyboard !== false, gamepad: p?.gamepad !== false });
+    socket.on('rc:invite', ({ targetSocketId } = {}) => {
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetSocketId || !actor) return;
+      if (!isLiveSocketId(targetSocketId) || targetSocketId === socket.id || !actor) return;
+      rcPendingSet(socket.id, targetSocketId, 'invite');
       io.to(targetSocketId).emit('rc:invited', {
         fromSocketId: socket.id,
         fromName: actor.displayName,
         fromUserId: actor.id,
-        permissions: permissions || { mouse: true, keyboard: true, gamepad: true },
       });
     });
 
-    socket.on('rc:request', ({ targetSocketId }) => {
+    socket.on('rc:request', ({ targetSocketId } = {}) => {
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetSocketId || !actor) return;
+      if (!isLiveSocketId(targetSocketId) || targetSocketId === socket.id || !actor) return;
+      rcPendingSet(socket.id, targetSocketId, 'request');
       io.to(targetSocketId).emit('rc:requested', {
         fromSocketId: socket.id,
         fromName: actor.displayName,
@@ -3765,45 +4126,43 @@ function sanitizeActivity(a) {
       });
     });
 
-    socket.on('rc:accept', ({ targetSocketId, role, permissions }) => {
+    socket.on('rc:accept', ({ targetSocketId, permissions } = {}) => {
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetSocketId || !actor) return;
+      if (!isLiveSocketId(targetSocketId) || !actor) return;
+      // quem aceita responde a um convite/pedido que o outro (targetSocketId) mandou para mim
+      const pending = rcPendingTake(targetSocketId, socket.id);
+      if (!pending) return;
       io.to(targetSocketId).emit('rc:accepted', {
         fromSocketId: socket.id,
         fromName: actor.displayName,
-        role: role || 'controller',
-        permissions: permissions || { mouse: true, keyboard: true, gamepad: true },
+        // convite: quem convidou passa a ser controlado; pedido: quem pediu passa a controlar
+        role: pending.kind === 'invite' ? 'controller' : 'host',
+        permissions: rcPermsOf(permissions),
       });
     });
 
-    socket.on('rc:permissions-update', ({ targetSocketId, permissions }) => {
-      if (!targetSocketId || !permissions) return;
-      io.to(targetSocketId).emit('rc:permissions-updated', {
-        fromSocketId: socket.id,
-        permissions: {
-          mouse: permissions.mouse !== false,
-          keyboard: permissions.keyboard !== false,
-          gamepad: permissions.gamepad !== false,
-        },
-      });
+    socket.on('rc:permissions-update', ({ targetSocketId, permissions } = {}) => {
+      if (!isLiveSocketId(targetSocketId) || !permissions) return;
+      io.to(targetSocketId).emit('rc:permissions-updated', { fromSocketId: socket.id, permissions: rcPermsOf(permissions) });
     });
 
-    socket.on('rc:decline', ({ targetSocketId }) => {
+    socket.on('rc:decline', ({ targetSocketId } = {}) => {
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetSocketId || !actor) return;
+      if (!isLiveSocketId(targetSocketId) || !actor) return;
+      if (!rcPendingTake(targetSocketId, socket.id)) return;
       io.to(targetSocketId).emit('rc:declined', {
         fromSocketId: socket.id,
         fromName: actor.displayName,
       });
     });
 
-    socket.on('rc:revoke', ({ targetSocketId }) => {
-      if (!targetSocketId) return;
+    socket.on('rc:revoke', ({ targetSocketId } = {}) => {
+      if (!isLiveSocketId(targetSocketId)) return;
       io.to(targetSocketId).emit('rc:revoked', { fromSocketId: socket.id });
     });
 
-    socket.on('rc:input', ({ targetSocketId, event }) => {
-      if (!targetSocketId || !event) return;
+    socket.on('rc:input', ({ targetSocketId, event } = {}) => {
+      if (!isLiveSocketId(targetSocketId) || !event) return;
       io.to(targetSocketId).emit('rc:input', { fromSocketId: socket.id, event });
     });
 
@@ -3828,12 +4187,26 @@ function sanitizeActivity(a) {
       });
     });
 
-    const canUseMediaInRoom = (targetCh, userObj) => {
-      if (!targetCh || !userObj) return false;
-      if (targetCh.startsWith('dm:') || targetCh.startsWith('group:')) return true;
+    // Quem pode mexer numa sala: canal de voz que a pessoa vê, chamada de DM em que ela é uma das duas pontas,
+    // ou grupo do qual ela faz parte. Devolve as permissões do canal (ou {} para DM/grupo) ou null.
+    const roomAccess = (chId, userObj) => {
+      if (typeof chId !== 'string' || !chId || chId.length > 200 || !userObj) return null;
       const dbCur = getDb();
-      const chObj = dbCur.channels.find((c) => c.id === targetCh);
-      return chObj ? computeChannelPermissions(dbCur, userObj, chObj).useMediaQueue : true;
+      if (chId.startsWith('dm:')) return chId.slice(3).split('::').includes(userObj.id) ? {} : null;
+      if (chId.startsWith('group:')) {
+        const g = dbCur.dmGroups?.[chId.slice(6)];
+        return Array.isArray(g?.memberIds) && g.memberIds.includes(userObj.id) ? {} : null;
+      }
+      const chObj = dbCur.channels.find((c) => c.id === chId);
+      if (!chObj) return null;
+      const perms = computeChannelPermissions(dbCur, userObj, chObj);
+      return perms.viewChannels ? perms : null;
+    };
+
+    const canUseMediaInRoom = (targetCh, userObj) => {
+      const acc = roomAccess(targetCh, userObj);
+      if (!acc) return false;
+      return targetCh.startsWith('dm:') || targetCh.startsWith('group:') ? true : Boolean(acc.useMediaQueue);
     };
 
     // Synchronized Voice Music Player (Audio-only: YouTube / Spotify / SoundCloud + Playlist Blocks!)
@@ -4252,13 +4625,22 @@ function sanitizeActivity(a) {
       broadcastVideoState(targetCh, 'track', actor?.displayName || '');
     });
 
-    socket.on('video:ended', ({ channelId, queueId }) => {
+    socket.on('video:ended', ({ channelId, queueId, durationSec } = {}) => {
       const targetCh = channelId || socketVoiceChannel.get(socket.id);
       if (!targetCh) return;
       const v = getOrCreateVideoState(targetCh);
       const current = v.queue[v.currentIndex];
       if (!current || current.queueId !== queueId || !v.isPlaying) return;
       if (Date.now() - v.updatedAt < 1000) return;
+      // Um único cliente não encerra o vídeo de todo mundo à toa (ex.: player dele travou em segundo plano e
+      // avisou "terminou"): só vale quando o tempo da SALA chegou mesmo perto do fim.
+      const reportedDur = Number(durationSec);
+      if (!(Number(current.duration) > 0) && Number.isFinite(reportedDur) && reportedDur > 1 && reportedDur < 24 * 3600) {
+        current.duration = Math.round(reportedDur);
+      }
+      const roomPos = v.positionSec + Math.max(0, (Date.now() - v.updatedAt) / 1000) * videoRate(v);
+      const dur = Number(current.duration) || 0;
+      if (dur > 0 ? roomPos < dur - 6 : roomPos < 5) return;
 
       if (v.currentIndex + 1 < v.queue.length) {
         v.currentIndex += 1;
@@ -4305,189 +4687,50 @@ function sanitizeActivity(a) {
 
     // Collaborative Real-Time Whiteboard (Photoshop Brushes, Tablet Pressure, Pasted Images & Live Colored Cursors!)
     const canUseWb = (chId, userObj) => {
-      if (!chId || !userObj) return false;
-      if (chId.startsWith('dm:') || chId.startsWith('group:')) return true;
-      const dbCur = getDb();
-      const chObj = dbCur.channels.find((c) => c.id === chId);
-      return chObj ? computeChannelPermissions(dbCur, userObj, chObj).useWhiteboard : true;
+      const acc = roomAccess(chId, userObj);
+      if (!acc) return false;
+      return chId.startsWith('dm:') || chId.startsWith('group:') ? true : Boolean(acc.useWhiteboard);
     };
 
-    socket.on('wb:join', ({ channelId }, cb) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      if (!targetCh) return cb?.({ error: 'Sala inválida.' });
-      socket.join(`voice:${targetCh}`);
-      cb?.({ ok: true, state: getOrCreateWhiteboardState(targetCh) });
-    });
-
-    socket.on('wb:add-element', ({ channelId, element }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
+    // Música, vídeo, quadro e soundboard: antes, várias ações (pausar, pular, limpar a fila, entrar no quadro)
+    // aceitavam qualquer sala, inclusive canais privados e chamadas de DM de outras pessoas.
+    socket.use((packet, next) => {
+      const ev = String(packet[0] || '');
+      const kind = ev.startsWith('music:') ? 'media' : ev.startsWith('video:') ? 'media' : ev.startsWith('wb:') ? 'wb' : ev === 'soundboard:play' ? 'room' : null;
+      if (!kind) return next();
+      const payload = packet[1] && typeof packet[1] === 'object' ? packet[1] : {};
+      const targetCh = payload.channelId || socketVoiceChannel.get(socket.id);
+      if (!targetCh) return next(); // o próprio handler responde "sala inválida"
       const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !element?.id || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      const safeEl = { ...element, authorId: actor.id, authorName: actor.displayName, createdAt: element.createdAt || Date.now() };
-      const existingIdx = wb.elements.findIndex((e) => e.id === safeEl.id);
-      if (existingIdx !== -1) wb.elements[existingIdx] = safeEl;
-      else wb.elements.push(safeEl);
-      if (wb.elements.length > 2500) wb.elements = wb.elements.slice(-2500);
-      wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:element-added', { channelId: targetCh, element: safeEl, seq: wb.seq });
-    });
-
-    socket.on('wb:update-element', ({ channelId, element }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !element?.id || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      const idx = wb.elements.findIndex((e) => e.id === element.id);
-      if (idx !== -1) wb.elements[idx] = { ...wb.elements[idx], ...element };
-      wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:element-updated', { channelId: targetCh, element: idx !== -1 ? wb.elements[idx] : element, seq: wb.seq });
-    });
-
-    socket.on('wb:delete-element', ({ channelId, elementId }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !elementId || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      wb.elements = wb.elements.filter((e) => e.id !== elementId);
-      wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:element-deleted', { channelId: targetCh, id: elementId, seq: wb.seq });
-    });
-
-    // Edição leve (mover / redimensionar / girar / texto) sem reenviar a imagem inteira
-    const WB_PATCH_KEYS = ['x', 'y', 'w', 'h', 'x2', 'y2', 'tx', 'ty', 'rot', 'layerId', 'opacity', 'color', 'text', 'fontSize', 'filled'];
-    socket.on('wb:patch-element', ({ channelId, id, patch }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !id || !patch || typeof patch !== 'object' || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      const el = wb.elements.find((e) => e.id === id);
-      if (!el) return;
-      const safe = {};
-      for (const k of WB_PATCH_KEYS) {
-        if (!(k in patch)) continue;
-        const val = patch[k];
-        if (k === 'text') safe[k] = String(val ?? '').slice(0, 4000);
-        else if (k === 'layerId' || k === 'color') safe[k] = String(val ?? '').slice(0, 64);
-        else if (k === 'filled') safe[k] = Boolean(val);
-        else if (Number.isFinite(Number(val))) safe[k] = Number(val);
-      }
-      if (!Object.keys(safe).length) return;
-      Object.assign(el, safe);
-      wb.seq++;
-      socket.to(`voice:${targetCh}`).emit('wb:element-patched', { channelId: targetCh, id, patch: safe, seq: wb.seq });
-    });
-
-    socket.on('wb:reorder-element', ({ channelId, id, toFront }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !id || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      const idx = wb.elements.findIndex((e) => e.id === id);
-      if (idx === -1) return;
-      const [el] = wb.elements.splice(idx, 1);
-      if (toFront) wb.elements.push(el);
-      else wb.elements.unshift(el);
-      wb.seq++;
-      socket.to(`voice:${targetCh}`).emit('wb:element-reordered', { channelId: targetCh, id, toFront: Boolean(toFront), seq: wb.seq });
-    });
-
-    // Traço ao vivo: repassa o desenho em andamento para quem está na sala (não é salvo)
-    socket.on('wb:draft', (payload) => {
-      const targetCh = payload?.channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !actor || !canUseWb(targetCh, actor)) return;
-      if (payload.cancel) {
-        socket.to(`voice:${targetCh}`).emit('wb:draft', { channelId: targetCh, socketId: socket.id, cancel: true, id: String(payload.id || '') });
-        return;
-      }
-      const d = payload.draft;
-      if (!d || !d.id || d.kind === 'image') return;
-      if (Array.isArray(d.points) && d.points.length > 4000) return;
-      socket.to(`voice:${targetCh}`).emit('wb:draft', {
-        channelId: targetCh,
-        socketId: socket.id,
-        from: Math.max(0, Number(payload.from) || 0),
-        draft: { ...d, authorId: actor.id, authorName: actor.displayName },
-      });
-    });
-
-    socket.on('wb:undo', ({ channelId }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      let removedId = null;
-      for (let i = wb.elements.length - 1; i >= 0; i--) {
-        if (wb.elements[i].authorId === actor.id) {
-          removedId = wb.elements[i].id;
-          wb.elements.splice(i, 1);
-          break;
-        }
-      }
-      if (!removedId) return;
-      wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:element-deleted', { channelId: targetCh, id: removedId, seq: wb.seq });
-    });
-
-    socket.on('wb:clear', ({ channelId, layerId }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      wb.elements = layerId ? wb.elements.filter((e) => e.layerId !== layerId) : [];
-      wb.seq++;
-      io.to(`voice:${targetCh}`).emit('wb:state', wb);
-    });
-
-    socket.on('wb:layers-update', ({ channelId, layers }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !Array.isArray(layers) || layers.length === 0 || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      wb.layers = layers
-        .slice(0, 32)
-        .filter((l) => l && typeof l.id === 'string')
-        .map((l) => ({
-          id: String(l.id).slice(0, 64),
-          name: String(l.name || 'Camada').slice(0, 40),
-          visible: l.visible !== false,
-          locked: Boolean(l.locked),
-          opacity: Math.max(0, Math.min(1, Number(l.opacity ?? 1))),
-          blend: typeof l.blend === 'string' ? l.blend.slice(0, 24) : 'source-over',
-        }));
-      if (!wb.layers.length) return;
-      wb.seq++;
-      socket.to(`voice:${targetCh}`).emit('wb:meta', { channelId: targetCh, layers: wb.layers, background: wb.background, seq: wb.seq });
-    });
-
-    socket.on('wb:background', ({ channelId, background }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !canUseWb(targetCh, actor)) return;
-      const wb = getOrCreateWhiteboardState(targetCh);
-      if (['dark', 'light', 'grid', 'transparent'].includes(background)) {
-        wb.background = background;
-        wb.seq++;
-        socket.to(`voice:${targetCh}`).emit('wb:meta', { channelId: targetCh, layers: wb.layers, background: wb.background, seq: wb.seq });
+      let ok;
+      if (kind === 'media') ok = ev === 'music:track-ended' || ev === 'video:ended' ? Boolean(roomAccess(targetCh, actor)) : canUseMediaInRoom(targetCh, actor);
+      else if (kind === 'wb') ok = ev === 'wb:join' || ev === 'wb:cursor' ? Boolean(roomAccess(targetCh, actor)) : canUseWb(targetCh, actor);
+      else ok = Boolean(roomAccess(targetCh, actor));
+      if (ok) return next();
+      const ack = packet[packet.length - 1];
+      if (typeof ack === 'function') {
+        try {
+          ack({ error: 'Sem permissão nesta sala.' });
+        } catch {}
       }
     });
 
-    socket.on('wb:cursor', ({ channelId, x, y, size, tool, isDrawing }) => {
-      const targetCh = channelId || socketVoiceChannel.get(socket.id);
-      const actor = getDb().users.find((u) => u.id === socket.data.userId);
-      if (!targetCh || !actor) return;
-      socket.to(`voice:${targetCh}`).volatile.emit('wb:cursor', {
-        socketId: socket.id,
-        userId: actor.id,
-        displayName: actor.displayName,
-        color: actor.avatarColor || '#5865F2',
-        x: Number(x || 0),
-        y: Number(y || 0),
-        size: Number(size || 6),
-        tool: String(tool || 'pen'),
-        isDrawing: Boolean(isDrawing),
-      });
+    // Quadro / estúdio de arte: regras únicas (server/wbRoom.cjs), também usadas pela call LAN
+    wbRoom.attachWhiteboard(socket, {
+      getState: (ch) => getOrCreateWhiteboardState(ch),
+      resolveRoom: (ch) => {
+        const target = (typeof ch === 'string' && ch) || socketVoiceChannel.get(socket.id);
+        if (!target || typeof target !== 'string') return null;
+        const actor = getDb().users.find((u) => u.id === socket.data.userId);
+        return roomAccess(target, actor) ? target : null;
+      },
+      canDraw: (ch) => canUseWb(ch, getDb().users.find((u) => u.id === socket.data.userId)),
+      author: () => {
+        const actor = getDb().users.find((u) => u.id === socket.data.userId);
+        return { id: actor?.id || '', name: actor?.displayName || '', color: actor?.avatarColor };
+      },
+      toRoom: (ch) => io.to(`voice:${ch}`),
+      toOthers: (ch) => socket.to(`voice:${ch}`),
     });
 
     // Trello Real-Time Socket Sync
@@ -4518,6 +4761,7 @@ function sanitizeActivity(a) {
     });
 
     socket.on('disconnect', () => {
+      rcPendingForget(socket.id);
       const prev = socketVoiceChannel.get(socket.id);
       const leaver = getDb().users.find((u) => u.id === socket.data.userId);
       leaveVoiceRoom(socket);

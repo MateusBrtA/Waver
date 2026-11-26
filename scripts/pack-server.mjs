@@ -94,6 +94,8 @@ fs.writeFileSync(
 fs.mkdirSync(path.join(stage, 'dist-app'), { recursive: true });
 const exe = path.join(root, 'dist-app', 'PulseCord-Portable.exe');
 if (withApp && fs.existsSync(exe)) fs.copyFileSync(exe, path.join(stage, 'dist-app', 'PulseCord-Portable.exe'));
+// assinatura do exe (o app só instala atualização assinada)
+if (withApp && fs.existsSync(`${exe}.sig.json`)) fs.copyFileSync(`${exe}.sig.json`, path.join(stage, 'dist-app', 'PulseCord-Portable.exe.sig.json'));
 
 // compacta (tar do Windows 10+ / Linux)
 const tgz = path.join(outDir, `${name}.tar.gz`);

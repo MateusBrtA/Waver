@@ -108,13 +108,20 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
               releaseMeta = JSON.parse(fs.readFileSync(customMetaFile, 'utf8'));
             } catch {}
           }
+          // assinatura de atualização gerada no build (scripts/release-signing.mjs sign-exe), ao lado do .exe
+          let signature = null;
+          try {
+            const sj = JSON.parse(fs.readFileSync(`${p}.sig.json`, 'utf8'));
+            if (sj && sj.v === 1 && typeof sj.sig === 'string') signature = sj;
+          } catch {}
           return {
             path: p,
+            signature,
             name: path.basename(p),
             size: stat.size,
             mtimeMs: stat.mtimeMs,
-            version: releaseMeta?.version || appVersion,
-            sha256: releaseMeta?.sha256 || '',
+            version: signature?.version || releaseMeta?.version || appVersion,
+            sha256: signature?.sha256 || releaseMeta?.sha256 || '',
             notes: releaseMeta?.notes || 'Atualização do servidor Host pronta para instalar sem perder dados.',
           };
         }
@@ -135,12 +142,13 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
       installerName: inst?.name || null,
       installerSize: inst?.size || 0,
       installerSha256: inst?.sha256 || '',
+      installerSigned: Boolean(inst?.signature),
       releaseNotes: inst?.notes || 'Interface e recursos atualizados do PulseCord.',
       updatedAt: inst?.mtimeMs || Date.now(),
     };
   }
 
-  function savePublishedInstaller(tempPath, originalName, versionLabel, notes) {
+  function savePublishedInstaller(tempPath, originalName, versionLabel, notes, signatureJson = null) {
     if (!updatesDir) throw new Error('Diretório de atualizações não configurado.');
     fs.mkdirSync(updatesDir, { recursive: true });
     const isPortable = /portable/i.test(originalName || '');
@@ -152,6 +160,12 @@ export function createUpdateHelper({ appVersion, clientDistDir, downloadsDir, up
     const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
     fs.copyFileSync(tempPath, targetPath);
     try { fs.unlinkSync(tempPath); } catch {}
+    // assinatura junto (o app de quem atualiza confere); sem ela, os apps recusam instalar
+    try { fs.unlinkSync(`${targetPath}.sig.json`); } catch {}
+    if (signatureJson && signatureJson.sha256 === sha256) {
+      fs.writeFileSync(`${targetPath}.sig.json`, JSON.stringify(signatureJson), 'utf8');
+      if (signatureJson.version) versionLabel = String(signatureJson.version).slice(0, 24);
+    }
 
     fs.writeFileSync(
       path.join(updatesDir, 'release-meta.json'),

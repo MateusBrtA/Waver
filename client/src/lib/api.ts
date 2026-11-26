@@ -85,6 +85,32 @@ export function resolveMediaUrl(serverUrl: string, pathOrUrl: string | null | un
   return `${base}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`;
 }
 
+// Chave de login por conta (servidor + nick): o servidor só deixa entrar numa conta sem senha quem tem a chave
+// que ele entregou quando a conta foi criada. Fica só neste PC.
+const LOGIN_KEYS_STORAGE = 'pulsecord_login_keys';
+function readLoginKeys(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LOGIN_KEYS_STORAGE) || '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};
+  }
+}
+function saveLoginKey(serverUrl: string, username: string, key: string) {
+  try {
+    const all = readLoginKeys();
+    all[`${serverUrl}|${username}`] = key;
+    localStorage.setItem(LOGIN_KEYS_STORAGE, JSON.stringify(all));
+  } catch {}
+}
+function loginKeysFor(serverUrl: string): string[] {
+  const all = readLoginKeys();
+  return Object.entries(all)
+    .filter(([k]) => k.startsWith(`${serverUrl}|`))
+    .map(([, v]) => v)
+    .slice(0, 25);
+}
+
 export class ApiClient {
   serverUrl: string;
   token: string | null;
@@ -141,14 +167,25 @@ export class ApiClient {
     /** código do dono de um servidor dedicado (Debian/Windows sem tela) */
     ownerCode?: string;
   }) {
-    return this.request<{ token: string; user: User; server: ServerInfo }>('/api/auth/login', {
+    return this.request<{ token: string; user: User; server: ServerInfo; loginKey?: string }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, loginKeys: loginKeysFor(this.serverUrl), wantsLoginKey: true }),
+    }).then((res) => {
+      if (res.loginKey && res.user?.username) saveLoginKey(this.serverUrl, res.user.username, res.loginKey);
+      return res;
     });
   }
 
   me() {
-    return this.request<{ user: User; server: ServerInfo }>('/api/auth/me');
+    return this.request<{ user: User; server: ServerInfo; loginKey?: string }>('/api/auth/me?wantLoginKey=1').then((res) => {
+      if (res.loginKey && res.user?.username) saveLoginKey(this.serverUrl, res.user.username, res.loginKey);
+      return res;
+    });
+  }
+
+  /** Host/admin: libera o nick de alguém (apaga a chave de login e derruba as sessões dessa conta) */
+  resetMemberLogin(userId: string) {
+    return this.request<{ ok: boolean }>(`/api/users/${encodeURIComponent(userId)}/reset-login`, { method: 'POST' });
   }
 
   logout() {
@@ -635,11 +672,12 @@ export class ApiClient {
     return this.request<UpdateManifest>('/api/update/manifest');
   }
 
-  publishInstallerUpdate(file: File, version: string, notes: string) {
+  publishInstallerUpdate(file: File, version: string, notes: string, signature?: File | null) {
     const fd = new FormData();
     fd.append('version', version);
     fd.append('notes', notes);
     fd.append('installer', file);
+    if (signature) fd.append('signature', signature);
     return this.request<{ ok: boolean; manifest: UpdateManifest }>('/api/update/publish-installer', {
       method: 'POST',
       body: fd,

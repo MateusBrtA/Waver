@@ -440,6 +440,23 @@ export const ServerAdminPanel: React.FC<ServerAdminPanelProps> = ({
     }
   };
 
+  const handleResetLogin = async (target: User) => {
+    if (
+      !window.confirm(
+        `Liberar o nick @${target.username}?
+
+A conta perde a chave de login deste servidor e é desconectada. A próxima pessoa que entrar com esse nick fica com a conta (cargos e histórico). Use quando a pessoa trocou de PC ou a conta foi tomada.`
+      )
+    )
+      return;
+    try {
+      await api.resetMemberLogin(target.id);
+      onNotify?.(`Nick @${target.username} liberado.`);
+    } catch (err: any) {
+      onNotify?.(err?.message || 'Erro ao liberar o nick.');
+    }
+  };
+
   const handleUnban = async (userId: string) => {
     try {
       const { bans: updated } = await api.unbanUser(userId);
@@ -1489,6 +1506,17 @@ export const ServerAdminPanel: React.FC<ServerAdminPanelProps> = ({
                       className="px-2 py-1 rounded bg-[#f0b232]/15 hover:bg-[#f0b232]/25 text-[#f0b232] text-[11px] font-semibold flex items-center gap-1 ml-1"
                     >
                       <UserMinus className="w-3 h-3" /> Expulsar
+                    </button>
+                  )}
+
+                  {canActOn && (permissions.administrator || permissions.manageServer) && (
+                    <button
+                      type="button"
+                      onClick={() => handleResetLogin(m)}
+                      title="Apaga a chave de login da conta (ex.: a pessoa trocou de PC)"
+                      className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[#b5bac1] text-[11px] font-semibold flex items-center gap-1 ml-1"
+                    >
+                      Liberar nick
                     </button>
                   )}
 
