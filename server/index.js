@@ -23,6 +23,7 @@ import {
   saveDbNow,
 } from './db.js';
 import { startLanAdvertiser } from './discovery.js';
+import { createSfuManager } from './sfu.js';
 import {
   prefetchMedia,
   resolveMusicUrl,
@@ -480,6 +481,15 @@ export function createPulseCordServer(options = {}) {
   let advertiser = null;
   let cachePruneTimer = null;
 
+  // SFU opcional (mediasoup): só liga com PULSECORD_SFU=1/auto e se o mediasoup carregar nesta máquina
+  const sfu = createSfuManager({
+    options: options.sfu || {},
+    emitTo: (socketId, event, payload) => io.to(socketId).emit(event, payload),
+    getSocketChannel: (socketId) => socketVoiceChannel.get(socketId),
+    onRoomClosed: (channelId) => io.to(`voice:${channelId}`).emit('sfu:mode', { channelId, enabled: false }),
+  });
+  let sfuInitPromise = null;
+
   function markFilePrunedInDb({ bucket, filename, relUrl }) {
     const db = getDb();
     let changed = false;
@@ -848,6 +858,7 @@ function sanitizeActivity(a) {
       server: getPublicServerInfo(),
       addresses: getNetworkAddresses(activePort),
       hasDownloadableExe: Boolean(findDownloadableExe('setup') || findDownloadableExe('portable')),
+      sfu: sfu.publicInfo(),
     });
   });
 
@@ -2121,6 +2132,7 @@ function sanitizeActivity(a) {
     delete db.messages[channel.id];
     if (channel.type === 'voice') {
       voiceRooms.delete(channel.id);
+      sfu.closeRoom(channel.id);
       musicStates.delete(channel.id);
       videoStates.delete(channel.id);
       whiteboardStates.delete(channel.id);
@@ -2977,10 +2989,12 @@ function sanitizeActivity(a) {
     socket.leave(`voice:${prevChannelId}`);
 
     const roomMap = voiceRooms.get(prevChannelId);
+    sfu.removePeer(prevChannelId, socket.id);
     if (roomMap) {
       roomMap.delete(socket.id);
       if (roomMap.size === 0) {
         voiceRooms.delete(prevChannelId);
+        sfu.closeRoom(prevChannelId);
         const m = musicStates.get(prevChannelId);
         if (m && m.isPlaying) {
           m.positionSec += Math.max(0, (Date.now() - m.updatedAt) / 1000);
@@ -3435,7 +3449,7 @@ function sanitizeActivity(a) {
     });
 
     // Voice & Video Rooms (supports server voice channels, dm:<pairKey> AND group:<groupId> calls!)
-    socket.on('voice:join', ({ channelId, muted, deafened }, cb) => {
+    socket.on('voice:join', async ({ channelId, muted, deafened, sfu: sfuCapable }, cb) => {
       const currentDb = getDb();
       const currentUser = currentDb.users.find((u) => u.id === socket.data.userId);
       if (!currentUser) return cb?.({ error: 'Usuário inválido.' });
@@ -3503,6 +3517,8 @@ function sanitizeActivity(a) {
         stageRole,
         handRaised: false,
         recording: null,
+        // o cliente sabe usar o SFU (mediasoup-client carregou); clientes antigos não mandam isto
+        sfuCapable: Boolean(sfuCapable),
       };
 
       roomMap.set(socket.id, participant);
@@ -3523,6 +3539,7 @@ function sanitizeActivity(a) {
         } else {
           socketVoiceChannel.delete(sid);
           voiceRooms.get(chId)?.delete(sid);
+          sfu.removePeer(chId, sid);
           io.to(`voice:${chId}`).emit('voice:peer-left', { channelId: chId, socketId: sid });
         }
       }
@@ -3535,6 +3552,33 @@ function sanitizeActivity(a) {
           targetName: channelObj.name,
           details: `Entrou na call #${channelObj.name}`,
         });
+      }
+
+      // SFU ou malha? Decidido antes de avisar os outros (eles recebem 'sfu:mode' antes do 'voice:peer-joined')
+      let sfuInfo = null;
+      if (sfu.available) {
+        const everyoneCapable = Array.from(roomMap.values()).every((p) => p.sfuCapable);
+        const active = sfu.hasRoom(channelId);
+        if (active && !everyoneCapable) {
+          // entrou alguém com app antigo: a call inteira volta para a malha
+          sfu.closeRoom(channelId);
+          socket.to(`voice:${channelId}`).emit('sfu:mode', { channelId, enabled: false });
+        } else if (everyoneCapable && (active || sfu.shouldUseFor(roomMap.size))) {
+          let caps = null;
+          try {
+            caps = await sfu.ensureRoom(channelId);
+          } catch (err) {
+            console.warn('[SFU] não foi possível abrir a sala; usando malha:', err?.message || err);
+          }
+          // saiu (ou trocou de call) enquanto o router era criado
+          if (socketVoiceChannel.get(socket.id) !== channelId) return cb?.({ error: 'Você saiu da call.' });
+          if (caps) {
+            sfuInfo = { enabled: true, routerRtpCapabilities: caps };
+            if (!active) {
+              socket.to(`voice:${channelId}`).emit('sfu:mode', { channelId, enabled: true, routerRtpCapabilities: caps });
+            }
+          }
+        }
       }
 
       socket.to(`voice:${channelId}`).emit('voice:peer-joined', { channelId, peer: participant });
@@ -3555,6 +3599,7 @@ function sanitizeActivity(a) {
         musicState: serializeMusicState(channelId),
         videoState: serializeVideoState(channelId),
         whiteboardState: getOrCreateWhiteboardState(channelId),
+        sfu: sfuInfo,
       });
     });
 
@@ -3671,6 +3716,9 @@ function sanitizeActivity(a) {
       broadcastVoiceRooms();
       cb?.({ ok: true });
     });
+
+    // SFU (mediasoup): transportes, producers e consumers
+    sfu.attachSocket(socket);
 
     // WebRTC Signaling
     socket.on('rtc:description', ({ targetSocketId, description }) => {
@@ -4531,7 +4579,9 @@ function sanitizeActivity(a) {
     res.status(500).json({ error: err?.message || 'Erro interno no servidor.' });
   });
 
-  function start(listenPort = PORT) {
+  async function start(listenPort = PORT) {
+    if (!sfuInitPromise) sfuInitPromise = sfu.init().catch((err) => console.warn('[SFU] init:', err?.message || err));
+    await sfuInitPromise;
     return new Promise((resolve, reject) => {
       const onError = (err) => {
         server.off('listening', onListening);
@@ -4598,6 +4648,7 @@ function sanitizeActivity(a) {
       advertiser?.stop();
       advertiser = null;
       saveDbNow();
+      sfu.close().catch(() => {});
       io.close(() => {
         server.close(() => resolve());
       });
@@ -4616,6 +4667,7 @@ function sanitizeActivity(a) {
     getPort: () => activePort,
     getOwnerCode: () => OWNER_CODE,
     getDataDir: () => DATA_DIR,
+    sfu,
   };
 }
 

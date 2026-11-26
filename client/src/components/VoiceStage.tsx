@@ -852,11 +852,17 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                     ? 'border-transparent text-[#23a55a] hover:bg-[#35373c]'
                     : 'border-transparent text-[#f0b232] hover:bg-[#35373c]'
                 }`}
-                title="Status P2P — clique para reconectar"
+                title={
+                  Object.values(remotePeers).some((p) => p.viaSfu)
+                    ? 'Mídia pelo servidor (SFU) — clique para reconectar'
+                    : 'Status P2P — clique para reconectar'
+                }
               >
                 <RefreshCw className="w-3 h-3" />
                 {Object.values(remotePeers).every((p) => p.connectionState === 'connected')
-                  ? 'Voz conectada'
+                  ? Object.values(remotePeers).some((p) => p.viaSfu)
+                    ? 'Voz conectada (SFU)'
+                    : 'Voz conectada'
                   : 'Conectando…'}
               </button>
             )}
@@ -2040,7 +2046,11 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
 
                   {!isSelf && remote && remote.connectionState !== 'connected' && (
                     <span className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full bg-black/70 text-[#f0b232]">
-                      {remote.connectionState === 'connecting' ? 'Conectando P2P...' : remote.connectionState}
+                      {remote.connectionState === 'connecting'
+                        ? remote.viaSfu
+                          ? 'Conectando ao servidor...'
+                          : 'Conectando P2P...'
+                        : remote.connectionState}
                     </span>
                   )}
                 </div>

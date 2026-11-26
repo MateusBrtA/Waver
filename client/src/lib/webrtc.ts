@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { createProcessLoopbackAudioTrack, LoopbackBridgeHandle } from './loopbackAudio';
 import { setSpeaking } from './speakingStore';
+import { SfuJoinInfo, SfuProduceOptions, SfuSession, SfuSource, sfuSupported } from './sfuSession';
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -42,6 +43,20 @@ interface PeerContext {
   /** reinício de ICE agendado quando a conexão fica "disconnected" (troca de rede, Wi-Fi oscilando) */
   iceRecoverTimer?: number;
 }
+
+/** Pessoa da call quando a mídia passa pelo SFU do servidor (sem RTCPeerConnection própria). */
+interface SfuPeer {
+  media: RemotePeerMedia;
+  vadCleanup?: () => void;
+  /** consumerId -> fonte e id da faixa (para saber o que limpar quando o consumer fecha) */
+  tracks: Map<string, { source: SfuSource; trackId: string }>;
+  prevScreenBytes: number;
+  prevScreenTs: number;
+  prevCamBytes: number;
+  prevCamTs: number;
+}
+
+type RouterRtpCapabilities = NonNullable<SfuJoinInfo['routerRtpCapabilities']>;
 
 export interface WebRTCManagerCallbacks {
   onPeersUpdated: (peers: Record<string, RemotePeerMedia>) => void;
@@ -144,6 +159,16 @@ export class WebRTCManager {
 
   private sharedAudioCtx: AudioContext | null = null;
 
+  // ---- SFU (mediasoup) ----
+  /** Quem está na call (socketId -> meta), em malha ou SFU: usado para trocar de modo no meio da call. */
+  private roomPeers = new Map<string, StreamsMeta | null>();
+  /** A call está no modo SFU (capacidades do router do servidor). null = malha P2P. */
+  private sfuCaps: RouterRtpCapabilities | null = null;
+  private sfu: SfuSession | null = null;
+  private sfuPeers = new Map<string, SfuPeer>();
+  private sfuRetryTimer: number | null = null;
+  private sfuCamLayers = new Map<string, number>();
+
   constructor(settings: AudioSettings, callbacks: WebRTCManagerCallbacks) {
     this.settings = settings;
     this.callbacks = callbacks;
@@ -228,6 +253,7 @@ export class WebRTCManager {
     socket.on('rtc:ice-candidate', this.handleRtcIceCandidate);
     socket.on('rtc:streams-meta', this.handleStreamsMeta);
     socket.on('rc:input', this.handleSocketRcInput);
+    socket.on('sfu:mode', this.handleSfuMode);
   }
 
   detachSocket() {
@@ -238,6 +264,7 @@ export class WebRTCManager {
     this.socket.off('rtc:ice-candidate', this.handleRtcIceCandidate);
     this.socket.off('rtc:streams-meta', this.handleStreamsMeta);
     this.socket.off('rc:input', this.handleSocketRcInput);
+    this.socket.off('sfu:mode', this.handleSfuMode);
     this.socket = null;
   }
 
@@ -350,6 +377,9 @@ export class WebRTCManager {
     const map: Record<string, RemotePeerMedia> = {};
     for (const [id, ctx] of this.peers.entries()) {
       map[id] = { ...ctx.media };
+    }
+    for (const [id, p] of this.sfuPeers.entries()) {
+      map[id] = { ...p.media };
     }
     this.callbacks.onPeersUpdated(map);
   }
@@ -650,6 +680,9 @@ export class WebRTCManager {
         this.applyAudioSenderParams(ctx.micSender, isStudio ? 160_000 : 128_000);
       }
     }
+    if (this.sfu && newTrack) {
+      this.sfu.produce('mic', newTrack, this.micProduceOptions()).catch((err) => console.warn('[SFU] microfone:', err));
+    }
     this.broadcastStreamsMeta();
     this.emitLocalState();
     return outboundStream;
@@ -664,13 +697,35 @@ export class WebRTCManager {
     await this.acquireMicrophone();
   }
 
-  async completeJoin(channelId: string, selfSocketId: string, existingPeers: VoiceParticipant[]) {
+  /**
+   * @param sfuInfo resposta do servidor em voice:join: se a call usa o SFU, a mídia vai para o servidor
+   * (uma cópia só) em vez de uma conexão P2P com cada pessoa.
+   */
+  async completeJoin(
+    channelId: string,
+    selfSocketId: string,
+    existingPeers: VoiceParticipant[],
+    sfuInfo?: SfuJoinInfo | null
+  ) {
     this.activeChannelId = channelId;
     this.selfSocketId = selfSocketId;
 
     for (const peer of existingPeers) {
       if (peer.socketId === selfSocketId) continue;
-      this.createPeerConnection(peer.socketId, peer.streamsMeta || null, false);
+      this.roomPeers.set(peer.socketId, peer.streamsMeta || null);
+    }
+    if (sfuInfo?.enabled && sfuInfo.routerRtpCapabilities && sfuSupported()) {
+      this.sfuCaps = sfuInfo.routerRtpCapabilities;
+    }
+
+    if (this.sfuCaps) {
+      // não espera: a UI (música, vídeo sincronizado) não precisa aguardar o SFU conectar
+      this.startSfu().catch(() => {});
+    } else {
+      for (const peer of existingPeers) {
+        if (peer.socketId === selfSocketId) continue;
+        this.createPeerConnection(peer.socketId, peer.streamsMeta || null, false);
+      }
     }
 
     this.broadcastStreamsMeta();
@@ -684,24 +739,18 @@ export class WebRTCManager {
    * com os outros, mantendo microfone, câmera e tela. Depois chame completeJoin com os peers novos.
    */
   resetPeersForRejoin(channelId: string, selfSocketId: string) {
-    for (const ctx of this.peers.values()) {
-      ctx.vadCleanup?.();
-      if (ctx.iceRecoverTimer) window.clearTimeout(ctx.iceRecoverTimer);
-      try {
-        ctx.rcChannel?.close();
-        ctx.rcFastChannel?.close();
-        ctx.pc.close();
-      } catch {}
-    }
-    this.peers.clear();
-    this.pendingIceCandidates.clear();
-    this.pendingRemoteMeta.clear();
+    this.closeMeshPeers();
+    // o servidor já descartou o socket antigo (e o que ele enviava ao SFU): o voice:join diz o modo de novo
+    this.stopSfu();
+    this.sfuCaps = null;
+    this.roomPeers.clear();
     this.activeChannelId = channelId;
     this.selfSocketId = selfSocketId;
     this.emitPeersState();
   }
 
   reconnectAllPeers() {
+    this.sfu?.restartIce();
     for (const ctx of this.peers.values()) {
       try {
         ctx.pc.restartIce();
@@ -716,18 +765,10 @@ export class WebRTCManager {
     }
     this.cleanupMicDsp();
 
-    for (const ctx of this.peers.values()) {
-      ctx.vadCleanup?.();
-      if (ctx.iceRecoverTimer) window.clearTimeout(ctx.iceRecoverTimer);
-      try {
-        ctx.rcChannel?.close();
-        ctx.rcFastChannel?.close();
-        ctx.pc.close();
-      } catch {}
-    }
-    this.peers.clear();
-    this.pendingIceCandidates.clear();
-    this.pendingRemoteMeta.clear();
+    this.closeMeshPeers();
+    this.stopSfu();
+    this.sfuCaps = null;
+    this.roomPeers.clear();
 
     this.micStream?.getTracks().forEach((t) => t.stop());
     this.camStream?.getTracks().forEach((t) => t.stop());
@@ -790,6 +831,9 @@ export class WebRTCManager {
           this.applyVideoSenderParams(ctx.camSender, this.meshCamProfile().mbps, 30, 'motion', this.meshCamProfile().scale);
         }
       }
+      if (this.sfu && track) {
+        this.sfu.produce('cam', track, this.camProduceOptions()).catch((err) => console.warn('[SFU] câmera:', err));
+      }
 
       this.socket?.emit('voice:media-state', { cameraOn: true });
       this.emitLocalState();
@@ -826,6 +870,7 @@ export class WebRTCManager {
     for (const ctx of this.peers.values()) {
       if (ctx.camSender) await ctx.camSender.replaceTrack(track).catch(() => {});
     }
+    if (this.sfu) await this.sfu.replaceTrack('cam', track).catch(() => {});
     this.camStream = stream;
     old.getTracks().forEach((t) => {
       t.onended = null;
@@ -847,6 +892,7 @@ export class WebRTCManager {
         ctx.camSender = null;
       }
     }
+    this.sfu?.closeProducer('cam').catch(() => {});
 
     this.broadcastStreamsMeta();
     this.socket?.emit('voice:media-state', { cameraOn: false });
@@ -949,6 +995,9 @@ export class WebRTCManager {
           await this.applyAudioSenderParams(ctx.screenAudioSender, 192_000);
         }
       }
+      if (this.sfu) {
+        this.produceScreenToSfu().catch((err) => console.warn('[SFU] tela:', err));
+      }
 
       this.socket?.emit('voice:media-state', {
         screenSharing: true,
@@ -990,6 +1039,8 @@ export class WebRTCManager {
         ctx.screenAudioSender = null;
       }
     }
+    this.sfu?.closeProducer('screen').catch(() => {});
+    this.sfu?.closeProducer('screen-audio').catch(() => {});
 
     this.broadcastStreamsMeta();
     this.socket?.emit('voice:media-state', {
@@ -1443,22 +1494,459 @@ export class WebRTCManager {
     if (changed) this.emitPeersState();
   }
 
+  // ---- SFU (mediasoup) ----
+
+  /** A mídia desta call passa pelo SFU do servidor (em vez da malha P2P)? */
+  get usingSfu(): boolean {
+    return this.sfuCaps !== null;
+  }
+
+  private closeMeshPeers() {
+    for (const ctx of this.peers.values()) {
+      ctx.vadCleanup?.();
+      if (ctx.iceRecoverTimer) window.clearTimeout(ctx.iceRecoverTimer);
+      try {
+        ctx.rcChannel?.close();
+        ctx.rcFastChannel?.close();
+        ctx.pc.close();
+      } catch {}
+    }
+    this.peers.clear();
+    this.pendingIceCandidates.clear();
+    this.pendingRemoteMeta.clear();
+    if (this.meshRebalanceTimer) {
+      window.clearTimeout(this.meshRebalanceTimer);
+      this.meshRebalanceTimer = null;
+    }
+  }
+
+  private micProduceOptions(): SfuProduceOptions {
+    const bps = this.settings.inputProfile === 'studio' ? 160_000 : 128_000;
+    return {
+      encodings: [{ maxBitrate: bps }],
+      codecOptions: { opusStereo: false, opusFec: true, opusDtx: false, opusMaxAverageBitrate: bps },
+    };
+  }
+
+  /** Câmera com simulcast: 3 camadas; o servidor manda para cada pessoa a que cabe na rede/tela dela. */
+  private camProduceOptions(): SfuProduceOptions {
+    return {
+      preferCodecs: ['video/VP8', 'video/VP9', 'video/H264'],
+      encodings: [
+        { rid: 'r0', scaleResolutionDownBy: 4, maxBitrate: 150_000, maxFramerate: 15, scalabilityMode: 'L1T3' },
+        { rid: 'r1', scaleResolutionDownBy: 2, maxBitrate: 600_000, maxFramerate: 30, scalabilityMode: 'L1T3' },
+        { rid: 'r2', scaleResolutionDownBy: 1, maxBitrate: 2_500_000, maxFramerate: 30, scalabilityMode: 'L1T3' },
+      ],
+      codecOptions: { videoGoogleStartBitrate: 1000 },
+    };
+  }
+
+  /** Teto da tela no SFU: uma camada só, e todo mundo recebe a mesma; acima disso quem tem rede pior trava. */
+  private sfuScreenCapMbps() {
+    return 12;
+  }
+
+  private async produceScreenToSfu() {
+    const s = this.sfu;
+    const cfg = this.screenConfig;
+    const stream = this.screenStream;
+    if (!s || !cfg || !stream) return;
+    const vTrack = stream.getVideoTracks()[0];
+    const aTrack = stream.getAudioTracks()[0];
+    const mbps = Math.min(this.adaptiveBitrateMbps, this.sfuScreenCapMbps());
+    const jobs: Promise<unknown>[] = [];
+    if (vTrack) {
+      jobs.push(
+        s
+          .produce('screen', vTrack, {
+            // H264 primeiro, como na malha: costuma ter codificador por hardware (menos CPU em jogo)
+            preferCodecs: ['video/H264', 'video/VP9', 'video/VP8'],
+            encodings: [{ maxBitrate: Math.round(mbps * 1_000_000), maxFramerate: cfg.fps }],
+            codecOptions: { videoGoogleStartBitrate: 2500 },
+          })
+          .then((producer) => {
+            if (producer?.rtpSender && this.screenConfig) {
+              return this.applyVideoSenderParams(producer.rtpSender, mbps, this.screenConfig.fps, this.screenConfig.contentMode);
+            }
+          })
+      );
+    }
+    if (aTrack) {
+      jobs.push(
+        s.produce('screen-audio', aTrack, {
+          encodings: [{ maxBitrate: 192_000 }],
+          codecOptions: { opusStereo: true, opusFec: true, opusMaxAverageBitrate: 192_000 },
+        })
+      );
+    }
+    await Promise.all(jobs);
+  }
+
+  /** Envia ao SFU tudo o que já está ligado (microfone, câmera, tela). */
+  private async publishAllToSfu() {
+    const s = this.sfu;
+    if (!s) return;
+    const warn = (what: string) => (err: unknown) => console.warn(`[SFU] ${what}:`, err);
+    const jobs: Promise<unknown>[] = [];
+    const mic = this.micStream?.getAudioTracks()[0];
+    if (mic) jobs.push(s.produce('mic', mic, this.micProduceOptions()).catch(warn('microfone')));
+    const cam = this.camStream?.getVideoTracks()[0];
+    if (cam) jobs.push(s.produce('cam', cam, this.camProduceOptions()).catch(warn('câmera')));
+    if (this.screenStream && this.screenConfig) jobs.push(this.produceScreenToSfu().catch(warn('tela')));
+    await Promise.all(jobs);
+  }
+
+  private ensureSfuPeer(socketId: string): SfuPeer {
+    let p = this.sfuPeers.get(socketId);
+    if (!p) {
+      p = {
+        media: {
+          socketId,
+          micStream: null,
+          camStream: null,
+          screenStream: null,
+          screenAudioStream: null,
+          connectionState: this.sfu?.connectionState === 'connected' ? 'connected' : 'connecting',
+          speaking: false,
+          screenStats: null,
+          camStats: null,
+          dataChannelOpen: false,
+          viaSfu: true,
+        },
+        tracks: new Map(),
+        prevScreenBytes: 0,
+        prevScreenTs: 0,
+        prevCamBytes: 0,
+        prevCamTs: 0,
+      };
+      this.sfuPeers.set(socketId, p);
+    }
+    return p;
+  }
+
+  private async startSfu(attempt = 0): Promise<void> {
+    const caps = this.sfuCaps;
+    const socket = this.socket;
+    const channelId = this.activeChannelId;
+    if (!caps || !socket || !channelId || this.sfu) return;
+    if (this.sfuRetryTimer) {
+      window.clearTimeout(this.sfuRetryTimer);
+      this.sfuRetryTimer = null;
+    }
+    this.closeMeshPeers();
+
+    const session = new SfuSession(socket, this.getIceServers(), {
+      onTrack: (sid, source, track, consumerId) => this.onSfuTrack(sid, source, track, consumerId),
+      onTrackEnded: (sid, source, consumerId) => this.onSfuTrackEnded(sid, source, consumerId),
+      onStateChange: (state) => {
+        for (const p of this.sfuPeers.values()) p.media.connectionState = state;
+        this.emitPeersState();
+      },
+      onFatal: () => {
+        if (this.sfu !== session) return;
+        this.callbacks.onError('A conexão com o servidor de mídia caiu e não voltou. Saia e entre na call de novo.');
+      },
+    });
+    this.sfu = session;
+    for (const id of this.roomPeers.keys()) this.ensureSfuPeer(id);
+    this.emitPeersState();
+
+    try {
+      await session.start(caps);
+      if (this.sfu !== session) return;
+      await this.publishAllToSfu();
+    } catch (err) {
+      if (this.sfu !== session) return;
+      console.error('[SFU] falha ao conectar ao servidor de mídia:', err);
+      this.stopSfu();
+      if (attempt < 2 && this.sfuCaps === caps && this.activeChannelId === channelId) {
+        // servidor ocupado / pacote perdido: tenta de novo sem sair da call
+        this.sfuRetryTimer = window.setTimeout(() => {
+          this.sfuRetryTimer = null;
+          if (this.sfuCaps === caps && this.activeChannelId === channelId) this.startSfu(attempt + 1).catch(() => {});
+        }, 1500 * (attempt + 1));
+      } else {
+        this.callbacks.onError(
+          'Não foi possível conectar ao servidor de mídia (SFU) desta call. O dono do servidor precisa liberar as portas UDP do SFU no firewall.'
+        );
+      }
+    }
+  }
+
+  private stopSfu() {
+    if (this.sfuRetryTimer) {
+      window.clearTimeout(this.sfuRetryTimer);
+      this.sfuRetryTimer = null;
+    }
+    const s = this.sfu;
+    this.sfu = null;
+    s?.close();
+    for (const p of this.sfuPeers.values()) p.vadCleanup?.();
+    this.sfuPeers.clear();
+    this.sfuCamLayers.clear();
+  }
+
+  /** O servidor trocou o modo da call (ficou cheia -> SFU; SFU caiu ou entrou app antigo -> malha). */
+  private handleSfuMode = ({
+    channelId,
+    enabled,
+    routerRtpCapabilities,
+  }: {
+    channelId: string;
+    enabled: boolean;
+    routerRtpCapabilities?: RouterRtpCapabilities;
+  }) => {
+    if (!this.activeChannelId || channelId !== this.activeChannelId) return;
+    if (enabled && routerRtpCapabilities) {
+      if (this.sfuCaps || !sfuSupported()) return;
+      this.sfuCaps = routerRtpCapabilities;
+      this.startSfu().catch(() => {});
+    } else if (!enabled && this.sfuCaps) {
+      this.sfuCaps = null;
+      this.stopSfu();
+      // de volta à malha: conexão P2P com cada um. Todos trocam ao mesmo tempo, então só um lado de cada
+      // par faz a oferta (ofertas cruzadas com os DataChannels pré-negociados falham no Chrome: "SCTP transport").
+      for (const [id, meta] of this.roomPeers) {
+        const waitForOffer = this.selfSocketId < id;
+        const ctx = this.createPeerConnection(id, meta, waitForOffer);
+        if (waitForOffer) this.armInitialOfferFallback(ctx);
+      }
+      this.emitPeersState();
+    }
+  };
+
+  private onSfuTrack(socketId: string, source: SfuSource, track: MediaStreamTrack, consumerId: string) {
+    if (!this.sfu) return;
+    const p = this.ensureSfuPeer(socketId);
+    p.tracks.set(consumerId, { source, trackId: track.id });
+    const stream = new MediaStream([track]);
+    if (source === 'mic') {
+      p.media.micStream = stream;
+      p.vadCleanup?.();
+      p.vadCleanup = this.setupRemoteVad(stream, (speaking) => {
+        // só o anel do avatar (speakingStore), sem re-renderizar o app
+        p.media.speaking = speaking;
+        setSpeaking(socketId, speaking);
+      });
+    } else if (source === 'cam') {
+      p.media.camStream = stream;
+      this.updateSfuCamLayers();
+    } else if (source === 'screen') {
+      p.media.screenStream = stream;
+    } else if (source === 'screen-audio') {
+      p.media.screenAudioStream = stream;
+    }
+    this.emitPeersState();
+  }
+
+  private onSfuTrackEnded(socketId: string, source: SfuSource, consumerId: string) {
+    const p = this.sfuPeers.get(socketId);
+    const info = p?.tracks.get(consumerId);
+    if (!p || !info) return;
+    p.tracks.delete(consumerId);
+    this.sfuCamLayers.delete(consumerId);
+    const same = (s: MediaStream | null) => Boolean(s && s.getTracks().some((t) => t.id === info.trackId));
+    if (source === 'mic' && same(p.media.micStream)) {
+      p.media.micStream = null;
+      p.media.speaking = false;
+      p.vadCleanup?.();
+      p.vadCleanup = undefined;
+    } else if (source === 'cam' && same(p.media.camStream)) {
+      p.media.camStream = null;
+      p.media.camStats = null;
+      this.updateSfuCamLayers();
+    } else if (source === 'screen' && same(p.media.screenStream)) {
+      p.media.screenStream = null;
+      p.media.screenStats = null;
+    } else if (source === 'screen-audio' && same(p.media.screenAudioStream)) {
+      p.media.screenAudioStream = null;
+    }
+    this.emitPeersState();
+  }
+
+  /** Muitas câmeras na tela = cada uma pequena: pede ao servidor a camada menor do simulcast (menos download). */
+  private updateSfuCamLayers() {
+    const s = this.sfu;
+    if (!s) return;
+    const cams = s.getConsumers().filter((c) => c.source === 'cam');
+    const layer = cams.length <= 2 ? 2 : cams.length <= 6 ? 1 : 0;
+    for (const c of cams) {
+      if (this.sfuCamLayers.get(c.consumer.id) === layer) continue;
+      this.sfuCamLayers.set(c.consumer.id, layer);
+      s.setPreferredLayers(c.consumer.id, layer);
+    }
+  }
+
+  private async pollSfuStats() {
+    const s = this.sfu;
+    if (!s) return;
+    let peersDirty = false;
+
+    if (this.screenStream && this.screenConfig) {
+      const trackSettings = this.screenStream.getVideoTracks()[0]?.getSettings();
+      const producer = s.getProducer('screen');
+      let updated = false;
+      if (producer) {
+        const stats = await producer.getStats();
+        const codecs = new Map<string, string>();
+        const localCandidates = new Map<string, string>();
+        let rttMs = 0;
+        let packetsLost = 0;
+        let isLan = false;
+        stats.forEach((r) => {
+          if (r.type === 'codec' && r.mimeType) codecs.set(r.id, String(r.mimeType).replace('video/', '').toUpperCase());
+          if (r.type === 'local-candidate' && r.candidateType) localCandidates.set(r.id, r.candidateType);
+        });
+        stats.forEach((r) => {
+          if (r.type === 'remote-inbound-rtp' && r.kind === 'video') {
+            packetsLost += Number(r.packetsLost || 0);
+            if (typeof r.roundTripTime === 'number') rttMs = Math.round(r.roundTripTime * 1000);
+          }
+          if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated !== false) {
+            if (typeof r.currentRoundTripTime === 'number') rttMs = Math.round(r.currentRoundTripTime * 1000);
+            if (r.localCandidateId && localCandidates.get(r.localCandidateId) === 'host') isLan = true;
+          }
+        });
+        stats.forEach((r) => {
+          if (updated || r.type !== 'outbound-rtp' || r.kind !== 'video') return;
+          const packetsSent = Number(r.packetsSent || 0);
+          const bytes = Number(r.bytesSent || 0);
+          const ts = Number(r.timestamp || performance.now());
+          let mbps = this.localScreenStats?.bitrateMbps || 0;
+          if (this.prevOutboundScreenTs > 0 && ts > this.prevOutboundScreenTs) {
+            mbps = Number(((Math.max(0, bytes - this.prevOutboundScreenBytes) * 8) / ((ts - this.prevOutboundScreenTs) / 1000) / 1_000_000).toFixed(2));
+          }
+          this.prevOutboundScreenBytes = bytes;
+          this.prevOutboundScreenTs = ts;
+
+          if (this.screenConfig?.qualityMode === 'auto') {
+            const dSent = Math.max(1, packetsSent - this.prevPacketsSent);
+            const dLost = Math.max(0, packetsLost - this.prevPacketsLost);
+            const next = this.nextAdaptiveBitrate(dLost / (dSent + dLost), rttMs, isLan);
+            if (Math.abs(next - this.adaptiveBitrateMbps) >= 1) {
+              this.adaptiveBitrateMbps = next;
+              if (producer.rtpSender && this.screenConfig) {
+                this.applyVideoSenderParams(
+                  producer.rtpSender,
+                  Math.min(next, this.sfuScreenCapMbps()),
+                  this.screenConfig.fps,
+                  this.screenConfig.contentMode
+                );
+              }
+            }
+          }
+          this.prevPacketsSent = packetsSent;
+          this.prevPacketsLost = packetsLost;
+          this.localScreenStats = {
+            width: Number(r.frameWidth || trackSettings?.width || 0),
+            height: Number(r.frameHeight || trackSettings?.height || 0),
+            fps: Math.round(Number(r.framesPerSecond || trackSettings?.frameRate || 0)),
+            bitrateMbps: mbps,
+            codec: ((r.codecId && codecs.get(r.codecId)) || 'VIDEO') + ' · SFU',
+            rttMs,
+            adaptiveTargetMbps: this.screenConfig?.qualityMode === 'auto' ? this.adaptiveBitrateMbps : undefined,
+          };
+          updated = true;
+        });
+      }
+      if (!updated && trackSettings) {
+        this.localScreenStats = {
+          width: Number(trackSettings.width || 0),
+          height: Number(trackSettings.height || 0),
+          fps: Math.round(Number(trackSettings.frameRate || 0)),
+          bitrateMbps: 0,
+          codec: 'Conectando ao SFU',
+          rttMs: 0,
+          adaptiveTargetMbps: this.screenConfig.qualityMode === 'auto' ? this.adaptiveBitrateMbps : undefined,
+        };
+      }
+      this.emitLocalState();
+    }
+
+    for (const entry of s.getConsumers()) {
+      if (entry.consumer.kind !== 'video' || entry.consumer.closed) continue;
+      const p = this.sfuPeers.get(entry.socketId);
+      if (!p) continue;
+      const stats = await entry.consumer.getStats();
+      const codecs = new Map<string, string>();
+      let rttMs = 0;
+      stats.forEach((r) => {
+        if (r.type === 'codec' && r.mimeType) codecs.set(r.id, String(r.mimeType).replace('video/', '').toUpperCase());
+        if (r.type === 'candidate-pair' && r.state === 'succeeded' && typeof r.currentRoundTripTime === 'number') {
+          rttMs = Math.round(r.currentRoundTripTime * 1000);
+        }
+      });
+      stats.forEach((r) => {
+        if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
+        const bytes = Number(r.bytesReceived || 0);
+        const ts = Number(r.timestamp || performance.now());
+        const isScreen = entry.source === 'screen';
+        const prevBytes = isScreen ? p.prevScreenBytes : p.prevCamBytes;
+        const prevTs = isScreen ? p.prevScreenTs : p.prevCamTs;
+        const prevStats = isScreen ? p.media.screenStats : p.media.camStats;
+        let mbps = prevStats?.bitrateMbps || 0;
+        if (prevTs > 0 && ts > prevTs) {
+          mbps = Number(((Math.max(0, bytes - prevBytes) * 8) / ((ts - prevTs) / 1000) / 1_000_000).toFixed(2));
+        }
+        const next = {
+          width: Number(r.frameWidth || 0),
+          height: Number(r.frameHeight || 0),
+          fps: Math.round(Number(r.framesPerSecond || 0)),
+          bitrateMbps: mbps,
+          codec: ((r.codecId && codecs.get(r.codecId)) || 'VIDEO') + ' · SFU',
+          rttMs,
+        };
+        if (isScreen) {
+          p.prevScreenBytes = bytes;
+          p.prevScreenTs = ts;
+          p.media.screenStats = next;
+        } else {
+          p.prevCamBytes = bytes;
+          p.prevCamTs = ts;
+          p.media.camStats = next;
+        }
+        peersDirty = true;
+      });
+    }
+
+    if (peersDirty) this.emitPeersState();
+  }
+
   // ---- Socket Event Handlers ----
   private handlePeerJoined = ({ peer }: { channelId: string; peer: VoiceParticipant }) => {
     if (!this.activeChannelId || peer.socketId === this.selfSocketId) return;
+    this.roomPeers.set(peer.socketId, peer.streamsMeta || null);
+    if (this.sfuCaps) {
+      // no SFU não há conexão por pessoa: a mídia dela chega quando ela começar a enviar (sfu:new-producer)
+      this.ensureSfuPeer(peer.socketId);
+      this.emitPeersState();
+      return;
+    }
     const ctx = this.createPeerConnection(peer.socketId, peer.streamsMeta || null, true);
+    this.armInitialOfferFallback(ctx);
+    this.emitPeersState();
+  };
+
+  /** Esperando a oferta do outro lado; se ela não vier em 2,5 s, oferece daqui. */
+  private armInitialOfferFallback(ctx: PeerContext) {
     window.setTimeout(() => {
-      if (ctx.awaitingInitialOffer && this.peers.get(peer.socketId) === ctx) {
+      if (ctx.awaitingInitialOffer && this.peers.get(ctx.socketId) === ctx) {
         ctx.awaitingInitialOffer = false;
         if (ctx.pc.signalingState === 'stable' && !ctx.pc.remoteDescription) {
           ctx.pc.onnegotiationneeded?.(new Event('negotiationneeded'));
         }
       }
     }, 2500);
-    this.emitPeersState();
-  };
+  }
 
   private handlePeerLeft = ({ socketId }: { channelId: string; socketId: string }) => {
+    this.roomPeers.delete(socketId);
+    const sp = this.sfuPeers.get(socketId);
+    if (sp) {
+      sp.vadCleanup?.();
+      this.sfuPeers.delete(socketId);
+      this.emitPeersState();
+    }
     const ctx = this.peers.get(socketId);
     this.pendingIceCandidates.delete(socketId);
     this.pendingRemoteMeta.delete(socketId);
@@ -1475,6 +1963,9 @@ export class WebRTCManager {
   };
 
   private handleStreamsMeta = ({ fromSocketId, meta }: { fromSocketId: string; meta: StreamsMeta | null }) => {
+    if (this.roomPeers.has(fromSocketId)) this.roomPeers.set(fromSocketId, meta);
+    // no SFU cada faixa já chega dizendo de que fonte é (mic/cam/tela)
+    if (this.sfuCaps) return;
     const ctx = this.peers.get(fromSocketId);
     if (!ctx) {
       this.pendingRemoteMeta.set(fromSocketId, meta);
@@ -1491,7 +1982,7 @@ export class WebRTCManager {
     fromSocketId: string;
     description: RTCSessionDescriptionInit;
   }) => {
-    if (!this.activeChannelId) return;
+    if (!this.activeChannelId || this.sfuCaps) return;
     const ctx = this.createPeerConnection(fromSocketId, null, false);
     ctx.awaitingInitialOffer = false;
     const { pc } = ctx;
@@ -1548,7 +2039,7 @@ export class WebRTCManager {
     fromSocketId: string;
     candidate: RTCIceCandidateInit;
   }) => {
-    if (!candidate) return;
+    if (!candidate || this.sfuCaps) return;
     const ctx = this.peers.get(fromSocketId);
     if (!ctx || !ctx.pc.remoteDescription || !ctx.pc.localDescription) {
       const list = this.pendingIceCandidates.get(fromSocketId) || [];
@@ -1567,14 +2058,33 @@ export class WebRTCManager {
   private startStatsLoop() {
     if (this.statsTimer) window.clearInterval(this.statsTimer);
     this.statsTimer = window.setInterval(() => {
-      if (!this.screenStream && !Array.from(this.peers.values()).some((c) => c.media.screenStream || c.media.camStream)) {
+      if (
+        !this.screenStream &&
+        !Array.from(this.peers.values()).some((c) => c.media.screenStream || c.media.camStream) &&
+        !Array.from(this.sfuPeers.values()).some((p) => p.media.screenStream || p.media.camStream)
+      ) {
         return; // Skip expensive WebRTC getStats() when pure voice/idle!
       }
       this.pollStats().catch(() => {});
     }, 2000);
   }
 
+  /** Controle automático de bitrate da tela: desce rápido com perda/atraso, sobe devagar quando a rede deixa. */
+  private nextAdaptiveBitrate(lossRatio: number, rttMs: number, isLan: boolean): number {
+    const lanCeiling = this.screenConfig?.lowLatencyGaming !== false ? 28 : 20;
+    let nextTarget = this.adaptiveBitrateMbps;
+    if (lossRatio > 0.035 || rttMs > 110) {
+      nextTarget = Math.max(3, Math.round(this.adaptiveBitrateMbps * 0.72 * 10) / 10);
+    } else if (isLan && rttMs < 20 && lossRatio < 0.005) {
+      nextTarget = Math.min(lanCeiling, this.adaptiveBitrateMbps + 2);
+    } else if (rttMs < 55 && lossRatio < 0.01) {
+      nextTarget = Math.min(16, this.adaptiveBitrateMbps + 1);
+    }
+    return nextTarget;
+  }
+
   private async pollStats() {
+    if (this.sfu) return this.pollSfuStats();
     let peersDirty = false;
 
     if (this.screenStream && this.screenConfig) {
@@ -1628,15 +2138,7 @@ export class WebRTCManager {
               const dLost = Math.max(0, packetsLost - this.prevPacketsLost);
               const lossRatio = dLost / (dSent + dLost);
 
-              let nextTarget = this.adaptiveBitrateMbps;
-              const lanCeiling = this.screenConfig.lowLatencyGaming !== false ? 28 : 20;
-              if (lossRatio > 0.035 || rttMs > 110) {
-                nextTarget = Math.max(3, Math.round((this.adaptiveBitrateMbps * 0.72) * 10) / 10);
-              } else if (isLocalLanCandidate && rttMs < 20 && lossRatio < 0.005) {
-                nextTarget = Math.min(lanCeiling, this.adaptiveBitrateMbps + 2);
-              } else if (rttMs < 55 && lossRatio < 0.01) {
-                nextTarget = Math.min(16, this.adaptiveBitrateMbps + 1);
-              }
+              const nextTarget = this.nextAdaptiveBitrate(lossRatio, rttMs, isLocalLanCandidate);
 
               if (Math.abs(nextTarget - this.adaptiveBitrateMbps) >= 1) {
                 this.adaptiveBitrateMbps = nextTarget;

@@ -16,6 +16,11 @@ table inet pulsecord {
 		#tcp dport { 80, 443 } accept
 		#udp dport 443 accept
 
+		# SFU (PULSECORD_SFU=1/auto): mídia das chamadas grandes. Mesma faixa de
+		# PULSECORD_SFU_RTC_MIN_PORT/MAX_PORT. O TCP só é usado por quem não consegue UDP.
+		#udp dport 40000-40999 accept
+		#tcp dport 40000-40999 accept
+
 		# TURN (coturn)
 		#tcp dport 3478 accept
 		#udp dport { 3478, 49160-49200 } accept

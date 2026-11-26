@@ -63,6 +63,22 @@ if ($AbrirFirewall) {
   # a regra vale para IPv4 e IPv6
   New-NetFirewallRule -DisplayName "PulseCord Server TCP $Porta" -Direction Inbound -Protocol TCP -LocalPort $Porta -Action Allow -Profile Any | Out-Null
   Write-Host "Firewall: porta TCP $Porta liberada (entrada, IPv4 e IPv6)."
+  # SFU ligado no pulsecord.env: libera também a faixa de mídia (UDP, e TCP para redes que bloqueiam UDP)
+  $sfuMin = 40000; $sfuMax = 40999; $sfuOn = $false
+  if (Test-Path $EnvFile) {
+    foreach ($l in Get-Content $EnvFile) {
+      if ($l -match '^\s*PULSECORD_SFU\s*=\s*(1|on|true|auto)\s*$') { $sfuOn = $true }
+      if ($l -match '^\s*PULSECORD_SFU_RTC_MIN_PORT\s*=\s*(\d+)') { $sfuMin = [int]$Matches[1] }
+      if ($l -match '^\s*PULSECORD_SFU_RTC_MAX_PORT\s*=\s*(\d+)') { $sfuMax = [int]$Matches[1] }
+    }
+  }
+  if ($sfuOn) {
+    foreach ($proto in 'UDP', 'TCP') {
+      Remove-NetFirewallRule -DisplayName "PulseCord SFU $proto" -ErrorAction SilentlyContinue
+      New-NetFirewallRule -DisplayName "PulseCord SFU $proto" -Direction Inbound -Protocol $proto -LocalPort "$sfuMin-$sfuMax" -Action Allow -Profile Any | Out-Null
+    }
+    Write-Host "Firewall: SFU liberado em UDP/TCP $sfuMin-$sfuMax (entrada, IPv4 e IPv6)."
+  }
 }
 
 $nodeArgs = @()
