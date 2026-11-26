@@ -324,6 +324,7 @@ export class ApiClient {
     clearInvitePassword?: boolean;
     allowMembersCreateChannels?: boolean;
     tenorApiKey?: string;
+    klipyApiKey?: string;
     giphyApiKey?: string;
     youtubeCookies?: string;
   }) {
@@ -611,7 +612,7 @@ export class ApiClient {
   }
 
   searchGifs(query: string) {
-    return this.request<{ provider: string; savedGifs: GifItem[]; results: GifItem[] }>(
+    return this.request<{ provider: string; savedGifs: GifItem[]; results: GifItem[]; error?: string | null }>(
       `/api/gifs?q=${encodeURIComponent(query)}`
     );
   }

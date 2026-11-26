@@ -12,7 +12,13 @@ export type UiToneType =
   | 'unmute'
   | 'deafen_on'
   | 'deafen_off'
-  | 'muted_speaking_warning';
+  | 'muted_speaking_warning'
+  | 'message'
+  | 'message_dm'
+  | 'recording_on'
+  | 'recording_off';
+
+const UI_TONE_BOOST = 2.1;
 
 export class AudioEngine {
   private serverUrl = '';
@@ -292,7 +298,7 @@ export class AudioEngine {
    */
   playUiTone(type: UiToneType) {
     // Allow user to always hear deafen toggle, mute feedback, leave, and muted-speaking alert!
-    if (this.deafened && type === 'join') return;
+    if (this.deafened && (type === 'join' || type === 'message' || type === 'message_dm')) return;
     try {
       if (!this.uiCtx || this.uiCtx.state === 'closed') this.uiCtx = new AudioContext();
       const ctx = this.uiCtx;
@@ -307,6 +313,8 @@ export class AudioEngine {
         gainPeak = 0.08,
         wave: OscillatorType = 'sine'
       ) => {
+        // sons de aviso mais altos (antes ficavam baixos demais perto da voz da call)
+        gainPeak = Math.min(0.32, gainPeak * UI_TONE_BOOST);
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = wave;
@@ -351,6 +359,27 @@ export class AudioEngine {
           playNote(240, 260, 0, 0.07, 0.075, 'sine');
           playNote(370, 390, 0.06, 0.075, 0.08, 'sine');
           playNote(520, 550, 0.12, 0.12, 0.085, 'triangle');
+          break;
+        case 'message':
+          // "plim" curto de mensagem num canal
+          playNote(880, 880, 0, 0.09, 0.07);
+          playNote(1174.66, 1174.66, 0.07, 0.16, 0.065);
+          break;
+        case 'message_dm':
+          // DM: três notas, para diferenciar de canal
+          playNote(783.99, 783.99, 0, 0.08, 0.07);
+          playNote(1046.5, 1046.5, 0.07, 0.08, 0.07);
+          playNote(1318.51, 1318.51, 0.14, 0.16, 0.065);
+          break;
+        case 'recording_on':
+          // alerta de gravação: dois bipes agudos + nota longa
+          playNote(988, 988, 0, 0.12, 0.1, 'square');
+          playNote(988, 988, 0.18, 0.12, 0.1, 'square');
+          playNote(1318.51, 1318.51, 0.36, 0.32, 0.09, 'triangle');
+          break;
+        case 'recording_off':
+          playNote(1318.51, 1318.51, 0, 0.12, 0.08, 'triangle');
+          playNote(659.25, 659.25, 0.12, 0.22, 0.08, 'triangle');
           break;
         case 'muted_speaking_warning':
           // Gentle Discord double-blip warning when talking with muted mic

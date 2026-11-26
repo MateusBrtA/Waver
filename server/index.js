@@ -514,6 +514,7 @@ export function createPulseCordServer(options = {}) {
       hasInvitePassword: Boolean(db.server.hasInvitePassword && db.server.invitePasswordHash),
       allowMembersCreateChannels: db.server.allowMembersCreateChannels !== false,
       hasTenorKey: Boolean(db.server.tenorApiKey),
+      hasKlipyKey: Boolean(db.server.klipyApiKey),
       hasGiphyKey: Boolean(db.server.giphyApiKey),
       hasYoutubeCookies: hasYouTubeCookies(DATA_DIR),
     };
@@ -855,15 +856,20 @@ export function createPulseCordServer(options = {}) {
     }
   }
 
-  function getMembersPayload() {
+  // viewerId: quem vai receber a lista. Só a própria pessoa vê que está Invisível e o que está fazendo.
+  function getMembersPayload(viewerId = null) {
     const db = getDb();
     return db.users.map((u) => {
       const isOnline = onlineUsers.has(u.id) && onlineUsers.get(u.id).size > 0;
       const clean = sanitizeUser(u);
+      // Invisível: aparece offline e não mostra o que está fazendo (jogo, música, histórico de atividades)
+      const invisible = clean.statusType === 'invisible';
+      const hidden = invisible && u.id !== viewerId;
       return {
         ...clean,
-        online: isOnline && clean.statusType !== 'invisible',
-        actuallyConnected: isOnline,
+        ...(hidden ? { statusType: 'online', currentActivity: null, recentActivities: [] } : {}),
+        online: isOnline && !invisible,
+        actuallyConnected: hidden ? false : isOnline,
       };
     });
   }
@@ -872,6 +878,17 @@ export function createPulseCordServer(options = {}) {
   // a lista inteira de membros/salas não é serializada e enviada a todos várias vezes seguidas.
   let usersBroadcastTimer = null;
   let roomsBroadcastTimer = null;
+// Um único emoji (grafema inteiro: não corta sequências como 👨‍👩‍👧 ou bandeiras no meio)
+const emojiSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter('en', { granularity: 'grapheme' }) : null;
+function oneEmoji(v, maxUnits = 32) {
+  const str = String(v || '').trim();
+  if (!str) return '';
+  let g = '';
+  if (emojiSegmenter) g = emojiSegmenter.segment(str)[Symbol.iterator]().next().value?.segment || '';
+  else g = Array.from(str)[0] || '';
+  return g.length <= maxUnits && !/[<>\s]/.test(g) ? g : '';
+}
+
 // Atividade vinda do app (jogo, música): só campos conhecidos e com tamanho limitado
 function sanitizeActivity(a) {
   if (!a || typeof a !== 'object' || typeof a.name !== 'string' || !a.name.trim()) return null;
@@ -895,6 +912,14 @@ function sanitizeActivity(a) {
     usersBroadcastTimer = setTimeout(() => {
       usersBroadcastTimer = null;
       io.emit('users:update', getMembersPayload());
+      // quem está Invisível recebe logo depois a lista com a própria entrada sem máscara
+      for (const u of getDb().users) {
+        if (u.statusType !== 'invisible') continue;
+        const sids = onlineUsers.get(u.id);
+        if (!sids || !sids.size) continue;
+        const own = getMembersPayload(u.id);
+        for (const sid of sids) io.sockets.sockets.get(sid)?.emit('users:update', own);
+      }
     }, 50);
   }
 
@@ -1544,7 +1569,7 @@ function sanitizeActivity(a) {
     if (typeof b.bio === 'string') req.user.bio = b.bio.trim().slice(0, 220);
     if (typeof b.pronouns === 'string') req.user.pronouns = b.pronouns.trim().slice(0, 40);
     if (['online', 'idle', 'dnd', 'invisible'].includes(b.statusType)) req.user.statusType = b.statusType;
-    if (typeof b.customStatusEmoji === 'string') req.user.customStatusEmoji = b.customStatusEmoji.trim().slice(0, 8);
+    if (typeof b.customStatusEmoji === 'string') req.user.customStatusEmoji = oneEmoji(b.customStatusEmoji);
     if (typeof b.customStatusText === 'string') req.user.customStatusText = b.customStatusText.trim().slice(0, 64);
     if (typeof b.avatarDecoration === 'string') req.user.avatarDecoration = b.avatarDecoration.slice(0, 24);
     if (typeof b.nameStyle === 'string') req.user.nameStyle = b.nameStyle.slice(0, 24);
@@ -1582,7 +1607,7 @@ function sanitizeActivity(a) {
     if (typeof b.bio === 'string') req.user.bio = b.bio.trim().slice(0, 220);
     if (typeof b.pronouns === 'string') req.user.pronouns = b.pronouns.trim().slice(0, 40);
     if (['online', 'idle', 'dnd', 'invisible'].includes(b.statusType)) req.user.statusType = b.statusType;
-    if (typeof b.customStatusEmoji === 'string') req.user.customStatusEmoji = b.customStatusEmoji.trim().slice(0, 8);
+    if (typeof b.customStatusEmoji === 'string') req.user.customStatusEmoji = oneEmoji(b.customStatusEmoji);
     if (typeof b.customStatusText === 'string') req.user.customStatusText = b.customStatusText.trim().slice(0, 64);
     if (typeof b.avatarDecoration === 'string') req.user.avatarDecoration = b.avatarDecoration.slice(0, 24);
     if (typeof b.nameStyle === 'string') req.user.nameStyle = b.nameStyle.slice(0, 24);
@@ -2088,6 +2113,7 @@ function sanitizeActivity(a) {
       clearInvitePassword,
       allowMembersCreateChannels,
       tenorApiKey,
+      klipyApiKey,
       giphyApiKey,
       youtubeCookies,
     } = req.body || {};
@@ -2102,7 +2128,7 @@ function sanitizeActivity(a) {
       db.server.tags = tags
         .slice(0, 5)
         .filter((t) => t && t.label)
-        .map((t) => ({ emoji: String(t.emoji || '✨').slice(0, 6), label: String(t.label).trim().slice(0, 24) }));
+        .map((t) => ({ emoji: oneEmoji(t.emoji) || '✨', label: String(t.label).trim().slice(0, 24) }));
     }
     if (clearInvitePassword === true) {
       db.server.invitePasswordHash = null;
@@ -2113,7 +2139,8 @@ function sanitizeActivity(a) {
     }
     if (typeof allowMembersCreateChannels === 'boolean') db.server.allowMembersCreateChannels = allowMembersCreateChannels;
     if (typeof tenorApiKey === 'string') db.server.tenorApiKey = tenorApiKey.trim();
-    if (typeof giphyApiKey === 'string') db.server.giphyApiKey = giphyApiKey.trim();
+    if (typeof giphyApiKey === 'string') db.server.giphyApiKey = giphyApiKey.trim().slice(0, 200);
+    if (typeof klipyApiKey === 'string') db.server.klipyApiKey = klipyApiKey.trim().slice(0, 200);
     if (typeof youtubeCookies === 'string') {
       try {
         setYouTubeCookies(DATA_DIR, youtubeCookies.slice(0, 512 * 1024));
@@ -3131,7 +3158,7 @@ function sanitizeActivity(a) {
     if (!req.file) return res.status(400).json({ error: 'Envie um arquivo de áudio (MP3, WAV, OGG, WEBM).' });
     const db = getDb();
     const name = String(req.body?.name || path.parse(req.file.originalname).name || 'Som Novo').trim().slice(0, 32);
-    const emoji = String(req.body?.emoji || '🔊').trim().slice(0, 8);
+    const emoji = oneEmoji(req.body?.emoji) || '🔊';
     const color = /^#[0-9a-f]{6}$/i.test(req.body?.color || '') ? req.body.color : '#5865F2';
 
     const sound = {
@@ -3231,9 +3258,76 @@ function sanitizeActivity(a) {
   });
 
   // GIFs
+  // Busca na internet: KLIPY (substituto gratuito do Tenor, que o Google desligou em 30/06/2026) e GIPHY.
+  // As respostas externas são lidas com cuidado (só URLs https) e o erro vai para o app em vez de lista vazia muda.
+  const gifCache = new Map(); // `${provider}|${q}` -> { at, results }
+  const httpsUrl = (u) => (typeof u === 'string' && /^https:\/\/[^\s"'<>]+$/i.test(u) && u.length < 2000 ? u : null);
+  function klipyPick(item) {
+    // formato do KLIPY: file.{hd,md,sm,xs}.{gif,webp,mp4}.url (alguns campos podem faltar)
+    const f = item?.file || item?.files || {};
+    const at = (size, kind) => httpsUrl(f?.[size]?.[kind]?.url);
+    const url = at('md', 'gif') || at('hd', 'gif') || at('sm', 'gif') || at('xs', 'gif') || at('md', 'webp') || at('hd', 'webp');
+    const previewUrl = at('sm', 'gif') || at('xs', 'gif') || at('sm', 'webp') || at('xs', 'webp') || url;
+    return { url, previewUrl };
+  }
+  async function fetchGifJson(url) {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(6000), headers: { Accept: 'application/json' } });
+    let json = null;
+    try {
+      json = await resp.json();
+    } catch {}
+    if (!resp.ok) {
+      const msg =
+        (Array.isArray(json?.errors?.message) && json.errors.message[0]) ||
+        json?.meta?.msg ||
+        json?.message ||
+        `HTTP ${resp.status}`;
+      const err = new Error(String(msg).slice(0, 160));
+      err.status = resp.status;
+      throw err;
+    }
+    return json;
+  }
+  async function searchExternalGifs(db, q, customerId) {
+    if (db.server.klipyApiKey) {
+      const key = encodeURIComponent(db.server.klipyApiKey);
+      const base = `https://api.klipy.com/api/v1/${key}/gifs/${q ? 'search' : 'trending'}`;
+      const params = new URLSearchParams({ per_page: '24', page: '1', customer_id: customerId, locale: 'pt_BR', content_filter: 'medium' });
+      if (q) params.set('q', q);
+      const json = await fetchGifJson(`${base}?${params}`);
+      const list = Array.isArray(json?.data?.data) ? json.data.data : Array.isArray(json?.data) ? json.data : [];
+      return {
+        provider: 'klipy',
+        results: list
+          .filter((item) => item && item.type !== 'ad')
+          .map((item) => ({ id: `klipy-${String(item.id ?? item.slug ?? '').slice(0, 64)}`, title: String(item.title || 'GIF').slice(0, 100), ...klipyPick(item) }))
+          .filter((g) => g.url),
+      };
+    }
+    if (db.server.giphyApiKey) {
+      const key = encodeURIComponent(db.server.giphyApiKey);
+      const endpoint = q
+        ? `https://api.giphy.com/v1/gifs/search?api_key=${key}&q=${encodeURIComponent(q)}&limit=24&rating=pg-13&lang=pt`
+        : `https://api.giphy.com/v1/gifs/trending?api_key=${key}&limit=24&rating=pg-13`;
+      const json = await fetchGifJson(endpoint);
+      return {
+        provider: 'giphy',
+        results: (Array.isArray(json?.data) ? json.data : [])
+          .map((item) => ({
+            id: `giphy-${String(item.id || '').slice(0, 64)}`,
+            title: String(item.title || 'GIF').slice(0, 100),
+            url: httpsUrl(item.images?.original?.url) || httpsUrl(item.images?.downsized?.url),
+            previewUrl: httpsUrl(item.images?.fixed_width?.url) || httpsUrl(item.images?.original?.url),
+          }))
+          .filter((g) => g.url),
+      };
+    }
+    return { provider: db.server.tenorApiKey ? 'tenor-off' : 'local', results: [] };
+  }
+
   app.get('/api/gifs', requireAuth, async (req, res) => {
     const db = getDb();
-    const q = String(req.query.q || '').trim();
+    const q = String(req.query.q || '').trim().slice(0, 100);
     const qLower = q.toLowerCase();
 
     const savedGifs = qLower
@@ -3243,49 +3337,37 @@ function sanitizeActivity(a) {
       : db.savedGifs;
 
     let externalResults = [];
-    let provider = 'local';
-
-    try {
-      if (db.server.tenorApiKey) {
-        provider = 'tenor';
-        const endpoint = q
-          ? `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=${encodeURIComponent(db.server.tenorApiKey)}&limit=24&media_filter=gif,tinygif`
-          : `https://tenor.googleapis.com/v2/featured?key=${encodeURIComponent(db.server.tenorApiKey)}&limit=24&media_filter=gif,tinygif`;
-        const resp = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
-        if (resp.ok) {
-          const json = await resp.json();
-          externalResults = (json.results || [])
-            .map((item) => ({
-              id: `tenor-${item.id}`,
-              title: item.content_description || 'GIF',
-              url: item.media_formats?.gif?.url || item.media_formats?.tinygif?.url,
-              previewUrl: item.media_formats?.tinygif?.url || item.media_formats?.gif?.url,
-            }))
-            .filter((g) => g.url);
+    let provider = db.server.klipyApiKey ? 'klipy' : db.server.giphyApiKey ? 'giphy' : db.server.tenorApiKey ? 'tenor-off' : 'local';
+    let error = null;
+    const keyTag = crypto.createHash('sha256').update(String(db.server.klipyApiKey || db.server.giphyApiKey || '')).digest('hex').slice(0, 8);
+    const cacheKey = `${provider}|${keyTag}|${qLower}`;
+    const hit = gifCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < 5 * 60 * 1000) {
+      externalResults = hit.results;
+    } else {
+      try {
+        // id estável e anônimo para o KLIPY (não manda nome nem id real do usuário)
+        const customerId = crypto.createHash('sha256').update(`pulsecord-gif|${req.user.id}`).digest('hex').slice(0, 24);
+        const r = await searchExternalGifs(db, q, customerId);
+        provider = r.provider;
+        externalResults = r.results;
+        if (provider === 'klipy' || provider === 'giphy') {
+          if (gifCache.size > 200) gifCache.clear();
+          gifCache.set(cacheKey, { at: Date.now(), results: externalResults });
         }
-      } else if (db.server.giphyApiKey) {
-        provider = 'giphy';
-        const endpoint = q
-          ? `https://api.giphy.com/v1/gifs/search?api_key=${encodeURIComponent(db.server.giphyApiKey)}&q=${encodeURIComponent(q)}&limit=24&rating=pg-13`
-          : `https://api.giphy.com/v1/gifs/trending?api_key=${encodeURIComponent(db.server.giphyApiKey)}&limit=24&rating=pg-13`;
-        const resp = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
-        if (resp.ok) {
-          const json = await resp.json();
-          externalResults = (json.data || [])
-            .map((item) => ({
-              id: `giphy-${item.id}`,
-              title: item.title || 'GIF',
-              url: item.images?.original?.url || item.images?.downsized?.url,
-              previewUrl: item.images?.fixed_width?.url || item.images?.original?.url,
-            }))
-            .filter((g) => g.url);
-        }
+      } catch (err) {
+        const status = err?.status;
+        error =
+          status === 401 || status === 403 || status === 404
+            ? `A chave do ${provider === 'klipy' ? 'KLIPY' : 'GIPHY'} foi recusada (${err.message}). Confira em Configurações do servidor → Integrações.`
+            : status === 429
+            ? `Limite de buscas do ${provider === 'klipy' ? 'KLIPY' : 'GIPHY'} atingido. Tente de novo em alguns minutos.`
+            : `Não foi possível buscar GIFs agora (${err?.name === 'TimeoutError' ? 'tempo esgotado' : err?.message || 'erro de rede'}).`;
+        console.warn('[GIF]', provider, err?.message);
       }
-    } catch (err) {
-      console.warn('[GIF] Erro ao buscar GIFs externos:', err.message);
     }
 
-    res.json({ provider, savedGifs, results: externalResults });
+    res.json({ provider, savedGifs, results: externalResults, error });
   });
 
   app.post('/api/gifs', requireAuth, uploadChat.single('gif'), (req, res) => {
@@ -3338,9 +3420,38 @@ function sanitizeActivity(a) {
     next();
   });
 
+  // ===== Consentimento para gravar a chamada =====
+  // Quem quer gravar pede; todos os outros na chamada precisam permitir. Uma recusa (ou 60 s sem resposta)
+  // cancela. Quem entra numa chamada que está sendo gravada já confirmou no app antes de entrar.
+  const recConsent = new Map(); // channelId -> { id, requester, name, pending:Set<socketId>, timer }
+  const recApproved = new Map(); // socketId -> channelId (pode gravar nesta chamada)
+  function finishRecConsent(channelId, ok, byName = null, reason = null) {
+    const req = recConsent.get(channelId);
+    if (!req) return;
+    clearTimeout(req.timer);
+    recConsent.delete(channelId);
+    if (ok) recApproved.set(req.requester, channelId);
+    io.to(req.requester).emit('voice:record-consent-result', { channelId, ok, by: byName, reason });
+    io.to(`voice:${channelId}`).emit('voice:record-consent-closed', { requestId: req.id, ok, by: byName });
+  }
+  function askRecConsent(channelId, sid) {
+    const req = recConsent.get(channelId);
+    if (!req || sid === req.requester || req.pending.has(sid)) return;
+    req.pending.add(sid);
+    io.to(sid).emit('voice:record-consent-ask', { requestId: req.id, channelId, from: req.name });
+  }
+  function dropFromRecConsent(socketId, channelId) {
+    recApproved.delete(socketId);
+    const req = recConsent.get(channelId);
+    if (!req) return;
+    if (req.requester === socketId) return finishRecConsent(channelId, false, null, 'cancelled');
+    if (req.pending.delete(socketId) && req.pending.size === 0) finishRecConsent(channelId, true);
+  }
+
   function leaveVoiceRoom(socket) {
     const prevChannelId = socketVoiceChannel.get(socket.id);
     if (!prevChannelId) return;
+    dropFromRecConsent(socket.id, prevChannelId);
 
     socketVoiceChannel.delete(socket.id);
     socket.leave(`voice:${prevChannelId}`);
@@ -3404,7 +3515,7 @@ function sanitizeActivity(a) {
       channels: getVisibleChannelsForUser(db, user),
       categories: db.categories || [],
       roles: db.roles,
-      members: getMembersPayload(),
+      members: getMembersPayload(user.id),
       dmGroups: myGroups,
       voiceRooms: getVoiceRoomsSnapshot(),
       sounds: db.sounds,
@@ -3430,7 +3541,7 @@ function sanitizeActivity(a) {
       const u = getDb().users.find((x) => x.id === socket.data.userId);
       if (!u) return;
       if (['online', 'idle', 'dnd', 'invisible'].includes(statusType)) u.statusType = statusType;
-      if (typeof customStatusEmoji === 'string') u.customStatusEmoji = customStatusEmoji.trim().slice(0, 8);
+      if (typeof customStatusEmoji === 'string') u.customStatusEmoji = oneEmoji(customStatusEmoji);
       if (typeof customStatusText === 'string') u.customStatusText = customStatusText.trim().slice(0, 64);
       saveDb();
       broadcastUsers();
@@ -3546,7 +3657,7 @@ function sanitizeActivity(a) {
       const ch = db.channels.find((c) => c.id === payload?.channelId && c.type === 'text');
       if (!actor || !ch || !computeChannelPermissions(db, actor, ch).viewChannels) return cb?.({ error: 'Sem acesso a este canal.' });
       const emoji = String(payload?.emoji || '').trim();
-      if (!emoji || emoji.length > 16 || /[<>\s]/.test(emoji)) return cb?.({ error: 'Reação inválida.' });
+      if (!emoji || emoji.length > 32 || /[<>\s]/.test(emoji)) return cb?.({ error: 'Reação inválida.' });
       const msg = findChannelMessage(db, ch.id, String(payload?.messageId || ''), payload?.threadParentId || '');
       if (!msg) return cb?.({ error: 'Mensagem não encontrada.' });
       if (!msg.reactions || typeof msg.reactions !== 'object') msg.reactions = {};
@@ -3881,6 +3992,11 @@ function sanitizeActivity(a) {
       roomMap.set(socket.id, participant);
       socketVoiceChannel.set(socket.id, channelId);
       socket.join(`voice:${channelId}`);
+      askRecConsent(channelId, socket.id);
+      // permissão dada antes desta pessoa entrar (e que ainda não virou gravação) não vale para ela
+      for (const [sid, chId] of recApproved) {
+        if (chId === channelId && sid !== socket.id && roomMap.get(sid)?.recording !== 'record') recApproved.delete(sid);
+      }
 
       // Mesma conta entrando por outro socket: o antigo sai da call (como no Discord). Feito depois de
       // adicionar o novo, para a sala não ficar vazia e pausar música/vídeo numa simples reconexão.
@@ -3985,6 +4101,42 @@ function sanitizeActivity(a) {
       }
     });
 
+    socket.on('voice:record-request', (_payload, cb) => {
+      const channelId = socketVoiceChannel.get(socket.id);
+      const roomMap = channelId ? voiceRooms.get(channelId) : null;
+      if (!channelId || !roomMap) return cb?.({ error: 'Entre numa chamada para gravar.' });
+      if (recApproved.get(socket.id) === channelId) return cb?.({ ok: true, approved: true });
+      if (recConsent.has(channelId)) return cb?.({ error: 'Já há um pedido de gravação esperando resposta nesta chamada.' });
+      const others = [...roomMap.keys()].filter((sid) => sid !== socket.id);
+      if (!others.length) {
+        recApproved.set(socket.id, channelId);
+        return cb?.({ ok: true, approved: true });
+      }
+      const name = roomMap.get(socket.id)?.displayName || 'Alguém';
+      const req = {
+        id: uuidv4(),
+        requester: socket.id,
+        name,
+        pending: new Set(),
+        timer: setTimeout(() => finishRecConsent(channelId, false, null, 'timeout'), 60_000),
+      };
+      recConsent.set(channelId, req);
+      for (const sid of others) askRecConsent(channelId, sid);
+      cb?.({ ok: true, approved: false, waiting: others.length });
+    });
+
+    socket.on('voice:record-consent', (payload) => {
+      const channelId = socketVoiceChannel.get(socket.id);
+      const req = channelId ? recConsent.get(channelId) : null;
+      if (!req || req.id !== payload?.requestId || !req.pending.has(socket.id)) return;
+      if (payload?.accept !== true) {
+        const name = voiceRooms.get(channelId)?.get(socket.id)?.displayName || 'Alguém';
+        return finishRecConsent(channelId, false, name, 'declined');
+      }
+      req.pending.delete(socket.id);
+      if (req.pending.size === 0) finishRecConsent(channelId, true);
+    });
+
     socket.on('voice:media-state', (state) => {
       const channelId = socketVoiceChannel.get(socket.id);
       if (!channelId) return;
@@ -4007,7 +4159,13 @@ function sanitizeActivity(a) {
       // aviso para todos quando alguém grava a chamada (ou mantém clipes)
       if ('recording' in (state || {})) {
         const prevRec = participant.recording || null;
-        participant.recording = state.recording === 'record' || state.recording === 'clips' ? state.recording : null;
+        let wantRec = state.recording === 'record' || state.recording === 'clips' ? state.recording : null;
+        if (wantRec === 'record' && recApproved.get(socket.id) !== channelId) {
+          wantRec = prevRec === 'clips' ? 'clips' : null;
+          socket.emit('voice:record-consent-result', { channelId, ok: false, reason: 'not-approved' });
+        }
+        if (prevRec === 'record' && wantRec !== 'record') recApproved.delete(socket.id);
+        participant.recording = wantRec;
         if (participant.recording !== prevRec) {
           io.to(`voice:${channelId}`).emit('voice:recording-changed', {
             channelId,

@@ -69,7 +69,9 @@ import {
   RsvpStatus,
   ServerEvent,
   SharedFileInfo,
+  PresenceStatus,
 } from './types';
+import { isSpeaking } from './lib/speakingStore';
 import { Avatar } from './components/Avatar';
 import { ChannelContextMenu } from './components/ChannelContextMenu';
 import { ChatArea } from './components/ChatArea';
@@ -82,6 +84,7 @@ import { ServerContextMenu } from './components/ServerContextMenu';
 import { ServerRail } from './components/ServerRail';
 import { NowPlayingBar } from './components/NowPlayingBar';
 import { ImageContextMenu } from './components/ImageContextMenu';
+import { LinkContextMenu } from './components/LinkContextMenu';
 import type { SettingsTabId } from './components/SettingsModal';
 import { Sidebar } from './components/Sidebar';
 import { ContextMenuTarget, UserContextMenu } from './components/UserContextMenu';
@@ -339,6 +342,13 @@ export default function App() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [members, setMembers] = useState<User[]>([]);
   const [voiceRooms, setVoiceRooms] = useState<Record<string, VoiceParticipant[]>>({});
+  const voiceRoomsRef = useRef(voiceRooms);
+  voiceRoomsRef.current = voiceRooms;
+  // gravação da chamada: pedido de permissão recebido / aviso antes de entrar numa chamada sendo gravada
+  const [recConsentAsk, setRecConsentAsk] = useState<{ requestId: string; from: string } | null>(null);
+  const [recJoinPrompt, setRecJoinPrompt] = useState<{ channelId: string; names: string[] } | null>(null);
+  const [recRequestPending, setRecRequestPending] = useState(false);
+  const startRecordingNowRef = useRef<() => void>(() => {});
   const [dmVoiceParticipants, setDmVoiceParticipants] = useState<VoiceParticipant[]>([]);
   const [messagesByChannel, setMessagesByChannel] = useState<Record<string, ChatMessage[]>>({});
   const recentTextChannelsRef = useRef<string[]>([]);
@@ -476,8 +486,11 @@ export default function App() {
   // Voice, WebRTC & Audio state
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(loadAudioSettings);
   const [selfSocketId, setSelfSocketId] = useState('');
+  const selfSocketIdRef = useRef('');
+  selfSocketIdRef.current = selfSocketId;
   const [muted, setMuted] = useState(false);
   const [deafened, setDeafened] = useState(false);
+  const mutedBeforeDeafenRef = useRef(false);
   const [hasLocalMic, setHasLocalMic] = useState(false);
   const [localCamStream, setLocalCamStream] = useState<MediaStream | null>(null);
   const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
@@ -877,7 +890,8 @@ export default function App() {
     const unsubLan = window.electronAPI.onLanServersUpdate((list) => setLanServers(list));
     const unsubAct = window.electronAPI.onActivityUpdated((state) => {
       socketRef.current?.emit('user:activity', state);
-      window.electronAPI?.lanPeersUpdateIdentity?.({ currentActivity: state.currentActivity }).catch(() => {});
+      const hide = userRef.current?.statusType === 'invisible';
+      window.electronAPI?.lanPeersUpdateIdentity?.({ currentActivity: hide ? null : state.currentActivity }).catch(() => {});
     });
     const unsubRcStatus = window.electronAPI.onRcStatusChanged?.((st) => setVigemStatus(st?.vigemStatus || 'UNAVAILABLE'));
     const unsubRcRumble = window.electronAPI.onRcRumble?.((r) => {
@@ -904,7 +918,6 @@ export default function App() {
         !(navAreaRef.current === 'dms' && activeDmUserIdRef.current === fromPeerId && viewModeRef.current === 'chat')
       ) {
         setUnreadDmByUser((prev) => ({ ...prev, [fromPeerId]: (prev[fromPeerId] || 0) + 1 }));
-        audioEngine.playUiTone('unmute');
         desktopNotifyRef.current({ ...message, authorId: fromPeerId }, 'dm');
       }
     });
@@ -966,7 +979,8 @@ export default function App() {
         !(navAreaRef.current === 'dms' && activeGroupIdRef.current === groupId && viewModeRef.current === 'chat')
       ) {
         setUnreadByGroup((prev) => ({ ...prev, [groupId]: (prev[groupId] || 0) + 1 }));
-        audioEngine.playUiTone('unmute');
+        // Ocupado: sem som de mensagem
+        if (userRef.current?.statusType !== 'dnd' && getDesktopPrefs().notificationSound) audioEngine.playUiTone('message_dm');
       }
     });
     const unsubLanGroupPin = window.electronAPI.onLanGroupPinned?.(({ groupId, messageId, pinned, pinnedAt, pinnedBy }) => {
@@ -1285,7 +1299,7 @@ export default function App() {
           statusType: user.statusType || 'online',
           customStatusEmoji: user.customStatusEmoji || '',
           customStatusText: user.customStatusText || '',
-          currentActivity: user.currentActivity || null,
+          currentActivity: user.statusType === 'invisible' ? null : user.currentActivity || null,
         })
         .catch(() => {});
     });
@@ -1606,7 +1620,8 @@ export default function App() {
         !(navAreaRef.current === 'dms' && activeGroupIdRef.current === groupId && viewModeRef.current === 'chat')
       ) {
         setUnreadByGroup((prev) => ({ ...prev, [groupId]: (prev[groupId] || 0) + 1 }));
-        audioEngine.playUiTone('unmute');
+        // Ocupado: sem som de mensagem
+        if (userRef.current?.statusType !== 'dnd' && getDesktopPrefs().notificationSound) audioEngine.playUiTone('message_dm');
       }
     });
 
@@ -1637,7 +1652,12 @@ export default function App() {
       setMembers(list);
       const me = list.find((m) => m.id === userRef.current?.id);
       if (me) {
-        setUser(me);
+        const prevMe = userRef.current;
+        setUser(
+          me.statusType === 'invisible' && prevMe
+            ? { ...me, currentActivity: me.currentActivity ?? prevMe.currentActivity, recentActivities: me.recentActivities?.length ? me.recentActivities : prevMe.recentActivities }
+            : me
+        );
         rtc.setServerModeration(Boolean(me.serverMuted), Boolean(me.serverDeafened));
       }
     });
@@ -1704,9 +1724,38 @@ export default function App() {
     socket.on('chat:thread-message-deleted', ({ parentId, messageId }: { parentId: string; messageId: string }) => {
       setThreadView((tv) => (tv && tv.parent.id === parentId ? { ...tv, messages: tv.messages.filter((m) => m.id !== messageId) } : tv));
     });
+    socket.on('voice:record-consent-ask', ({ requestId, from }: { requestId: string; from: string }) => {
+      audioEngine.playUiTone('recording_on');
+      setRecConsentAsk({ requestId, from });
+    });
+    socket.on('voice:record-consent-closed', ({ requestId }: { requestId: string }) => {
+      setRecConsentAsk((cur) => (cur && cur.requestId === requestId ? null : cur));
+    });
+    socket.on(
+      'voice:record-consent-result',
+      ({ ok, by, reason }: { ok: boolean; by?: string | null; reason?: string | null }) => {
+        setRecRequestPending(false);
+        if (ok) {
+          startRecordingNowRef.current();
+          return;
+        }
+        showToast(
+          reason === 'declined'
+            ? `${by || 'Alguém'} não permitiu gravar a chamada.`
+            : reason === 'timeout'
+            ? 'Nem todos responderam ao pedido de gravação a tempo. A chamada não foi gravada.'
+            : reason === 'not-approved'
+            ? 'A gravação precisa da permissão de todos na chamada.'
+            : 'O pedido de gravação foi cancelado.',
+          'error'
+        );
+      }
+    );
     socket.on(
       'voice:recording-changed',
       ({ socketId, displayName, recording }: { socketId: string; displayName: string; recording: 'record' | 'clips' | null }) => {
+        if (recording === 'record') audioEngine.playUiTone('recording_on');
+        else if (recording === null) audioEngine.playUiTone('recording_off');
         if (socketId === socket.id) return;
         showToast(
           recording === 'record'
@@ -1822,7 +1871,6 @@ export default function App() {
         !(navAreaRef.current === 'dms' && activeDmUserIdRef.current === otherUserId && viewModeRef.current === 'chat')
       ) {
         setUnreadDmByUser((prev) => ({ ...prev, [otherUserId]: (prev[otherUserId] || 0) + 1 }));
-        audioEngine.playUiTone('unmute');
         desktopNotifyRef.current(msg, 'dm');
       }
     });
@@ -2550,10 +2598,19 @@ export default function App() {
   };
 
   const handleJoinOrFocusVoiceChannel = useCallback(
-    async (channelId: string) => {
+    async (channelId: string, opts?: { recordingOk?: boolean }) => {
       if (activeVoiceChannelIdRef.current === channelId) {
         setViewMode('voice');
         return;
+      }
+      // chamada sendo gravada: pergunta antes de entrar (entrar = concordar com a gravação)
+      if (!opts?.recordingOk) {
+        const recs = (voiceRoomsRef.current[channelId] || []).filter((p) => p.recording === 'record');
+        if (recs.length) {
+          audioEngine.playUiTone('recording_on');
+          setRecJoinPrompt({ channelId, names: Array.from(new Set(recs.map((p) => p.displayName))) });
+          return;
+        }
       }
       if (isLanCallActiveRef.current) {
         disconnectLanCallSocket();
@@ -2853,6 +2910,7 @@ export default function App() {
   const handleToggleMute = () => {
     const nextMuted = !muted;
     const nextDeaf = !nextMuted && deafened ? false : deafened;
+    if (!nextDeaf) mutedBeforeDeafenRef.current = false;
     setMuted(nextMuted);
     setMutedTalkAlert(false);
     if (nextDeaf !== deafened) setDeafened(nextDeaf);
@@ -2863,25 +2921,42 @@ export default function App() {
 
   const handleToggleDeafen = () => {
     const nextDeaf = !deafened;
+    let nextMuted = muted;
+    if (nextDeaf) {
+      mutedBeforeDeafenRef.current = muted;
+      nextMuted = true;
+    } else {
+      nextMuted = mutedBeforeDeafenRef.current;
+    }
     setDeafened(nextDeaf);
+    setMuted(nextMuted);
     setMutedTalkAlert(false);
     // Distinct Discord 3-note chime for headphones vs mic!
     audioEngine.playUiTone(nextDeaf ? 'deafen_on' : 'deafen_off');
     audioEngine.setDeafened(nextDeaf || Boolean(user?.serverDeafened));
-    rtcRef.current?.setMuteDeafen(muted, nextDeaf);
-    (p2pCallSocketRef.current || socketRef.current)?.emit('voice:media-state', { deafened: nextDeaf });
+    rtcRef.current?.setMuteDeafen(nextMuted, nextDeaf);
+    (p2pCallSocketRef.current || socketRef.current)?.emit('voice:media-state', { muted: nextMuted, deafened: nextDeaf });
   };
 
   toggleMuteRef.current = handleToggleMute;
   toggleDeafenRef.current = handleToggleDeafen;
 
-  // Notificação do Windows para mensagens que chegam com o PulseCord fora de foco
+  // Mensagem nova de outra pessoa: som do app (se não estiver olhando aquela conversa) e notificação do
+  // Windows (com o app fora de foco). Ocupado: nenhum som nem notificação.
   desktopNotifyRef.current = (msg, kind) => {
     const me = userRef.current;
     const prefs = getDesktopPrefs();
-    if (!me || msg.authorId === me.id || !prefs.notifications || !window.electronAPI?.showNotification) return;
-    if (document.hasFocus() || me.statusType === 'dnd') return;
+    if (!me || msg.authorId === me.id) return;
+    if (me.statusType === 'dnd') return;
     if (blockedUserIds.has(msg.authorId)) return;
+    const focused = document.hasFocus();
+    const viewing =
+      viewMode === 'chat' &&
+      (kind === 'dm' ? navArea === 'dms' && activeDmUserId === msg.authorId : navArea === 'server' && activeTextChannelId === msg.channelId);
+    const playSound = () => {
+      if (prefs.notificationSound && !deafened && !(focused && viewing)) audioEngine.playUiTone(kind === 'dm' ? 'message_dm' : 'message');
+    };
+    if (kind === 'dm') playSound();
     let title = msg.authorName || 'PulseCord';
     let route: NotificationRoute = null;
     if (kind === 'dm') {
@@ -2903,7 +2978,9 @@ export default function App() {
       }
       title = `${msg.authorName} (#${ch.name})`;
       route = { type: 'channel', id: ch.id };
+      playSound();
     }
+    if (focused || !prefs.notifications || !window.electronAPI?.showNotification) return;
     const body =
       (msg.content || '').trim() ||
       (msg.attachments?.length ? '📎 Enviou um anexo' : msg.gifUrl ? 'Enviou um GIF' : msg.transfer ? '📦 Enviou um arquivo' : 'Nova mensagem');
@@ -2913,8 +2990,8 @@ export default function App() {
         body: body.slice(0, 220),
         iconDataUrl: msg.authorAvatar && msg.authorAvatar.startsWith('data:image/') ? msg.authorAvatar : undefined,
         route,
-        // DMs já tocam o som do app
-        silent: kind === 'dm' || !prefs.notificationSound,
+        // o som já é tocado pelo próprio app
+        silent: true,
       })
       .catch(() => {});
   };
@@ -3269,6 +3346,87 @@ export default function App() {
       showError((err as Error).message || 'Erro ao excluir canal.');
     }
   };
+
+  // ===== Status de disponibilidade =====
+  // Troca o status na hora (servidor + perfil global da LAN). `auto` = feito pelo "ausente automático":
+  // não grava no perfil global, para o app não abrir já como Ausente da próxima vez.
+  const AUTO_AWAY_KEY = 'pc-auto-away';
+  const applySelfStatus = useCallback((st: PresenceStatus, opts?: { auto?: boolean }) => {
+    const me = userRef.current;
+    if (!me) return;
+    try {
+      if (opts?.auto && st === 'idle') localStorage.setItem(AUTO_AWAY_KEY, '1');
+      else localStorage.removeItem(AUTO_AWAY_KEY);
+    } catch {}
+    if (me.statusType === st) return;
+    setUser((prev) => (prev ? { ...prev, statusType: st } : prev));
+    socketRef.current?.emit('user:status', { statusType: st });
+    if (!opts?.auto) persistLocalGlobalProfile({ statusType: st }).catch(() => {});
+  }, []);
+
+  // Ausente automático: só para quem está "Disponível". Depois de 10 min sem mexer no app e sem som saindo
+  // do microfone, vira Ausente; ao clicar/teclar no app (ou voltar a falar) volta na hora para Disponível.
+  // Ocupado, Invisível e Ausente escolhidos à mão nunca são trocados sozinhos.
+  const lastPresenceActRef = useRef(Date.now());
+  const autoAwayActiveRef = useRef(false);
+  useEffect(() => {
+    try {
+      autoAwayActiveRef.current = localStorage.getItem(AUTO_AWAY_KEY) === '1';
+    } catch {}
+  }, []);
+  useEffect(() => {
+    if (localSpeaking) {
+      lastPresenceActRef.current = Date.now();
+      if (autoAwayActiveRef.current && userRef.current?.statusType === 'idle') {
+        autoAwayActiveRef.current = false;
+        applySelfStatus('online');
+      }
+    }
+  }, [localSpeaking, applySelfStatus]);
+  useEffect(() => {
+    const IDLE_MS = 10 * 60 * 1000;
+    let lastMove = 0;
+    const wake = () => {
+      lastPresenceActRef.current = Date.now();
+      if (autoAwayActiveRef.current) {
+        autoAwayActiveRef.current = false;
+        if (userRef.current?.statusType === 'idle') applySelfStatus('online');
+      }
+    };
+    const onMove = () => {
+      const now = Date.now();
+      if (now - lastMove < 2000) return;
+      lastMove = now;
+      lastPresenceActRef.current = now;
+    };
+    window.addEventListener('pointerdown', wake, true);
+    window.addEventListener('keydown', wake, true);
+    window.addEventListener('wheel', onMove, { capture: true, passive: true });
+    window.addEventListener('pointermove', onMove, { capture: true, passive: true });
+    window.addEventListener('focus', onMove);
+    const iv = window.setInterval(() => {
+      const me = userRef.current;
+      if (!me) return;
+      if (me.statusType !== 'online') {
+        // escolheu outro status à mão: o ausente automático não mexe mais
+        if (me.statusType !== 'idle') autoAwayActiveRef.current = false;
+        return;
+      }
+      if (isSpeaking(selfSocketIdRef.current)) lastPresenceActRef.current = Date.now();
+      if (Date.now() - lastPresenceActRef.current >= IDLE_MS) {
+        autoAwayActiveRef.current = true;
+        applySelfStatus('idle', { auto: true });
+      }
+    }, 15000);
+    return () => {
+      window.removeEventListener('pointerdown', wake, true);
+      window.removeEventListener('keydown', wake, true);
+      window.removeEventListener('wheel', onMove, true);
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('focus', onMove);
+      window.clearInterval(iv);
+    };
+  }, [applySelfStatus]);
 
   // Profile & Context Menu open handlers
   const handleOpenUserProfilePopout = useCallback((targetUser: User, e: React.MouseEvent) => {
@@ -3885,7 +4043,40 @@ export default function App() {
       return;
     }
     if (!activeVoiceChannelId || typeof MediaRecorder === 'undefined') return;
-    if (!window.confirm('Gravar a chamada? Todos na chamada vão ver o aviso "REC" ao lado do seu nome enquanto a gravação estiver ligada.')) return;
+    if (recRequestPending) {
+      showToast('Ainda esperando a resposta de todos na chamada.', 'info');
+      return;
+    }
+    const sock = p2pCallSocketRef.current || socketRef.current;
+    if (!sock) return;
+    setRecRequestPending(true);
+    let answered = false;
+    const fallback = window.setTimeout(() => {
+      // servidor antigo (sem pedido de permissão): só avisa, como antes
+      if (answered) return;
+      setRecRequestPending(false);
+      if (window.confirm('Este servidor não pede permissão para gravar. Gravar mesmo assim? Todos vão ver "REC" ao lado do seu nome.')) {
+        startRecordingNowRef.current();
+      }
+    }, 5000);
+    sock.emit('voice:record-request', {}, (res: { ok?: boolean; approved?: boolean; waiting?: number; error?: string }) => {
+      answered = true;
+      window.clearTimeout(fallback);
+      if (res?.error) {
+        setRecRequestPending(false);
+        showError(res.error);
+        return;
+      }
+      if (res?.approved) {
+        setRecRequestPending(false);
+        startRecordingNowRef.current();
+        return;
+      }
+      showToast(`Pedindo permissão para gravar a ${res?.waiting || 0} pessoa(s) na chamada…`, 'info');
+    });
+  };
+  startRecordingNowRef.current = () => {
+    if (callRecordingRef.current || !activeVoiceChannelIdRef.current) return;
     try {
       callRecordingRef.current = new CallRecording(recSourcesRef.current(), localScreenVideoRef.current);
       setRecordingSince(Date.now());
@@ -5180,6 +5371,11 @@ export default function App() {
           contextScope={navArea === 'dms' ? 'dm' : 'server'}
           anchor={{ x: profilePopout.x, y: profilePopout.y }}
           onClose={() => setProfilePopout(null)}
+          onSetStatus={(st) => {
+            autoAwayActiveRef.current = false;
+            applySelfStatus(st);
+            setProfilePopout(null);
+          }}
           onOpenFullProfile={(editMode) => {
             setProfilePopout(null);
             setProfileModal({ userId: resolvedPopoutUser.id, edit: Boolean(editMode) });
@@ -5227,6 +5423,96 @@ export default function App() {
 
       {/* Server Directory Modal ("+" Button: Create Server or Join IPv4/LAN) */}
       <ImageContextMenu onNotify={showToast} />
+      {recConsentAsk && (
+        <div className="fixed inset-0 z-[150] bg-black/70 flex items-center justify-center p-4">
+          <div className="w-full max-w-[400px] bg-[#313338] rounded-lg shadow-2xl border border-[#1e1f22] p-5 space-y-3 animate-fade-up">
+            <div className="flex items-center gap-2 text-white font-bold">
+              <span className="relative flex w-3 h-3">
+                <span className="absolute inline-flex w-full h-full rounded-full bg-[#f23f42] opacity-75 animate-ping" />
+                <span className="relative inline-flex w-3 h-3 rounded-full bg-[#f23f42]" />
+              </span>
+              Pedido de gravação
+            </div>
+            <p className="text-sm text-[#dbdee1]">
+              <strong>{recConsentAsk.from}</strong> quer gravar esta chamada (sua voz e a de todos). A gravação só começa se todos
+              permitirem.
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  (p2pCallSocketRef.current || socketRef.current)?.emit('voice:record-consent', { requestId: recConsentAsk.requestId, accept: false });
+                  setRecConsentAsk(null);
+                }}
+                className="px-4 py-2 rounded text-sm font-semibold text-white bg-[#4e5058] hover:bg-[#6d6f78] cursor-pointer"
+              >
+                Não permitir
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  (p2pCallSocketRef.current || socketRef.current)?.emit('voice:record-consent', { requestId: recConsentAsk.requestId, accept: true });
+                  setRecConsentAsk(null);
+                }}
+                className="px-4 py-2 rounded text-sm font-semibold text-white bg-[#da373c] hover:bg-[#a12828] cursor-pointer"
+              >
+                Permitir gravação
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {recJoinPrompt && (
+        <div className="fixed inset-0 z-[150] bg-black/70 flex items-center justify-center p-4" onClick={() => setRecJoinPrompt(null)}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-[400px] bg-[#313338] rounded-lg shadow-2xl border border-[#1e1f22] p-5 space-y-3 animate-fade-up"
+          >
+            <div className="flex items-center gap-2 text-white font-bold">
+              <span className="relative flex w-3 h-3">
+                <span className="absolute inline-flex w-full h-full rounded-full bg-[#f23f42] opacity-75 animate-ping" />
+                <span className="relative inline-flex w-3 h-3 rounded-full bg-[#f23f42]" />
+              </span>
+              Esta chamada está sendo gravada
+            </div>
+            <p className="text-sm text-[#dbdee1]">
+              <strong>{recJoinPrompt.names.join(', ')}</strong> {recJoinPrompt.names.length > 1 ? 'estão' : 'está'} gravando esta chamada. Se você
+              entrar, sua voz também vai ser gravada. Quer entrar mesmo assim?
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setRecJoinPrompt(null)}
+                className="px-4 py-2 rounded text-sm font-semibold text-white bg-[#4e5058] hover:bg-[#6d6f78] cursor-pointer"
+              >
+                Não entrar
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => {
+                  const cid = recJoinPrompt.channelId;
+                  setRecJoinPrompt(null);
+                  handleJoinOrFocusVoiceChannel(cid, { recordingOk: true });
+                }}
+                className="px-4 py-2 rounded text-sm font-semibold text-white bg-[#248046] hover:bg-[#1a6334] cursor-pointer"
+              >
+                Entrar mesmo assim
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <LinkContextMenu
+        inVoiceCall={Boolean(activeVoiceChannelId)}
+        onNotify={showToast}
+        onPlayVideo={(url) => {
+          handleAddVideoUrlToVoice(url).then((r) => r?.error && showToast(r.error, 'error'));
+        }}
+        onPlayMusic={(url) => {
+          handleAddMusicUrlToVoice(url).then((r) => r?.error && showToast(r.error, 'error'));
+        }}
+      />
 
       {showServerDirectory && (
         <LazyBoundary>

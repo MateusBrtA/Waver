@@ -194,6 +194,7 @@ export interface ServerInfo {
   hasInvitePassword: boolean;
   allowMembersCreateChannels: boolean;
   hasTenorKey: boolean;
+  hasKlipyKey?: boolean;
   hasGiphyKey: boolean;
   hasYoutubeCookies?: boolean;
 }

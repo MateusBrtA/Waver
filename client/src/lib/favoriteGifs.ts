@@ -60,5 +60,5 @@ export function useFavoriteGifs(): FavoriteGif[] {
 
 /** URL parece de GIF (arquivo .gif ou provedores de GIF) */
 export function looksLikeGifUrl(url: string) {
-  return /\.gif(\?|#|$)/i.test(url) || /(^|\.)(tenor\.com|giphy\.com|media\.tenor\.com)\//i.test(url.replace(/^https?:\/\//, ''));
+  return /\.gif(\?|#|$)/i.test(url) || /(^|\.)(tenor\.com|giphy\.com|media\.tenor\.com|klipy\.com)\//i.test(url.replace(/^https?:\/\//, ''));
 }

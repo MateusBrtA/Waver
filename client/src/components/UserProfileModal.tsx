@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Calendar,
   Clock,
@@ -24,12 +24,13 @@ import { PROFILE_EFFECTS, ProfileEffectLayer } from './ProfileEffect';
 import { CONNECTION_PLATFORM_OPTIONS, ConnectionCard } from './ConnectionBadge';
 import { useEscapeToClose } from '../lib/useEscapeToClose';
 import { formatActivityElapsed } from '../lib/activity';
+import { EmojiPickerPopover } from './EmojiPicker';
 
 const BANNER_COLORS = ['#5865F2', '#7c3aed', '#23a55a', '#db2777', '#ea580c', '#0284c7', '#dc2626', '#1e1f22'];
 const STATUS_OPTIONS: Array<{ value: PresenceStatus; label: string; dot: string }> = [
-  { value: 'online', label: 'Online', dot: '#23a55a' },
+  { value: 'online', label: 'Disponível', dot: '#23a55a' },
   { value: 'idle', label: 'Ausente', dot: '#f0b232' },
-  { value: 'dnd', label: 'Não Perturbe', dot: '#f23f42' },
+  { value: 'dnd', label: 'Ocupado', dot: '#f23f42' },
   { value: 'invisible', label: 'Invisível', dot: '#80848e' },
 ];
 const QUICK_BUBBLE_EMOJIS = ['😎', '🎮', '🔥', '💀', '🎧', '☕', '🚀', '😴', '🏆', '🎵'];
@@ -111,6 +112,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [newConnHandle, setNewConnHandle] = useState('');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
+  const [bubblePicker, setBubblePicker] = useState<DOMRect | null>(null);
 
   const userRoles = contextScope === 'server' ? roles.filter((r) => (user.roleIds || []).includes(r.id)) : [];
   const bannerFullUrl = user.bannerUrl ? resolveMediaUrl(serverUrl, user.bannerUrl) : '';
@@ -193,42 +195,86 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
   };
 
-  const handleSaveEdit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  type ProfilePatch = {
+    displayName: string;
+    pronouns: string;
+    bio: string;
+    statusType: PresenceStatus;
+    customStatusEmoji: string;
+    customStatusText: string;
+    bannerColor: string;
+    avatarDecoration: string;
+    nameStyle: string;
+    profileEffect: string;
+    connections: UserConnection[];
+  };
+  // Salva sozinho: cliques salvam na hora; textos salvam com Enter ou ao sair do campo
+  const lastSavedRef = useRef(
+    JSON.stringify({
+      displayName: user.displayName,
+      pronouns: (user.pronouns || '').trim(),
+      bio: (user.bio || '').trim(),
+      statusType: user.statusType || 'online',
+      customStatusEmoji: (user.customStatusEmoji || '').trim(),
+      customStatusText: (user.customStatusText || '').trim(),
+      bannerColor: user.bannerColor || user.avatarColor || '#5865F2',
+      avatarDecoration: user.avatarDecoration || 'none',
+      nameStyle: user.nameStyle || 'default',
+      profileEffect: user.profileEffect || 'none',
+      connections: user.connections || [],
+    })
+  );
+  const persist = async (over: Partial<ProfilePatch> = {}) => {
+    const patch: ProfilePatch = {
+      displayName: displayName.trim() || user.displayName,
+      pronouns: pronouns.trim(),
+      bio: bio.trim(),
+      statusType,
+      customStatusEmoji: customStatusEmoji.trim(),
+      customStatusText: customStatusText.trim(),
+      bannerColor,
+      avatarDecoration,
+      nameStyle,
+      profileEffect,
+      connections,
+      ...over,
+    };
+    const key = JSON.stringify(patch);
+    if (key === lastSavedRef.current) return;
+    lastSavedRef.current = key;
     setSaving(true);
     setMsg('');
     try {
-      const patch = {
-        displayName: displayName.trim() || user.displayName,
-        pronouns: pronouns.trim(),
-        bio: bio.trim(),
-        statusType,
-        customStatusEmoji: customStatusEmoji.trim(),
-        customStatusText: customStatusText.trim(),
-        bannerColor,
-        avatarDecoration,
-        nameStyle,
-        profileEffect,
-        connections,
-      };
       if (api) {
         const { user: updated } = await api.updateProfile(patch);
         onUserUpdated(updated, patch);
       } else {
         onUserUpdated({ ...user, ...patch }, patch);
       }
-      setMsg('Perfil salvo e sincronizado na rede LAN!');
+      setMsg('Salvo');
     } catch (err: unknown) {
+      lastSavedRef.current = '';
       setMsg((err as Error).message || 'Erro ao salvar perfil.');
     } finally {
       setSaving(false);
     }
   };
+  const pick = <K extends keyof ProfilePatch>(set: (v: ProfilePatch[K]) => void, k: K, v: ProfilePatch[K]) => {
+    set(v);
+    void persist({ [k]: v } as Partial<ProfilePatch>);
+  };
+  const handleSaveEdit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void persist();
+  };
+  const saveOnBlur = () => void persist();
 
   const addConnection = () => {
     if (!newConnHandle.trim()) return;
-    setConnections((prev) => [...prev.slice(0, 9), { platform: newConnPlatform, handle: newConnHandle.trim() }]);
+    const next = [...connections.slice(0, 9), { platform: newConnPlatform, handle: newConnHandle.trim() }];
+    setConnections(next);
     setNewConnHandle('');
+    void persist({ connections: next });
   };
 
   return (
@@ -540,11 +586,19 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             {/* EDITAR PERFIL */}
             {rightTab === 'edit' && isSelf && (
               <form onSubmit={handleSaveEdit} className="space-y-4 text-xs">
-                {msg && (
-                  <div className="bg-[#23a55a]/15 border border-[#23a55a]/40 text-[#4ade80] px-3 py-2 rounded-lg">
-                    {msg}
-                  </div>
-                )}
+                <div className="flex items-center gap-1.5 text-[11px] text-[#949ba4] min-h-[16px]">
+                  {saving ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Salvando…
+                    </>
+                  ) : msg && msg !== 'Salvo' ? (
+                    <span className="text-[#f23f42]">{msg}</span>
+                  ) : msg === 'Salvo' ? (
+                    <span className="text-[#4ade80]">Alterações salvas e sincronizadas.</span>
+                  ) : (
+                    <span>Tudo salva sozinho: cliques na hora, textos com Enter ou ao sair do campo.</span>
+                  )}
+                </div>
 
                 {/* Avatar & Banner Upload */}
                 <div className="grid grid-cols-2 gap-2.5">
@@ -584,7 +638,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       <button
                         key={st.value}
                         type="button"
-                        onClick={() => setStatusType(st.value)}
+                        onClick={() => pick(setStatusType, 'statusType', st.value)}
                         className={`py-1.5 px-2 rounded-md flex items-center justify-center gap-1.5 font-semibold cursor-pointer border ${
                           statusType === st.value
                             ? 'bg-[#35373c] border-white text-white'
@@ -602,25 +656,43 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       type="text"
                       value={customStatusEmoji}
                       onChange={(e) => setCustomStatusEmoji(e.target.value)}
+                      onBlur={saveOnBlur}
                       placeholder="😎"
-                      maxLength={6}
+                      maxLength={32}
                       className="w-14 text-center bg-[#1e1f22] border border-[#3f4147] rounded-lg py-2 text-base text-white outline-none"
                     />
                     <input
                       type="text"
                       value={customStatusText}
                       onChange={(e) => setCustomStatusText(e.target.value)}
+                      onBlur={saveOnBlur}
                       placeholder="Texto do balão de status (ex: Jogando rankeada!)"
                       maxLength={64}
                       className="flex-1 bg-[#1e1f22] border border-[#3f4147] rounded-lg px-3 py-2 text-white outline-none focus:border-[#5865f2]"
                     />
                   </div>
                   <div className="flex gap-1 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={(e) => setBubblePicker(e.currentTarget.getBoundingClientRect())}
+                      className="h-7 px-2 rounded bg-[#1e1f22] hover:bg-[#35373c] text-xs text-[#dbdee1] cursor-pointer flex items-center gap-1"
+                      title="Todos os emojis"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Todos
+                    </button>
+                    {bubblePicker && (
+                      <EmojiPickerPopover
+                        anchor={bubblePicker}
+                        placement="below"
+                        onClose={() => setBubblePicker(null)}
+                        onPick={(em) => pick(setCustomStatusEmoji, 'customStatusEmoji', em)}
+                      />
+                    )}
                     {QUICK_BUBBLE_EMOJIS.map((em) => (
                       <button
                         key={em}
                         type="button"
-                        onClick={() => setCustomStatusEmoji(em)}
+                        onClick={() => pick(setCustomStatusEmoji, 'customStatusEmoji', em)}
                         className="w-7 h-7 rounded bg-[#1e1f22] hover:bg-[#35373c] text-sm cursor-pointer"
                       >
                         {em}
@@ -637,6 +709,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       type="text"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
+                      onBlur={saveOnBlur}
                       maxLength={28}
                       className="w-full bg-[#111214] border border-[#3f4147] rounded-lg px-3 py-2 text-white outline-none focus:border-[#5865f2]"
                     />
@@ -647,6 +720,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       type="text"
                       value={pronouns}
                       onChange={(e) => setPronouns(e.target.value)}
+                      onBlur={saveOnBlur}
                       placeholder="ele/dele"
                       maxLength={40}
                       className="w-full bg-[#111214] border border-[#3f4147] rounded-lg px-3 py-2 text-white outline-none focus:border-[#5865f2]"
@@ -660,6 +734,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     rows={2}
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
+                    onBlur={saveOnBlur}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        void persist();
+                      }
+                    }}
                     placeholder="Conte algo sobre você..."
                     maxLength={220}
                     className="w-full bg-[#111214] border border-[#3f4147] rounded-lg px-3 py-2 text-white outline-none focus:border-[#5865f2] resize-none"
@@ -677,7 +758,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                         <button
                           key={key}
                           type="button"
-                          onClick={() => setAvatarDecoration(key)}
+                          onClick={() => pick(setAvatarDecoration, 'avatarDecoration', key)}
                           title={d.label}
                           className={`w-[76px] flex flex-col items-center gap-1.5 pt-2.5 pb-1.5 rounded-md cursor-pointer border-2 transition ${
                             avatarDecoration === key
@@ -707,7 +788,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                         <button
                           key={key}
                           type="button"
-                          onClick={() => setProfileEffect(key)}
+                          onClick={() => pick(setProfileEffect, 'profileEffect', key)}
                           className={`relative w-[76px] h-[52px] rounded-md overflow-hidden cursor-pointer border-2 transition bg-[#111214] ${
                             profileEffect === key ? 'border-[#5865f2]' : 'border-transparent hover:border-[#4e5058]'
                           }`}
@@ -757,7 +838,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                         <button
                           key={key}
                           type="button"
-                          onClick={() => setNameStyle(key)}
+                          onClick={() => pick(setNameStyle, 'nameStyle', key)}
                           className={`px-2.5 py-1 rounded-md font-bold cursor-pointer border ${
                             nameStyle === key
                               ? 'bg-[#35373c] border-white'
@@ -777,7 +858,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                         <button
                           key={c}
                           type="button"
-                          onClick={() => setBannerColor(c)}
+                          onClick={() => pick(setBannerColor, 'bannerColor', c)}
                           className={`w-6 h-6 rounded-full cursor-pointer ${
                             bannerColor === c ? 'ring-2 ring-white scale-110' : ''
                           }`}
@@ -829,19 +910,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     <ConnectionCard
                       key={idx}
                       connection={c}
-                      onRemove={() => setConnections((prev) => prev.filter((_, i) => i !== idx))}
+                      onRemove={() => pick(setConnections, 'connections', connections.filter((_, i) => i !== idx))}
                     />
                   ))}
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="w-full py-2.5 bg-[#23a55a] hover:bg-[#1e8e4c] text-white font-bold rounded-lg flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-                  Salvar Perfil e Sincronizar na LAN
-                </button>
+                <button type="submit" className="hidden" aria-hidden tabIndex={-1} />
               </form>
             )}
           </div>

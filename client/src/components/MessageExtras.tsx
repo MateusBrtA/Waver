@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { BarChart3, Check, MessagesSquare, SmilePlus } from 'lucide-react';
+import { BarChart3, Check, MessagesSquare, Plus, SmilePlus } from 'lucide-react';
+import { EmojiPickerPopover, pushRecentEmoji } from './EmojiPicker';
 import { ChatMessage, User } from '../types';
 
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '✅', '❌', '💯', '🙏'];
@@ -9,6 +10,7 @@ export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'
 export const QuickReactButton: React.FC<{ onPick: (emoji: string) => void; className?: string }> = ({ onPick, className }) => {
   const btnRef = useRef<HTMLButtonElement>(null);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const [full, setFull] = useState<DOMRect | null>(null);
 
   useEffect(() => {
     if (!pos) return;
@@ -53,6 +55,7 @@ export const QuickReactButton: React.FC<{ onPick: (emoji: string) => void; class
                 type="button"
                 onClick={() => {
                   onPick(e);
+                  pushRecentEmoji(e);
                   setPos(null);
                 }}
                 className="h-8 rounded hover:bg-[#404249] text-lg cursor-pointer"
@@ -60,9 +63,22 @@ export const QuickReactButton: React.FC<{ onPick: (emoji: string) => void; class
                 {e}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => {
+                const r = btnRef.current?.getBoundingClientRect();
+                setPos(null);
+                if (r) setFull(r);
+              }}
+              className="col-span-6 h-7 rounded bg-[#1e1f22] hover:bg-[#404249] text-xs text-[#dbdee1] flex items-center justify-center gap-1 cursor-pointer"
+              title="Todos os emojis"
+            >
+              <Plus className="w-3.5 h-3.5" /> Mais emojis
+            </button>
           </div>,
           document.body
         )}
+      {full && <EmojiPickerPopover anchor={full} onPick={onPick} onClose={() => setFull(null)} />}
     </>
   );
 };

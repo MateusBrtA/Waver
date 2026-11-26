@@ -574,6 +574,18 @@ export const WhiteboardPanel: React.FC<WhiteboardPanelProps> = ({ socket, channe
   const [tipSpacing, setTipSpacing] = useState<number | null>(null);
   const [tipJitter, setTipJitter] = useState(0);
   const [tipGrid, setTipGrid] = useState<{ x: number; y: number } | null>(null);
+  // painel "Pincéis" (abaixo de Propriedades): aberto/fechado, busca e embutidos escondidos por quem usa
+  const [brushesOpen, setBrushesOpen] = useState(() => readPref('brushesOpen', '1') === '1');
+  const [brushQuery, setBrushQuery] = useState('');
+  const [hiddenTips, setHiddenTips] = useState<string[]>(() => {
+    try {
+      const v = JSON.parse(readPref('hiddenTips', '[]'));
+      return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const brushPanelInputRef = useRef<HTMLInputElement>(null);
   const activeLayerIdRef = useRef(activeLayerId);
   activeLayerIdRef.current = activeLayerId;
 
@@ -3786,6 +3798,135 @@ export const WhiteboardPanel: React.FC<WhiteboardPanelProps> = ({ socket, channe
     </section>
   );
 
+  const setHidden = (next: string[]) => {
+    setHiddenTips(next);
+    savePref('hiddenTips', JSON.stringify(next));
+  };
+  const chooseTip = (id: string) => {
+    setTipId(id);
+    setTipSpacing(null);
+    pickTool('custom');
+  };
+  const deleteTip = (b: WhiteboardBrushTip, builtin: boolean) => {
+    if (builtin) {
+      setHidden([...hiddenTips, b.id]);
+    } else {
+      if (!canDraw) return;
+      socket?.emit('wb:brush-remove', { channelId, id: b.id });
+    }
+    if (tipId === b.id) setTipId(null);
+  };
+  const renderBrushesPanel = () => {
+    const q = brushQuery.trim().toLowerCase();
+    const match = (b: WhiteboardBrushTip) => !q || b.name.toLowerCase().includes(q);
+    const room = (wb.brushes || []).filter(match);
+    const builtin = BUILTIN_BRUSHES.filter((b) => !hiddenTips.includes(b.id) && match(b));
+    const hiddenCount = BUILTIN_BRUSHES.filter((b) => hiddenTips.includes(b.id)).length;
+    const tile = (b: WhiteboardBrushTip, isBuiltin: boolean) => (
+      <div key={b.id} className="relative group/tip">
+        <button
+          type="button"
+          onClick={() => chooseTip(b.id)}
+          className={`w-full aspect-square rounded-sm bg-[#1a1a1a] border flex items-center justify-center cursor-pointer ${
+            tipId === b.id && tool === 'custom' ? 'border-[var(--ps-accent)] ring-1 ring-[var(--ps-accent)]' : 'border-black/50 hover:border-white'
+          }`}
+          title={b.name}
+        >
+          <img src={b.tip} alt="" draggable={false} className="w-[80%] h-[80%] object-contain" />
+        </button>
+        {(isBuiltin || canDraw) && (
+          <button
+            type="button"
+            onClick={() => deleteTip(b, isBuiltin)}
+            className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#f23f42] text-white hidden group-hover/tip:flex items-center justify-center cursor-pointer shadow"
+            title={isBuiltin ? `Esconder "${b.name}" (dá para restaurar)` : `Apagar "${b.name}" da sala`}
+          >
+            <X className="w-2.5 h-2.5" />
+          </button>
+        )}
+      </div>
+    );
+    return (
+      <section data-wb-brushes className={`flex flex-col border-b border-black/50 ${brushesOpen ? 'flex-1 min-h-[150px]' : ''}`}>
+        <div className="h-7 shrink-0 flex items-center gap-1 px-2 bg-[var(--ps-bar)] border-b border-black/40">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !brushesOpen;
+              setBrushesOpen(next);
+              savePref('brushesOpen', next ? '1' : '0');
+            }}
+            className="flex items-center gap-1 font-semibold text-[var(--ps-strong)] cursor-pointer"
+            title={brushesOpen ? 'Recolher' : 'Mostrar'}
+          >
+            <ChevronDown className={`w-3 h-3 text-[var(--ps-mute)] transition-transform ${brushesOpen ? '' : '-rotate-90'}`} />
+            Pincéis
+            <span className="font-normal text-[var(--ps-mute)]">({BUILTIN_BRUSHES.length - hiddenCount + (wb.brushes || []).length})</span>
+          </button>
+          <div className="flex-1" />
+          <button
+            type="button"
+            disabled={!canDraw}
+            onClick={() => brushPanelInputRef.current?.click()}
+            className="h-5 px-1.5 rounded-sm flex items-center gap-0.5 text-[var(--ps-text2)] hover:text-white hover:bg-[var(--ps-hover)] cursor-pointer disabled:opacity-40"
+            title="Importar pincéis: PNG, .gbr/.gih (GIMP/Krita) ou pacote .bundle do Krita"
+          >
+            <Plus className="w-3 h-3" />
+            Importar
+          </button>
+          <input
+            ref={brushPanelInputRef}
+            type="file"
+            multiple
+            accept=".png,.jpg,.jpeg,.webp,.gbr,.gih,.bundle,.zip"
+            className="hidden"
+            onChange={(e) => {
+              importTips(Array.from(e.target.files || []));
+              e.target.value = '';
+            }}
+          />
+        </div>
+        {brushesOpen && (
+          <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+            <div className="flex items-center gap-1 h-6 px-1.5 rounded-sm bg-[var(--ps-input)]">
+              <Search className="w-3 h-3 text-[var(--ps-mute)]" />
+              <input
+                value={brushQuery}
+                onChange={(e) => setBrushQuery(e.target.value)}
+                placeholder="Buscar pincel"
+                className="flex-1 min-w-0 bg-transparent outline-none text-[var(--ps-text)] placeholder:text-[var(--ps-dim)]"
+              />
+            </div>
+            {room.length > 0 && (
+              <div>
+                <div className="text-[10px] text-[var(--ps-mute)] mb-1">Importados nesta sala</div>
+                <div className="grid grid-cols-6 gap-1.5">{room.map((b) => tile(b, false))}</div>
+              </div>
+            )}
+            <div>
+              <div className="text-[10px] text-[var(--ps-mute)] mb-1 flex items-center">
+                <span className="flex-1">Embutidos (CC0)</span>
+                {hiddenCount > 0 && (
+                  <button type="button" onClick={() => setHidden([])} className="text-[var(--ps-accent)] hover:underline cursor-pointer">
+                    Restaurar {hiddenCount} escondido{hiddenCount > 1 ? 's' : ''}
+                  </button>
+                )}
+              </div>
+              {builtin.length ? (
+                <div className="grid grid-cols-6 gap-1.5">{builtin.map((b) => tile(b, true))}</div>
+              ) : (
+                <div className="text-[10px] text-[var(--ps-dim)]">Nenhum pincel{q ? ' com esse nome' : ''}.</div>
+              )}
+            </div>
+            <div className="text-[10px] text-[var(--ps-dim)] leading-snug">
+              Clique para pintar com o pincel. Passe o mouse e clique no × para apagar. Embutidos: "60 free gimp / krita brushes" de rubberduck (OpenGameArt), domínio público.
+            </div>
+          </div>
+        )}
+      </section>
+    );
+  };
+
   const startPanelDrag = (e: React.PointerEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     el.setPointerCapture(e.pointerId);
@@ -4147,7 +4288,7 @@ export const WhiteboardPanel: React.FC<WhiteboardPanelProps> = ({ socket, channe
             ['Ajustes da camada', <SlidersHorizontal key="f" className="w-4 h-4" />, openFx, showPanel && propsTab === 'fx'],
             ['Linha do tempo (animação)', <Clapperboard key="a" className="w-4 h-4" />, openAnimation, animOpen],
             ['Minimapa', <MapIcon key="m" className="w-4 h-4" />, toggleMinimap, showMinimap],
-            ['Pincéis importados', <Shapes key="b" className="w-4 h-4" />, () => pickTool('custom'), tool === 'custom'],
+            ['Pincéis', <Shapes key="b" className="w-4 h-4" />, () => { setShowPanel(true); setBrushesOpen(true); savePref('brushesOpen', '1'); pickTool('custom'); }, tool === 'custom'],
             ['Texto', <Type key="t" className="w-4 h-4" />, () => pickTool('text'), tool === 'text'],
           ] as Array<[string, React.ReactNode, () => void, boolean]>
         ).map(([title, icon, run, on]) => (
@@ -4175,6 +4316,7 @@ export const WhiteboardPanel: React.FC<WhiteboardPanelProps> = ({ socket, channe
         <aside data-wb-ui className="w-[264px] shrink-0 bg-[var(--ps-panel)] border-l border-black/40 flex flex-col min-h-0 text-[11px] text-[var(--ps-text)] overflow-hidden">
           {renderColorPanel()}
           {renderPropsPanel()}
+          {renderBrushesPanel()}
           {!layersFloat && showLayers && <section className="flex-[1.4] min-h-[220px] flex flex-col">{renderLayersPanel(false)}</section>}
         </aside>
       )}

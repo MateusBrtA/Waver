@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Loader2, Plus, Trash2, Upload, Volume2, VolumeX, X, Zap } from 'lucide-react';
 import { ApiClient } from '../lib/api';
 import { SoundItem, User } from '../types';
+import { EmojiPickerPopover } from './EmojiPicker';
 
 const PRESET_EMOJIS = ['📢', '💥', '🥁', '🎺', '🏆', '🚨', '😂', '💀', '🔥', '🎵', '👻', '🐸', '⚡', '👏'];
 const PRESET_COLORS = ['#5865F2', '#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#a855f7', '#ec4899'];
@@ -30,6 +31,7 @@ export const SoundboardPanel: React.FC<SoundboardPanelProps> = ({
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState('');
   const [emoji, setEmoji] = useState('🔥');
+  const [soundEmojiPicker, setSoundEmojiPicker] = useState<DOMRect | null>(null);
   const [color, setColor] = useState('#5865F2');
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -164,6 +166,20 @@ export const SoundboardPanel: React.FC<SoundboardPanelProps> = ({
           />
 
           <div className="flex flex-wrap gap-1">
+            {!PRESET_EMOJIS.includes(emoji) && (
+              <span className="w-7 h-7 rounded flex items-center justify-center text-base bg-[#5865f2]">{emoji}</span>
+            )}
+            <button
+              type="button"
+              onClick={(e) => setSoundEmojiPicker(e.currentTarget.getBoundingClientRect())}
+              className="h-7 px-2 rounded flex items-center justify-center text-xs bg-[#1e1f22] hover:bg-[#383a40] text-[#dbdee1] cursor-pointer"
+              title="Todos os emojis"
+            >
+              + Todos
+            </button>
+            {soundEmojiPicker && (
+              <EmojiPickerPopover anchor={soundEmojiPicker} onPick={setEmoji} onClose={() => setSoundEmojiPicker(null)} />
+            )}
             {PRESET_EMOJIS.map((em) => (
               <button
                 key={em}

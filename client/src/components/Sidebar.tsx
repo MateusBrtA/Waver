@@ -914,6 +914,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             <Lock className="w-2.5 h-2.5 text-[#f0b232] absolute -bottom-0.5 -right-0.5 bg-[#2b2d31] rounded-full" />
                           )}
                         </span>
+                        {participants.some((p) => p.recording === 'record') && (
+                          <span className="relative flex w-2.5 h-2.5 shrink-0" title="Esta chamada está sendo gravada">
+                            <span className="absolute inline-flex w-full h-full rounded-full bg-[#f23f42] opacity-75 animate-ping" />
+                            <span className="relative inline-flex w-2.5 h-2.5 rounded-full bg-[#f23f42]" />
+                          </span>
+                        )}
                         <span className="text-[15px] truncate leading-none">{ch.name}</span>
                         {isMuted && <BellOff className="w-3 h-3 text-[#80848e] shrink-0" />}
                       </div>
@@ -1311,12 +1317,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {user.customStatusText || user.customStatusEmoji
                 ? `${user.customStatusEmoji || ''} ${user.customStatusText || ''}`.trim()
                 : user.statusType === 'dnd'
-                ? 'Não Perturbe'
+                ? 'Ocupado'
                 : user.statusType === 'idle'
                 ? 'Ausente'
                 : user.statusType === 'invisible'
                 ? 'Invisível'
-                : 'Online'}
+                : 'Disponível'}
             </div>
           </div>
         </button>

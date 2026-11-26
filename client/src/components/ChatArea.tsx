@@ -57,16 +57,10 @@ import { VoiceMessagePlayer } from './VoiceMessagePlayer';
 import { MessageExtras, QuickReactButton } from './MessageExtras';
 import { toggleFavoriteGif, useFavoriteGifs } from '../lib/favoriteGifs';
 import { isTextureLikeName } from '../lib/model3dUtils';
+import { EmojiPicker } from './EmojiPicker';
 
 const Model3DInlinePreview = React.lazy(() => import('./Model3DInlinePreview'));
 
-const QUICK_EMOJIS = [
-  '😂', '🤣', '🔥', '💀', '😭', '😎', '🤩', '🥳',
-  '❤️', '💜', '👀', '👏', '🙌', '👍', '👎', '🤝',
-  '🎮', '🎧', '🎬', '🎵', '💥', '⚡', '🏆', '👑',
-  '😈', '🤡', '🫡', '🤔', '😱', '🤯', '🥶', '🥵',
-  '🚀', '💯', '✅', '❌', '🎉', '🍿', '🍕', '☕',
-];
 
 const DIRECT_IMAGE_URL_REGEX = /^https?:\/\/\S+\.(gif|png|jpe?g|webp)(\?\S*)?$/i;
 
@@ -249,6 +243,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [gifSearchResults, setGifSearchResults] = useState<GifItem[]>([]);
   const [gifProvider, setGifProvider] = useState('local');
   const [gifLoading, setGifLoading] = useState(false);
+  const [gifError, setGifError] = useState<string | null>(null);
   const [newGifTitle, setNewGifTitle] = useState('');
   const [newGifUrl, setNewGifUrl] = useState('');
   const [newGifTags, setNewGifTags] = useState('');
@@ -318,19 +313,26 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (!showGifPicker || !api) return;
     let cancelled = false;
     setGifLoading(true);
-    api
-      .searchGifs(gifQuery)
-      .then((res) => {
-        if (cancelled) return;
-        setGifProvider(res.provider);
-        setGifSearchResults(res.results);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setGifLoading(false);
-      });
+    // espera a pessoa parar de digitar: não gasta a cota da API a cada letra
+    const t = window.setTimeout(() => {
+      api
+        .searchGifs(gifQuery)
+        .then((res) => {
+          if (cancelled) return;
+          setGifProvider(res.provider);
+          setGifSearchResults(res.results);
+          setGifError(res.error || null);
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) setGifError((err as Error)?.message || 'Não foi possível buscar GIFs.');
+        })
+        .finally(() => {
+          if (!cancelled) setGifLoading(false);
+        });
+    }, gifQuery.trim() ? 350 : 0);
     return () => {
       cancelled = true;
+      window.clearTimeout(t);
     };
   }, [showGifPicker, gifQuery, api]);
 
@@ -1585,16 +1587,33 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <Loader2 className="w-6 h-6 animate-spin text-[#5865f2]" />
                   </div>
                 ) : gifSearchResults.length > 0 ? (
-                  <div className="grid grid-cols-2 gap-2">
-                    {gifSearchResults.map((g) =>
-                      renderGifTile({ key: g.id, url: g.url, previewUrl: g.previewUrl || g.url, title: g.title })
-                    )}
-                  </div>
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      {gifSearchResults.map((g) =>
+                        renderGifTile({ key: g.id, url: g.url, previewUrl: g.previewUrl || g.url, title: g.title })
+                      )}
+                    </div>
+                    <div className="text-[10px] text-[#949ba4] text-center mt-2">
+                      {gifProvider === 'klipy' ? 'Powered by KLIPY' : gifProvider === 'giphy' ? 'Powered by GIPHY' : ''}
+                    </div>
+                  </>
                 ) : (
-                  <div className="text-center py-6 text-xs text-[#b5bac1]">
-                    {gifProvider === 'local'
-                      ? 'Busca na internet precisa de uma chave do GIPHY: Configurações do servidor → Integrações. Ou use a aba + Subir / Link!'
-                      : 'Nenhum GIF encontrado.'}
+                  <div className="text-center py-6 text-xs text-[#b5bac1] space-y-1">
+                    {gifError ? (
+                      <p className="text-[#f0b232]">{gifError}</p>
+                    ) : gifProvider === 'tenor-off' ? (
+                      <p>
+                        O Google desligou a API do Tenor em 30/06/2026. Quem administra o servidor precisa colocar uma chave do KLIPY
+                        (grátis) ou do GIPHY em Configurações do servidor → Integrações.
+                      </p>
+                    ) : gifProvider === 'local' ? (
+                      <p>
+                        Busca na internet precisa de uma chave do KLIPY (grátis) ou do GIPHY: Configurações do servidor → Integrações. Ou use a
+                        aba + Subir / Link!
+                      </p>
+                    ) : (
+                      <p>Nenhum GIF encontrado.</p>
+                    )}
                   </div>
                 ))}
 
@@ -1646,22 +1665,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {/* Emoji Picker */}
         {showEmojiPicker && (
-          <div className="absolute bottom-18 right-12 z-30 w-72 bg-[#2b2d31] border border-[#1e1f22] rounded-lg shadow-2xl p-3">
-            <div className="grid grid-cols-8 gap-1">
-              {QUICK_EMOJIS.map((em) => (
-                <button
-                  key={em}
-                  type="button"
-                  onClick={() => {
-                    setText((prev) => prev + em);
-                    setShowEmojiPicker(false);
-                  }}
-                  className="text-xl p-1 hover:bg-[#383a40] rounded cursor-pointer"
-                >
-                  {em}
-                </button>
-              ))}
-            </div>
+          <div className="absolute bottom-18 right-12 z-30">
+            <EmojiPicker
+              onClose={() => setShowEmojiPicker(false)}
+              onPick={(em) => {
+                setText((prev) => prev + em);
+                setShowEmojiPicker(false);
+              }}
+            />
           </div>
         )}
 

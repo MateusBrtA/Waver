@@ -46,6 +46,7 @@ import {
   ServerTag,
   User,
 } from '../types';
+import { EmojiPickerPopover } from './EmojiPicker';
 
 interface ServerAdminPanelProps {
   section: 'server' | 'roles' | 'members' | 'audit' | 'bans';
@@ -90,7 +91,6 @@ const ROLE_COLORS = [
   '#00bcd4',
 ];
 
-const TAG_EMOJIS = ['🎮', '🔥', '🎵', '🎨', '💻', '🚀', '💬', '🎧', '🌟', '⚡', '🏆', '🛠️'];
 
 const AUDIT_TYPE_LABELS: Array<{ value: '' | AuditLogType; label: string }> = [
   { value: '', label: 'Todas as ações' },
@@ -145,10 +145,12 @@ export const ServerAdminPanel: React.FC<ServerAdminPanelProps> = ({
   const [srvTags, setSrvTags] = useState<ServerTag[]>(server.tags || []);
   const [newTagEmoji, setNewTagEmoji] = useState('🎮');
   const [newTagLabel, setNewTagLabel] = useState('');
+  const [tagEmojiPicker, setTagEmojiPicker] = useState<DOMRect | null>(null);
   const [allowCreate, setAllowCreate] = useState(server.allowMembersCreateChannels !== false);
   const [invitePw, setInvitePw] = useState('');
   const [giphyKey, setGiphyKey] = useState('');
-  const [tenorKey, setTenorKey] = useState('');
+  const [klipyKey, setKlipyKey] = useState('');
+  const [srvSaved, setSrvSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [ytCookies, setYtCookies] = useState('');
   const [savingServer, setSavingServer] = useState(false);
   const [uploadingServerImg, setUploadingServerImg] = useState(false);
@@ -179,32 +181,62 @@ export const ServerAdminPanel: React.FC<ServerAdminPanelProps> = ({
     return Array.from(map.values()).slice(0, 8);
   }, [users]);
 
-  const handleSaveServerProfile = async () => {
+  // Salva sozinho: cliques (cores, tags, opções) salvam na hora; textos salvam com Enter ou ao sair do campo.
+  // Só manda o que mudou em relação ao servidor atual.
+  type ServerAutoPatch = {
+    name?: string;
+    description?: string;
+    iconColor?: string;
+    bannerColor?: string;
+    tags?: ServerTag[];
+    allowMembersCreateChannels?: boolean;
+  };
+  const handleSaveServerProfile = async (over: ServerAutoPatch = {}) => {
     if (!permissions.manageServer) return;
+    const want = {
+      name: srvName.trim() || server.name,
+      description: srvDesc,
+      iconColor: srvIconColor,
+      bannerColor: srvBannerColor,
+      tags: srvTags.slice(0, 5),
+      allowMembersCreateChannels: allowCreate,
+      ...over,
+    };
+    const patch: Record<string, unknown> = {};
+    if (want.name !== server.name) patch.name = want.name;
+    if (want.description !== (server.description || '')) patch.description = want.description;
+    if (want.iconColor !== (server.iconColor || '#5865f2')) patch.iconColor = want.iconColor;
+    if (want.bannerColor !== (server.bannerColor || BANNER_SWATCHES[0])) patch.bannerColor = want.bannerColor;
+    if (JSON.stringify(want.tags) !== JSON.stringify(server.tags || [])) patch.tags = want.tags;
+    if (want.allowMembersCreateChannels !== (server.allowMembersCreateChannels !== false)) patch.allowMembersCreateChannels = want.allowMembersCreateChannels;
+    if (invitePw.trim()) patch.invitePassword = invitePw.trim();
+    if (giphyKey.trim()) patch.giphyApiKey = giphyKey.trim();
+    if (klipyKey.trim()) patch.klipyApiKey = klipyKey.trim();
+    if (ytCookies.trim()) patch.youtubeCookies = ytCookies;
+    if (!Object.keys(patch).length) return;
     setSavingServer(true);
+    setSrvSaved('saving');
     try {
-      const { server: updated } = await api.updateServer({
-        name: srvName.trim() || server.name,
-        description: srvDesc,
-        iconColor: srvIconColor,
-        bannerColor: srvBannerColor,
-        tags: srvTags.slice(0, 5),
-        allowMembersCreateChannels: allowCreate,
-        ...(invitePw.trim() ? { invitePassword: invitePw.trim() } : {}),
-        ...(giphyKey.trim() ? { giphyApiKey: giphyKey.trim() } : {}),
-        ...(tenorKey.trim() ? { tenorApiKey: tenorKey.trim() } : {}),
-        ...(ytCookies.trim() ? { youtubeCookies: ytCookies } : {}),
-      });
-      setInvitePw('');
-      setGiphyKey('');
-      setTenorKey('');
-      setYtCookies('');
+      const { server: updated } = await api.updateServer(patch as Parameters<typeof api.updateServer>[0]);
+      if (patch.invitePassword) setInvitePw('');
+      if (patch.giphyApiKey) setGiphyKey('');
+      if (patch.klipyApiKey) setKlipyKey('');
+      if (patch.youtubeCookies) setYtCookies('');
       onServerUpdated(updated);
-      onNotify?.('Perfil do servidor salvo com sucesso!');
+      setSrvSaved('saved');
+      if (patch.invitePassword || patch.giphyApiKey || patch.klipyApiKey || patch.youtubeCookies) onNotify?.('Configuração do servidor salva.');
     } catch (err: any) {
+      setSrvSaved('idle');
       onNotify?.(err?.message || 'Erro ao salvar perfil do servidor.');
     } finally {
       setSavingServer(false);
+    }
+  };
+  const autoSaveBlur = () => void handleSaveServerProfile();
+  const autoSaveEnter = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void handleSaveServerProfile();
     }
   };
 
@@ -493,6 +525,8 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                 type="text"
                 value={srvName}
                 onChange={(e) => setSrvName(e.target.value)}
+                onBlur={autoSaveBlur}
+                onKeyDown={autoSaveEnter}
                 disabled={!permissions.manageServer}
                 className="w-full px-3 py-2 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-sm text-white focus:outline-none focus:border-[#5865f2] disabled:opacity-60"
               />
@@ -540,6 +574,7 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                       value={srvIconColor}
                       disabled={!permissions.manageServer}
                       onChange={(e) => setSrvIconColor(e.target.value)}
+                      onBlur={autoSaveBlur}
                       className="w-7 h-7 rounded cursor-pointer bg-transparent border-0"
                     />
                   </div>
@@ -586,7 +621,10 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                       key={swatch}
                       type="button"
                       disabled={!permissions.manageServer}
-                      onClick={() => setSrvBannerColor(swatch)}
+                      onClick={() => {
+                        setSrvBannerColor(swatch);
+                        void handleSaveServerProfile({ bannerColor: swatch });
+                      }}
                       style={{ background: swatch }}
                       className={`h-11 rounded-lg transition-all relative border-2 ${
                         selected ? 'border-white ring-2 ring-[#5865f2]' : 'border-transparent hover:scale-[1.03]'
@@ -616,7 +654,11 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                     {permissions.manageServer && (
                       <button
                         type="button"
-                        onClick={() => setSrvTags(srvTags.filter((_, i) => i !== idx))}
+                        onClick={() => {
+                          const next = srvTags.filter((_, i) => i !== idx);
+                          setSrvTags(next);
+                          void handleSaveServerProfile({ tags: next });
+                        }}
                         className="text-[#949ba4] hover:text-white ml-0.5"
                       >
                         <X className="w-3 h-3" />
@@ -627,17 +669,17 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
               </div>
               {permissions.manageServer && srvTags.length < 5 && (
                 <div className="flex items-center gap-2">
-                  <select
-                    value={newTagEmoji}
-                    onChange={(e) => setNewTagEmoji(e.target.value)}
-                    className="px-2 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-sm"
+                  <button
+                    type="button"
+                    onClick={(e) => setTagEmojiPicker(e.currentTarget.getBoundingClientRect())}
+                    className="w-10 h-8 rounded-lg bg-[#1e1f22] border border-[#3f4147] hover:border-[#5865f2] text-lg flex items-center justify-center cursor-pointer"
+                    title="Escolher emoji"
                   >
-                    {TAG_EMOJIS.map((em) => (
-                      <option key={em} value={em}>
-                        {em}
-                      </option>
-                    ))}
-                  </select>
+                    {newTagEmoji}
+                  </button>
+                  {tagEmojiPicker && (
+                    <EmojiPickerPopover anchor={tagEmojiPicker} onPick={setNewTagEmoji} onClose={() => setTagEmojiPicker(null)} />
+                  )}
                   <input
                     type="text"
                     maxLength={24}
@@ -647,8 +689,10 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && newTagLabel.trim()) {
                         e.preventDefault();
-                        setSrvTags([...srvTags, { emoji: newTagEmoji, label: newTagLabel.trim() }].slice(0, 5));
+                        const next = [...srvTags, { emoji: newTagEmoji, label: newTagLabel.trim() }].slice(0, 5);
+                        setSrvTags(next);
                         setNewTagLabel('');
+                        void handleSaveServerProfile({ tags: next });
                       }
                     }}
                     className="flex-1 px-3 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-xs text-white focus:outline-none focus:border-[#5865f2]"
@@ -657,8 +701,10 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                     type="button"
                     onClick={() => {
                       if (!newTagLabel.trim()) return;
-                      setSrvTags([...srvTags, { emoji: newTagEmoji, label: newTagLabel.trim() }].slice(0, 5));
+                      const next = [...srvTags, { emoji: newTagEmoji, label: newTagLabel.trim() }].slice(0, 5);
+                      setSrvTags(next);
                       setNewTagLabel('');
+                      void handleSaveServerProfile({ tags: next });
                     }}
                     className="px-3 py-1.5 rounded-lg bg-[#35373c] hover:bg-[#43464d] text-xs text-white flex items-center gap-1"
                   >
@@ -677,6 +723,8 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                 value={srvDesc}
                 disabled={!permissions.manageServer}
                 onChange={(e) => setSrvDesc(e.target.value)}
+                onBlur={autoSaveBlur}
+                onKeyDown={autoSaveEnter}
                 placeholder="Conte ao mundo mais sobre esse servidor..."
                 className="w-full px-3 py-2 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-xs text-white focus:outline-none focus:border-[#5865f2] resize-none"
               />
@@ -725,7 +773,10 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                   type="checkbox"
                   checked={allowCreate}
                   disabled={!permissions.manageServer}
-                  onChange={(e) => setAllowCreate(e.target.checked)}
+                  onChange={(e) => {
+                    setAllowCreate(e.target.checked);
+                    void handleSaveServerProfile({ allowMembersCreateChannels: e.target.checked });
+                  }}
                   className="accent-[#5865f2] w-4 h-4"
                 />
               </label>
@@ -736,6 +787,8 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                   value={invitePw}
                   disabled={!permissions.manageServer}
                   onChange={(e) => setInvitePw(e.target.value)}
+                  onKeyDown={autoSaveEnter}
+                  onBlur={autoSaveBlur}
                   placeholder={server.hasInvitePassword ? 'Alterar senha do servidor...' : 'Definir senha de convite (opcional)'}
                   className="flex-1 px-3 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-xs text-white"
                 />
@@ -771,17 +824,19 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                     type="password"
                     value={giphyKey}
                     onChange={(e) => setGiphyKey(e.target.value)}
+                    onKeyDown={autoSaveEnter}
+                    onBlur={autoSaveBlur}
                     placeholder={server.hasGiphyKey ? 'Chave configurada · cole outra para trocar' : 'Cole a chave (developers.giphy.com → Create an App)'}
                     className="w-full px-3 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-xs text-white"
                   />
                 </div>
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-[#dbdee1]">
-                    <span>Chave da API do Tenor (opcional, alternativa)</span>
-                    {server.hasTenorKey && (
+                    <span>Chave da API do KLIPY (recomendada, grátis)</span>
+                    {server.hasKlipyKey && (
                       <button
                         type="button"
-                        onClick={() => api.updateServer({ tenorApiKey: '' }).then((r) => onServerUpdated(r.server))}
+                        onClick={() => api.updateServer({ klipyApiKey: '' }).then((r) => onServerUpdated(r.server))}
                         className="text-[11px] text-[#f23f42] hover:underline cursor-pointer"
                       >
                         Remover
@@ -790,12 +845,18 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                   </div>
                   <input
                     type="password"
-                    value={tenorKey}
-                    onChange={(e) => setTenorKey(e.target.value)}
-                    placeholder={server.hasTenorKey ? 'Chave configurada · cole outra para trocar' : 'Chave do Google Cloud com a Tenor API ativada'}
+                    value={klipyKey}
+                    onChange={(e) => setKlipyKey(e.target.value)}
+                    onKeyDown={autoSaveEnter}
+                    onBlur={autoSaveBlur}
+                    placeholder={server.hasKlipyKey ? 'Chave configurada · cole outra para trocar' : 'Cole a chave (partner.klipy.com → crie um app)'}
                     className="w-full px-3 py-1.5 rounded-lg bg-[#1e1f22] border border-[#3f4147] text-xs text-white"
                   />
-                  <p className="text-[11px] text-[#949ba4]">Com uma chave, a aba de busca do seletor de GIFs mostra GIFs da internet para todos do servidor.</p>
+                  <p className="text-[11px] text-[#949ba4]">
+                    Com uma chave, a aba de busca do seletor de GIFs mostra GIFs da internet para todos do servidor. O Google desligou a API do
+                    Tenor em 30/06/2026; o KLIPY é o substituto gratuito (o GIPHY também funciona). Se as duas estiverem configuradas, o KLIPY é
+                    usado primeiro.
+                  </p>
                 </div>
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-[#dbdee1]">
@@ -813,6 +874,7 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
                   <textarea
                     value={ytCookies}
                     onChange={(e) => setYtCookies(e.target.value)}
+                    onBlur={autoSaveBlur}
                     rows={3}
                     spellCheck={false}
                     placeholder={
@@ -831,16 +893,18 @@ A conta perde a chave de login deste servidor e é desconectada. A próxima pess
             )}
 
             {permissions.manageServer && (
-              <div className="pt-2 flex justify-end">
-                <button
-                  type="button"
-                  disabled={savingServer}
-                  onClick={handleSaveServerProfile}
-                  className="px-5 py-2.5 rounded-lg bg-[#23a55a] hover:bg-[#1a8e4a] text-xs font-bold text-white flex items-center gap-1.5"
-                >
-                  {savingServer ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                  Salvar alterações do servidor
-                </button>
+              <div className="pt-2 flex items-center justify-end gap-1.5 text-[11px] text-[#949ba4]">
+                {savingServer || srvSaved === 'saving' ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Salvando…
+                  </>
+                ) : srvSaved === 'saved' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-[#23a55a]" /> Alterações salvas
+                  </>
+                ) : (
+                  'Tudo salva sozinho: cliques na hora, textos com Enter ou ao sair do campo.'
+                )}
               </div>
             )}
           </div>

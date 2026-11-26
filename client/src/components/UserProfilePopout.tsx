@@ -7,7 +7,7 @@ import {
   Phone,
 } from 'lucide-react';
 import { resolveMediaUrl } from '../lib/api';
-import { Role, User } from '../types';
+import { PresenceStatus, Role, User } from '../types';
 import { Avatar, NAME_STYLES } from './Avatar';
 import { ConnectionIcon, getConnectionInfo } from './ConnectionBadge';
 import { ProfileEffectLayer } from './ProfileEffect';
@@ -24,7 +24,16 @@ interface UserProfilePopoutProps {
   onOpenFullProfile: (editMode?: boolean) => void;
   onOpenDm: () => void;
   onStartPrivateCall: () => void;
+  /** só no próprio perfil: troca o status na hora (e o popout fecha) */
+  onSetStatus?: (st: PresenceStatus) => void;
 }
+
+const SELF_STATUS: Array<{ value: PresenceStatus; label: string; hint: string; dot: string }> = [
+  { value: 'online', label: 'Disponível', hint: 'Vira Ausente sozinho após 10 min parado', dot: '#23a55a' },
+  { value: 'idle', label: 'Ausente', hint: '', dot: '#f0b232' },
+  { value: 'dnd', label: 'Ocupado', hint: 'Sem notificações nem sons de mensagem', dot: '#f23f42' },
+  { value: 'invisible', label: 'Invisível', hint: 'Aparece offline e esconde suas atividades', dot: '#80848e' },
+];
 
 export const UserProfilePopout: React.FC<UserProfilePopoutProps> = ({
   user,
@@ -37,6 +46,7 @@ export const UserProfilePopout: React.FC<UserProfilePopoutProps> = ({
   onOpenFullProfile,
   onOpenDm,
   onStartPrivateCall,
+  onSetStatus,
 }) => {
   const cardRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: anchor.x, top: anchor.y });
@@ -248,6 +258,32 @@ export const UserProfilePopout: React.FC<UserProfilePopoutProps> = ({
         )}
 
         {/* Bottom Action Buttons */}
+        {isSelf && onSetStatus && (
+          <div className="bg-[#1e1f22] rounded-lg border border-[#2b2d31] p-1" role="menu" aria-label="Status de disponibilidade">
+            {SELF_STATUS.map((st) => {
+              const on = (user.statusType || 'online') === st.value;
+              return (
+                <button
+                  key={st.value}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={on}
+                  onClick={() => onSetStatus(st.value)}
+                  className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded text-left cursor-pointer transition ${
+                    on ? 'bg-[#35373c]' : 'hover:bg-[#2b2d31]'
+                  }`}
+                >
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: st.dot }} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-xs font-semibold text-[#f2f3f5]">{st.label}</span>
+                    {st.hint && <span className="block text-[10px] text-[#949ba4] truncate">{st.hint}</span>}
+                  </span>
+                  {on && <span className="text-[10px] text-[#949ba4]">atual</span>}
+                </button>
+              );
+            })}
+          </div>
+        )}
         {isSelf ? (
           <button
             type="button"
