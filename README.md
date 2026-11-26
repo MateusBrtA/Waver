@@ -28,7 +28,7 @@ As chamadas de voz e vídeo vão direto entre os participantes (WebRTC). Em cham
 ## Recursos
 
 - **Chat:** canais de texto, mensagens diretas e grupos, respostas, reações, enquetes, tópicos, busca, fixar mensagens, anexos, GIFs (KLIPY ou GIPHY) e seletor completo de emojis.
-- **Voz e vídeo:** chamadas com supressão de ruído, volume por pessoa, câmera e **transmissão de tela até 1080p 60 fps** com o áudio do PC.
+- **Voz e vídeo:** chamadas com supressão de ruído, volume por pessoa, câmera e **transmissão de tela até 4K e 120 fps** com o áudio do PC.
 - **Chamadas grandes:** SFU opcional (mediasoup) que entra sozinho quando a chamada passa de algumas pessoas.
 - **Juntos na chamada:** tocador de músicas e de vídeos sincronizado (YouTube, SoundCloud e outros), soundboard e whiteboard colaborativo (camadas, pincéis, animação).
 - **Controle remoto:** quem transmite a tela pode liberar mouse, teclado e um controle de Xbox virtual para os outros.
@@ -37,6 +37,8 @@ As chamadas de voz e vídeo vão direto entre os participantes (WebRTC). Em cham
 - **Rede local sem servidor:** mensagens e chamadas diretas entre PCs da mesma rede.
 - **Windows:** notificações nativas, atalhos globais, overlay em jogos, "Compartilhar no Waver" no Explorer e ícone na bandeja que mostra uma linha de som enquanto você fala.
 - **Atualização automática e assinada** (veja [Atualizações](#atualizações)).
+
+Os detalhes e as especificações de cada recurso estão em [Recursos em detalhe](#recursos-em-detalhe).
 
 ## Começando
 
@@ -117,6 +119,85 @@ journalctl -u pulsecord -f     # logs ao vivo
 - Libere as portas no firewall da máquina **e**, se houver, no painel do provedor (VPS) ou no roteador (redirecionamento de porta para o IP do servidor).
 - Em IPv6 não há redirecionamento: basta a regra de entrada.
 - Requisitos: 1 vCPU e 1 GB de RAM atendem um grupo de amigos. Sem o SFU, o servidor só faz a sinalização e quase não usa banda nas chamadas.
+
+## Recursos em detalhe
+
+### Servidor, canais e cargos
+
+- **Canais:** texto, voz e **palco** (quem fala fica no palco, o resto na plateia; é possível levantar a mão), organizados em categorias que se arrastam para reordenar. Canais podem ser privados e duplicados com as permissões.
+- **Cargos e permissões:** 27 permissões em grupos (servidor, moderação, texto, voz e apps, avançado), com ajuste por canal. Ninguém cria nem edita cargo acima do seu e ninguém liga uma permissão que não tem.
+- **Moderação:** expulsar, banir (com motivo), silenciar ou ensurdecer alguém na chamada, mover entre canais e registro de auditoria de entradas, saídas, expulsões, banimentos e mudanças.
+- **Entrada:** senha de convite opcional; contas sem senha recebem uma **chave de login** guardada no app de quem criou, então ninguém entra na sua conta só digitando o mesmo nick.
+- **Eventos:** agenda com data futura e confirmação de presença.
+- **Quadros Trello:** quadros de tarefas (até 15 por servidor, DM ou grupo).
+
+### Chat
+
+- Mensagens com respostas, **tópicos** (threads), reações com qualquer emoji (inclusive sequências como famílias e bandeiras) e mensagens fixadas.
+- **Enquetes** com prazo e encerramento por quem criou.
+- **Busca** sem diferenciar acentos, com filtros de autor (`from:`), conteúdo (`has:` link, imagem, arquivo, enquete) e datas; só mostra o que você tem permissão para ver.
+- **Anexos:** até 6 arquivos por mensagem, 60 MB cada, com visualização de imagens, vídeos, áudio e **modelos 3D** (`.glb`, `.gltf`, `.fbx`, `.obj` e `.blend`, este convertido com o Blender do Host).
+- **Transferência de arquivos grandes:** até cerca de 1,85 GB, com opção de **download único** (o arquivo some depois de baixado).
+- **Prévia de links** do YouTube, Spotify, SoundCloud, TikTok, Instagram e Twitter/X.
+- **Blocos de código** com detecção da linguagem.
+- **GIFs** pelo KLIPY ou GIPHY (com a chave do dono do servidor) mais os GIFs enviados pelo próprio grupo, e favoritos.
+- **Mensagens diretas e grupos** com ícone e nome próprios.
+
+### Voz e vídeo
+
+- **Microfone:** detecção de voz ou **aperte para falar** (tecla configurável), supressão de ruído, cancelamento de eco e ganho automático. No perfil **Estúdio** tudo isso desliga para um som fiel.
+- **Qualidade do áudio:** Opus a 128 kbps (160 kbps no perfil Estúdio); o áudio do PC na transmissão de tela vai a 192 kbps.
+- **Volume por pessoa**, silenciar e ensurdecer, aviso quando você fala com o microfone desligado e indicador de quem está falando.
+- **Câmera** e **transmissão de tela** de uma janela ou da tela inteira, com o áudio do PC:
+
+  | Ajuste | Opções |
+  |---|---|
+  | Resolução | 720p, 1080p, 1440p ou a da fonte (até 4K) |
+  | Quadros por segundo | 30, 60 ou 120 |
+  | Taxa máxima | 6, 12, 22 ou 28 Mbps (ou automática) |
+  | Codec | H.264 de preferência; modo de baixa latência para jogos |
+
+- **Chamadas grandes (SFU):** com o mediasoup ligado no servidor, a chamada passa a ser repassada por ele quando tem mais de 4 pessoas (ajustável), ou sempre, se o dono preferir. Assim cada um envia o próprio vídeo uma vez só.
+- **Gravação:** a chamada (e a sua transmissão) vira um `.webm` (VP9/Opus) na pasta `Vídeos\Waver\Gravações`. Antes de gravar, **todos na chamada precisam permitir**; uma recusa ou 60 s sem resposta cancela. Todos veem "REC" ao lado do nome de quem grava. Vale também nas chamadas diretas da rede local.
+- **Clipes:** guarda o último minuto da chamada para salvar com um atalho, em `Vídeos\Waver\Clipes`. Os outros veem que os clipes estão ligados.
+
+### Juntos na chamada
+
+- **Tocador de músicas** sincronizado: links do YouTube, Spotify e SoundCloud (faixas e playlists) e uma biblioteca do servidor com arquivos de até 80 MB. Fila, repetir, pular e voltar.
+- **Tocador de vídeos** sincronizado: YouTube, Twitter/X, Instagram e TikTok, com fila e velocidade.
+- **Soundboard:** sons de até 15 MB, tocados só na chamada em que você está e controlados por permissão.
+- **Whiteboard colaborativo:**
+  - Camadas, pranchetas e ferramentas de pincel, aerógrafo, preenchimento, degradê, retângulo, elipse, caminho vetorial, texto, seleção e mover camada.
+  - 60 pincéis embutidos e importação de pincéis seus (`.png`, `.jpg`, `.webp`, `.gbr`, `.gih` e pacotes `.bundle`/`.zip` do Krita).
+  - **Animação** quadro a quadro com papel vegetal (onion skin).
+  - Exporta em PNG, SVG, PSD com camadas, GIF animado, vídeo WebM e PSD com um quadro por camada.
+  - Cada sala tem o próprio quadro: quem não está na chamada não vê nem desenha.
+- **Controle remoto:** quem transmite a tela pode liberar mouse, teclado e um controle de Xbox virtual (ViGEmBus) para outra pessoa, escolhendo o que vale. Os comandos vão por um canal direto (WebRTC) de baixa latência, e a permissão pode ser retirada a qualquer momento.
+
+### Perfil e status
+
+- Avatar, capa, fundo do perfil, cor de destaque, efeitos de perfil e temas do app.
+- **Status:** Disponível, Ausente (automático depois de 10 minutos parado), Ocupado (sem sons de mensagem) e Invisível (os outros te veem offline). A atividade (o jogo aberto) aparece para os outros, menos no modo Invisível.
+
+### Rede local sem servidor
+
+- Os PCs da mesma rede se encontram sozinhos e trocam mensagens diretas, grupos, arquivos (até 64 MB) e chamadas, sem servidor.
+- Cada PC tem uma chave própria (Ed25519) e assina o que envia: ninguém da rede se passa por outra pessoa nem entra numa chamada para a qual não foi chamado.
+- As conversas guardadas no PC ficam criptografadas.
+
+### Windows
+
+- **Atalhos globais** (funcionam com o app em segundo plano): silenciar o microfone, desativar o áudio, mostrar o overlay e salvar clipe.
+- **Overlay** por cima dos jogos, mostrando quem está na chamada e falando.
+- Notificações nativas, menu **"Compartilhar no Waver"** no Explorer e opção de fechar para a bandeja.
+- **Bandeja:** o ícone mostra uma linha de som animada enquanto você fala e fica vermelho com o microfone desligado.
+
+### Servidor dedicado
+
+- Roda em Linux (systemd) ou Windows (tarefa agendada), com **código do dono** gerado na instalação.
+- HTTPS automático com Caddy e Let's Encrypt, TURN (coturn) para quem está atrás de NAT difícil e SFU opcional.
+- Funciona em IPv4 e IPv6 e atrás de proxy reverso ou do túnel da Cloudflare.
+- Cache de mídia com teto de 2 GB e limpeza pelos moderadores.
 
 ## Atualizações
 

@@ -921,12 +921,18 @@ if (!gotLock) {
   app.whenReady().then(() => {
     protocol.handle('app', (request) => {
       const parsed = new URL(request.url);
-      let relPath = decodeURIComponent(parsed.pathname);
-      if (!relPath || relPath === '/') relPath = '/index.html';
+      let relPath = '/index.html';
+      try {
+        relPath = decodeURIComponent(parsed.pathname) || '/index.html';
+      } catch {}
+      if (relPath === '/') relPath = '/index.html';
 
       const activeDist = getActiveDistDir();
       const targetPath = path.normalize(path.join(activeDist, relPath));
-      if (!targetPath.startsWith(activeDist) || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) {
+      // dentro da pasta da interface (não vale pasta vizinha com o mesmo começo de nome, como "dist-old")
+      const rel = path.relative(activeDist, targetPath);
+      const inside = rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+      if (!inside || !fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) {
         return net.fetch(pathToFileURL(path.join(activeDist, 'index.html')).toString());
       }
       return net.fetch(pathToFileURL(targetPath).toString());

@@ -11,6 +11,7 @@ const multer = require('multer');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 const wbRoom = require('../server/wbRoom.cjs');
+const { createRecConsent } = require('../server/recConsent.cjs');
 
 const DEFAULT_PEER_DISCOVERY_PORT = 41235;
 const PROBE_MAGIC = 'PULSECORD_PEER_PROBE_V1';
@@ -604,9 +605,10 @@ class LanPeerMessenger {
 
     app.get('/p2p/avatar/:peerId?', (_req, res) => {
       const dataUrl = this.identity.avatarDataUrl || '';
-      const m = /^data:([^;]+);base64,(.+)$/i.exec(dataUrl);
+      const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.+)$/i.exec(dataUrl);
       if (!m) return res.status(404).end();
       res.setHeader('Content-Type', m[1]);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Cache-Control', 'no-cache');
       res.send(Buffer.from(m[2], 'base64'));
     });
@@ -995,9 +997,17 @@ class LanPeerMessenger {
       this.io.to(`voice:${ch}`).emit('music:state', { ...s, channelId: ch, positionSec: livePos, updatedAt: now, serverNow: now });
     };
 
+    // mesma regra do servidor: gravar a chamada precisa da permissão de todos
+    const recConsent = createRecConsent({
+      io: this.io,
+      getRoom: (ch) => this.voiceRooms.get(ch),
+      getChannelOf: (sid) => this.socketVoiceChannel.get(sid),
+    });
+
     const leaveCurrentVoice = (socket) => {
       const prevCh = this.socketVoiceChannel.get(socket.id);
       if (!prevCh) return;
+      recConsent.onLeave(socket.id, prevCh);
       this.socketVoiceChannel.delete(socket.id);
       socket.leave(`voice:${prevCh}`);
       const room = this.voiceRooms.get(prevCh);
@@ -1072,12 +1082,14 @@ class LanPeerMessenger {
           cameraOn: false,
           screenSharing: false,
           screenLabel: '',
+          recording: null,
           streamsMeta: null,
           joinedAt: Date.now(),
         };
         room.set(socket.id, participant);
         this.socketVoiceChannel.set(socket.id, channelId);
         socket.join(`voice:${channelId}`);
+        recConsent.onJoin(channelId, socket.id);
 
         const existingPeers = Array.from(room.values()).filter((p) => p.socketId !== socket.id);
         socket.to(`voice:${channelId}`).emit('voice:peer-joined', { channelId, peer: participant, participant });
@@ -1096,18 +1108,21 @@ class LanPeerMessenger {
       });
 
       socket.on('voice:leave', () => leaveCurrentVoice(socket));
+      socket.on('voice:record-request', (_payload, cb) => recConsent.request(socket, cb));
+      socket.on('voice:record-consent', (payload) => recConsent.consent(socket, payload));
 
       socket.on('voice:media-state', (state) => {
         const ch = this.socketVoiceChannel.get(socket.id);
         const room = ch && this.voiceRooms.get(ch);
         const p = room?.get(socket.id);
-        if (!p) return;
+        if (!p || !state || typeof state !== 'object') return;
+        recConsent.applyRecording(socket, ch, p, state);
         Object.assign(p, {
           ...(typeof state.muted === 'boolean' ? { muted: state.muted } : {}),
           ...(typeof state.deafened === 'boolean' ? { deafened: state.deafened } : {}),
           ...(typeof state.cameraOn === 'boolean' ? { cameraOn: state.cameraOn } : {}),
           ...(typeof state.screenSharing === 'boolean' ? { screenSharing: state.screenSharing } : {}),
-          ...(typeof state.screenLabel === 'string' ? { screenLabel: state.screenLabel } : {}),
+          ...(typeof state.screenLabel === 'string' ? { screenLabel: state.screenLabel.slice(0, 64) } : {}),
         });
         this.io.to(`voice:${ch}`).emit('voice:media-updated', { channelId: ch, participant: p });
         this.io.to(`voice:${ch}`).emit('dm:voice-participants', Array.from(room.values()));

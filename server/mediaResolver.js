@@ -319,6 +319,9 @@ async function runYtDlpJsonProcess(binPath, args, timeoutMs) {
 export function detectMediaPlatform(rawUrl) {
   try {
     const u = new URL(rawUrl);
+    // só links da web: file://, data: etc. nunca vão para o yt-dlp nem para fetch
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'invalid';
+    if (u.username || u.password) return 'invalid';
     const h = u.hostname.toLowerCase().replace(/^www\.|^m\./, '');
     if (h === 'youtube.com' || h === 'youtu.be' || h === 'music.youtube.com') return 'youtube';
     if (h === 'twitter.com' || h === 'x.com' || h === 'fxtwitter.com' || h === 'vxtwitter.com') return 'twitter';

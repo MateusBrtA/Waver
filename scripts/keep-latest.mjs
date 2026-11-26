@@ -44,6 +44,13 @@ if (!isFresh(fresh)) {
 for (const name of fs.readdirSync(root)) {
   if (/^(Waver|PulseCord).*\.exe$/i.test(name) && name !== PORTABLE) remove(path.join(root, name), 'versão antiga');
 }
-fs.copyFileSync(fresh, path.join(root, PORTABLE));
+try {
+  fs.copyFileSync(fresh, path.join(root, PORTABLE));
+} catch (err) {
+  if (err?.code !== 'EBUSY' && err?.code !== 'EPERM') throw err;
+  // o portátil da raiz está aberto: o build continua valendo (dist-app), e o app aberto se atualiza sozinho
+  console.warn(`[pasta] ${PORTABLE} da pasta do projeto está aberto; feche o app e rode "node scripts/keep-latest.mjs" para copiar o novo.`);
+  process.exit(0);
+}
 const mb = (fs.statSync(fresh).size / 1048576).toFixed(1);
 console.log(`[pasta] ${PORTABLE} atualizado na pasta do projeto (${mb} MB).`);

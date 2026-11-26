@@ -600,6 +600,55 @@ export default function App() {
   }, []);
 
   const showError = useCallback((msg: string) => showToast(msg, 'error'), [showToast]);
+  // Pedido de permissão para gravar e aviso de gravação: vale para o servidor e para a chamada direta na rede local.
+  const bindRecConsentEvents = useCallback(
+    (sock: Socket) => {
+      sock.on('voice:record-consent-ask', ({ requestId, from }: { requestId: string; from: string }) => {
+        audioEngine.playUiTone('recording_on');
+        setRecConsentAsk({ requestId, from });
+      });
+      sock.on('voice:record-consent-closed', ({ requestId }: { requestId: string }) => {
+        setRecConsentAsk((cur) => (cur && cur.requestId === requestId ? null : cur));
+      });
+      sock.on(
+        'voice:record-consent-result',
+        ({ ok, by, reason }: { ok: boolean; by?: string | null; reason?: string | null }) => {
+          setRecRequestPending(false);
+          if (ok) {
+            startRecordingNowRef.current();
+            return;
+          }
+          showToast(
+            reason === 'declined'
+              ? `${by || 'Alguém'} não permitiu gravar a chamada.`
+              : reason === 'timeout'
+              ? 'Nem todos responderam ao pedido de gravação a tempo. A chamada não foi gravada.'
+              : reason === 'not-approved'
+              ? 'A gravação precisa da permissão de todos na chamada.'
+              : 'O pedido de gravação foi cancelado.',
+            'error'
+          );
+        }
+      );
+      sock.on(
+        'voice:recording-changed',
+        ({ socketId, displayName, recording }: { socketId: string; displayName: string; recording: 'record' | 'clips' | null }) => {
+          if (recording === 'record') audioEngine.playUiTone('recording_on');
+          else if (recording === null) audioEngine.playUiTone('recording_off');
+          if (socketId === sock.id) return;
+          showToast(
+            recording === 'record'
+              ? `🔴 ${displayName} começou a gravar a chamada.`
+              : recording === 'clips'
+              ? `${displayName} está com os clipes ligados (pode salvar trechos da chamada).`
+              : `${displayName} parou de gravar.`,
+            'info'
+          );
+        }
+      );
+    },
+    [showToast]
+  );
 
   // Load, apply & persist Theme + CSS AI Studio (plus Ctrl+Shift+F12 Safe Mode toggle!)
   useEffect(() => {
@@ -1762,49 +1811,7 @@ export default function App() {
     socket.on('chat:thread-message-deleted', ({ parentId, messageId }: { parentId: string; messageId: string }) => {
       setThreadView((tv) => (tv && tv.parent.id === parentId ? { ...tv, messages: tv.messages.filter((m) => m.id !== messageId) } : tv));
     });
-    socket.on('voice:record-consent-ask', ({ requestId, from }: { requestId: string; from: string }) => {
-      audioEngine.playUiTone('recording_on');
-      setRecConsentAsk({ requestId, from });
-    });
-    socket.on('voice:record-consent-closed', ({ requestId }: { requestId: string }) => {
-      setRecConsentAsk((cur) => (cur && cur.requestId === requestId ? null : cur));
-    });
-    socket.on(
-      'voice:record-consent-result',
-      ({ ok, by, reason }: { ok: boolean; by?: string | null; reason?: string | null }) => {
-        setRecRequestPending(false);
-        if (ok) {
-          startRecordingNowRef.current();
-          return;
-        }
-        showToast(
-          reason === 'declined'
-            ? `${by || 'Alguém'} não permitiu gravar a chamada.`
-            : reason === 'timeout'
-            ? 'Nem todos responderam ao pedido de gravação a tempo. A chamada não foi gravada.'
-            : reason === 'not-approved'
-            ? 'A gravação precisa da permissão de todos na chamada.'
-            : 'O pedido de gravação foi cancelado.',
-          'error'
-        );
-      }
-    );
-    socket.on(
-      'voice:recording-changed',
-      ({ socketId, displayName, recording }: { socketId: string; displayName: string; recording: 'record' | 'clips' | null }) => {
-        if (recording === 'record') audioEngine.playUiTone('recording_on');
-        else if (recording === null) audioEngine.playUiTone('recording_off');
-        if (socketId === socket.id) return;
-        showToast(
-          recording === 'record'
-            ? `🔴 ${displayName} começou a gravar a chamada.`
-            : recording === 'clips'
-            ? `${displayName} está com os clipes ligados (pode salvar trechos da chamada).`
-            : `${displayName} parou de gravar.`,
-          'info'
-        );
-      }
-    );
+    bindRecConsentEvents(socket);
     socket.on('stage:role', ({ role, by }: { role: 'speaker' | 'audience'; by: string | null }) => {
       audioEngine.playUiTone(role === 'speaker' ? 'join' : 'leave');
       showToast(
@@ -2775,6 +2782,7 @@ export default function App() {
       p2pCallSocketRef.current = p2pSock;
       isLanCallActiveRef.current = true;
       rtc.attachSocket(p2pSock);
+      bindRecConsentEvents(p2pSock);
 
       p2pSock.on('connect', () => {
         setSelfSocketId(p2pSock.id || '');
@@ -2919,7 +2927,7 @@ export default function App() {
         }
       );
     },
-    [muted, deafened, isElectron, revokeRemoteControlInternal, disconnectLanCallSocket, syncClockWithSocket, showError, showToast]
+    [muted, deafened, isElectron, revokeRemoteControlInternal, disconnectLanCallSocket, syncClockWithSocket, showError, showToast, bindRecConsentEvents]
   );
 
   useEffect(() => {

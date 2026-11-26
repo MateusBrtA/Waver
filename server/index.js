@@ -36,6 +36,7 @@ import {
 import { clearMediaCache, enforceStorageLimit, getStorageStats } from './storageManager.js';
 import { createUpdateHelper } from './updater.js';
 import wbRoom from './wbRoom.cjs';
+import recConsentMod from './recConsent.cjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1373,7 +1374,15 @@ function sanitizeActivity(a) {
       !HEADLESS &&
       !viaProxy &&
       (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1');
-    if (!isLoopbackReq && loginRateLimited(req.ip || remoteAddr)) {
+    // Pelo túnel da Cloudflare (cloudflared do app do Host) todo mundo chega de 127.0.0.1: sem isto, todos dividiriam
+    // o mesmo limite e uma pessoa poderia travar o login dos outros. O cabeçalho só vale no Host do app, sem proxy
+    // configurado e vindo do loopback (o cloudflared local; a borda da Cloudflare sempre o reescreve). Atrás de um
+    // proxy (Caddy/nginx, com PULSECORD_TRUST_PROXY) o cabeçalho viria do visitante, então lá vale o req.ip.
+    const fromLoopback = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+    const cfIp = String(req.headers['cf-connecting-ip'] || '').trim();
+    const useCfIp = !HEADLESS && !trustProxy && fromLoopback && cfIp && cfIp.length <= 64 && /^[0-9a-f:.]+$/i.test(cfIp);
+    const limitKey = useCfIp ? `cf:${cfIp}` : req.ip || remoteAddr;
+    if (!isLoopbackReq && loginRateLimited(limitKey)) {
       return res.status(429).json({ error: 'Muitas tentativas de entrar. Espere um minuto e tente de novo.' });
     }
     const ownerCodeOk = isOwnerCode(req.body?.ownerCode);
@@ -3428,35 +3437,16 @@ function sanitizeActivity(a) {
   // ===== Consentimento para gravar a chamada =====
   // Quem quer gravar pede; todos os outros na chamada precisam permitir. Uma recusa (ou 60 s sem resposta)
   // cancela. Quem entra numa chamada que está sendo gravada já confirmou no app antes de entrar.
-  const recConsent = new Map(); // channelId -> { id, requester, name, pending:Set<socketId>, timer }
-  const recApproved = new Map(); // socketId -> channelId (pode gravar nesta chamada)
-  function finishRecConsent(channelId, ok, byName = null, reason = null) {
-    const req = recConsent.get(channelId);
-    if (!req) return;
-    clearTimeout(req.timer);
-    recConsent.delete(channelId);
-    if (ok) recApproved.set(req.requester, channelId);
-    io.to(req.requester).emit('voice:record-consent-result', { channelId, ok, by: byName, reason });
-    io.to(`voice:${channelId}`).emit('voice:record-consent-closed', { requestId: req.id, ok, by: byName });
-  }
-  function askRecConsent(channelId, sid) {
-    const req = recConsent.get(channelId);
-    if (!req || sid === req.requester || req.pending.has(sid)) return;
-    req.pending.add(sid);
-    io.to(sid).emit('voice:record-consent-ask', { requestId: req.id, channelId, from: req.name });
-  }
-  function dropFromRecConsent(socketId, channelId) {
-    recApproved.delete(socketId);
-    const req = recConsent.get(channelId);
-    if (!req) return;
-    if (req.requester === socketId) return finishRecConsent(channelId, false, null, 'cancelled');
-    if (req.pending.delete(socketId) && req.pending.size === 0) finishRecConsent(channelId, true);
-  }
+  const recConsent = recConsentMod.createRecConsent({
+    io,
+    getRoom: (channelId) => voiceRooms.get(channelId),
+    getChannelOf: (sid) => socketVoiceChannel.get(sid),
+  });
 
   function leaveVoiceRoom(socket) {
     const prevChannelId = socketVoiceChannel.get(socket.id);
     if (!prevChannelId) return;
-    dropFromRecConsent(socket.id, prevChannelId);
+    recConsent.onLeave(socket.id, prevChannelId);
 
     socketVoiceChannel.delete(socket.id);
     socket.leave(`voice:${prevChannelId}`);
@@ -3997,11 +3987,7 @@ function sanitizeActivity(a) {
       roomMap.set(socket.id, participant);
       socketVoiceChannel.set(socket.id, channelId);
       socket.join(`voice:${channelId}`);
-      askRecConsent(channelId, socket.id);
-      // permissão dada antes desta pessoa entrar (e que ainda não virou gravação) não vale para ela
-      for (const [sid, chId] of recApproved) {
-        if (chId === channelId && sid !== socket.id && roomMap.get(sid)?.recording !== 'record') recApproved.delete(sid);
-      }
+      recConsent.onJoin(channelId, socket.id);
 
       // Mesma conta entrando por outro socket: o antigo sai da call (como no Discord). Feito depois de
       // adicionar o novo, para a sala não ficar vazia e pausar música/vídeo numa simples reconexão.
@@ -4106,41 +4092,8 @@ function sanitizeActivity(a) {
       }
     });
 
-    socket.on('voice:record-request', (_payload, cb) => {
-      const channelId = socketVoiceChannel.get(socket.id);
-      const roomMap = channelId ? voiceRooms.get(channelId) : null;
-      if (!channelId || !roomMap) return cb?.({ error: 'Entre numa chamada para gravar.' });
-      if (recApproved.get(socket.id) === channelId) return cb?.({ ok: true, approved: true });
-      if (recConsent.has(channelId)) return cb?.({ error: 'Já há um pedido de gravação esperando resposta nesta chamada.' });
-      const others = [...roomMap.keys()].filter((sid) => sid !== socket.id);
-      if (!others.length) {
-        recApproved.set(socket.id, channelId);
-        return cb?.({ ok: true, approved: true });
-      }
-      const name = roomMap.get(socket.id)?.displayName || 'Alguém';
-      const req = {
-        id: uuidv4(),
-        requester: socket.id,
-        name,
-        pending: new Set(),
-        timer: setTimeout(() => finishRecConsent(channelId, false, null, 'timeout'), 60_000),
-      };
-      recConsent.set(channelId, req);
-      for (const sid of others) askRecConsent(channelId, sid);
-      cb?.({ ok: true, approved: false, waiting: others.length });
-    });
-
-    socket.on('voice:record-consent', (payload) => {
-      const channelId = socketVoiceChannel.get(socket.id);
-      const req = channelId ? recConsent.get(channelId) : null;
-      if (!req || req.id !== payload?.requestId || !req.pending.has(socket.id)) return;
-      if (payload?.accept !== true) {
-        const name = voiceRooms.get(channelId)?.get(socket.id)?.displayName || 'Alguém';
-        return finishRecConsent(channelId, false, name, 'declined');
-      }
-      req.pending.delete(socket.id);
-      if (req.pending.size === 0) finishRecConsent(channelId, true);
-    });
+    socket.on('voice:record-request', (_payload, cb) => recConsent.request(socket, cb));
+    socket.on('voice:record-consent', (payload) => recConsent.consent(socket, payload));
 
     socket.on('voice:media-state', (state) => {
       const channelId = socketVoiceChannel.get(socket.id);
@@ -4162,24 +4115,7 @@ function sanitizeActivity(a) {
       if (typeof state?.screenSharing === 'boolean') participant.screenSharing = canStreamHere ? state.screenSharing : false;
       if (typeof state?.screenLabel === 'string') participant.screenLabel = state.screenLabel.slice(0, 64);
       // aviso para todos quando alguém grava a chamada (ou mantém clipes)
-      if ('recording' in (state || {})) {
-        const prevRec = participant.recording || null;
-        let wantRec = state.recording === 'record' || state.recording === 'clips' ? state.recording : null;
-        if (wantRec === 'record' && recApproved.get(socket.id) !== channelId) {
-          wantRec = prevRec === 'clips' ? 'clips' : null;
-          socket.emit('voice:record-consent-result', { channelId, ok: false, reason: 'not-approved' });
-        }
-        if (prevRec === 'record' && wantRec !== 'record') recApproved.delete(socket.id);
-        participant.recording = wantRec;
-        if (participant.recording !== prevRec) {
-          io.to(`voice:${channelId}`).emit('voice:recording-changed', {
-            channelId,
-            socketId: socket.id,
-            displayName: participant.displayName,
-            recording: participant.recording,
-          });
-        }
-      }
+      recConsent.applyRecording(socket, channelId, participant, state);
 
       if ((channelId.startsWith('dm:') || channelId.startsWith('group:')) && roomMap) {
         io.to(`voice:${channelId}`).emit('voice:dm-participants', {
@@ -4242,13 +4178,19 @@ function sanitizeActivity(a) {
 
     // WebRTC Signaling (só para conexões reais: um nome de sala aqui mandaria para todo mundo da sala)
     const isLiveSocketId = (id) => typeof id === 'string' && id.length < 64 && io.sockets.sockets.has(id);
+    // sinalização WebRTC só entre quem está na mesma chamada: o app atende ofertas de quem está na call,
+    // então sem isso alguém de fora poderia abrir conexão e ouvir o microfone de quem está na chamada.
+    const inSameCall = (otherSid) => {
+      const ch = socketVoiceChannel.get(socket.id);
+      return Boolean(ch) && isLiveSocketId(otherSid) && socketVoiceChannel.get(otherSid) === ch;
+    };
     socket.on('rtc:description', ({ targetSocketId, description } = {}) => {
-      if (!isLiveSocketId(targetSocketId) || !description) return;
+      if (!inSameCall(targetSocketId) || !description) return;
       io.to(targetSocketId).emit('rtc:description', { fromSocketId: socket.id, description });
     });
 
     socket.on('rtc:ice-candidate', ({ targetSocketId, candidate } = {}) => {
-      if (!isLiveSocketId(targetSocketId) || !candidate) return;
+      if (!inSameCall(targetSocketId) || !candidate) return;
       io.to(targetSocketId).emit('rtc:ice-candidate', { fromSocketId: socket.id, candidate });
     });
 
@@ -4258,7 +4200,7 @@ function sanitizeActivity(a) {
       const participant = voiceRooms.get(channelId)?.get(socket.id);
       if (participant) participant.streamsMeta = meta || null;
       if (targetSocketId) {
-        if (isLiveSocketId(targetSocketId)) io.to(targetSocketId).emit('rtc:streams-meta', { fromSocketId: socket.id, meta });
+        if (inSameCall(targetSocketId)) io.to(targetSocketId).emit('rtc:streams-meta', { fromSocketId: socket.id, meta });
       } else {
         socket.to(`voice:${channelId}`).emit('rtc:streams-meta', { fromSocketId: socket.id, meta });
       }
@@ -4331,8 +4273,9 @@ function sanitizeActivity(a) {
 
     // Soundboard (respects useSoundboard permission!)
     socket.on('soundboard:play', ({ channelId, soundId }) => {
-      const activeChannel = channelId || socketVoiceChannel.get(socket.id);
-      if (!activeChannel) return;
+      const activeChannel = socketVoiceChannel.get(socket.id);
+      // só toca na chamada em que a pessoa está
+      if (!activeChannel || (channelId && channelId !== activeChannel)) return;
       const currentDb = getDb();
       const sound = currentDb.sounds.find((s) => s.id === soundId);
       const actor = currentDb.users.find((u) => u.id === socket.data.userId);
