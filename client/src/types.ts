@@ -520,6 +520,8 @@ export interface RemotePeerMedia {
   screenStats: StreamStats | null;
   camStats: StreamStats | null;
   dataChannelOpen?: boolean;
+  /** a mídia desta pessoa chega pelo SFU do servidor (não por conexão P2P direta) */
+  viaSfu?: boolean;
 }
 
 export interface ScreenShareConfig {

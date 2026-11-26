@@ -17,5 +17,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "optionalDependencies": {
+    "mediasoup": "^3.32.2"
   }
 }

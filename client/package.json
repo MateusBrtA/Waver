@@ -11,6 +11,7 @@
   "dependencies": {
     "@types/three": "^0.187.0",
     "lucide-react": "^0.483.0",
+    "mediasoup-client": "^3.26.0",
     "pulsecord": "file:..",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

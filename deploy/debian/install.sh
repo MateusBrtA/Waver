@@ -8,6 +8,7 @@
 #   --with-turn     instala o coturn (TURN) para chamadas atravessarem NAT/CGNAT e firewalls
 #   --domain D      domínio apontado para este servidor (registros A/AAAA). Usado no TURN e no HTTPS opcional
 #   --https         instala o Caddy como proxy HTTPS (exige --domain e as portas 80/443 livres)
+#   --with-sfu      liga o SFU (mediasoup) para chamadas grandes: PULSECORD_SFU=auto e portas 40000-40999
 #   --no-firewall   não mexe no firewall (ufw)
 #
 # Pode rodar de novo para atualizar: os dados em /var/lib/pulsecord são mantidos.
@@ -17,6 +18,7 @@ PORT=3000
 WITH_TURN=0
 DOMAIN=""
 WITH_HTTPS=0
+WITH_SFU=0
 FIREWALL=1
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -24,8 +26,9 @@ while [ $# -gt 0 ]; do
     --with-turn) WITH_TURN=1; shift ;;
     --domain) DOMAIN="$2"; shift 2 ;;
     --https) WITH_HTTPS=1; shift ;;
+    --with-sfu) WITH_SFU=1; shift ;;
     --no-firewall) FIREWALL=0; shift ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "Opção desconhecida: $1"; exit 1 ;;
   esac
 done
@@ -99,12 +102,35 @@ fi
 
 echo "==> Dependências do servidor"
 cd "$APP_DIR/server"
+# SFU: worker do mediasoup que veio pronto no pacote (o npm baixaria do GitHub, que não tem IPv6)
+MS_BIN=""
+case "$(uname -m)" in x86_64) MS_ARCH=x64 ;; aarch64|arm64) MS_ARCH=arm64 ;; *) MS_ARCH="" ;; esac
+MS_VER="$("$NODE_BIN" -p "(require('./package-lock.json').packages['node_modules/mediasoup'] || {}).version || ''" 2>/dev/null || true)"
+MS_TGZ="$APP_DIR/deploy/mediasoup-worker/mediasoup-worker-$MS_VER-linux-$MS_ARCH-kernel$(uname -r | cut -d. -f1).tgz"
+if [ -n "$MS_VER" ] && [ -n "$MS_ARCH" ] && [ -f "$MS_TGZ" ]; then
+  install -d -m 0755 "$APP_DIR/mediasoup-worker"
+  tar -xzf "$MS_TGZ" -C "$APP_DIR/mediasoup-worker"
+  if [ -x "$APP_DIR/mediasoup-worker/mediasoup-worker" ]; then
+    MS_BIN="$APP_DIR/mediasoup-worker/mediasoup-worker"
+    export MEDIASOUP_WORKER_BIN="$MS_BIN" # o postinstall do mediasoup não baixa nada com isto
+  fi
+fi
 if [ -f package-lock.json ]; then
   npm ci --omit=dev --no-audit --no-fund
 else
   npm install --omit=dev --no-audit --no-fund
 fi
 chown -R root:root "$APP_DIR"
+# o mediasoup (SFU) é opcional: se o download do binário pronto falhar e não der para compilar, o npm
+# segue sem ele e as chamadas ficam em malha. Avisa aqui para não ser surpresa.
+if "$NODE_BIN" -e "import('mediasoup').then((m)=>m.createWorker({logLevel:'error'})).then((w)=>{w.close();process.exit(0)},()=>process.exit(1))" 2>/dev/null; then
+  echo "    mediasoup (SFU) disponível${MS_BIN:+ (worker do pacote)}"
+else
+  echo "    mediasoup (SFU) NÃO carregou: chamadas grandes ficam em malha P2P."
+  echo "    O worker pronto vem do GitHub, que só tem IPv4: num servidor só com IPv6, gere o pacote de novo"
+  echo "    com 'npm run pack:server' (ele já leva o worker para Linux) ou compile aqui:"
+  echo "    apt-get install -y python3-pip build-essential && cd $APP_DIR/server && npm rebuild mediasoup"
+fi
 
 # Endereços públicos desta máquina
 IPV6="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ && !/temporary|deprecated/ {print $2}' | cut -d/ -f1 | grep -v '^f[cd]' | head -n1 || true)"
@@ -119,6 +145,8 @@ set_env() { # set_env CHAVE valor
 }
 set_env PORT "$PORT"
 set_env PULSECORD_HOST "::"
+# worker do mediasoup do pacote: o servidor também precisa saber onde ele está
+[ -n "$MS_BIN" ] && set_env MEDIASOUP_WORKER_BIN "$MS_BIN"
 
 if [ "$WITH_TURN" -eq 1 ]; then
   echo "==> TURN (coturn)"
@@ -151,6 +179,21 @@ if [ "$WITH_TURN" -eq 1 ]; then
   set_env PULSECORD_STUN_URLS "$STUN_URLS"
 fi
 
+SFU_MIN_PORT="$(grep '^PULSECORD_SFU_RTC_MIN_PORT=' "$ENV_FILE" | cut -d= -f2- || true)"
+SFU_MAX_PORT="$(grep '^PULSECORD_SFU_RTC_MAX_PORT=' "$ENV_FILE" | cut -d= -f2- || true)"
+SFU_MIN_PORT="${SFU_MIN_PORT:-40000}"
+SFU_MAX_PORT="${SFU_MAX_PORT:-40999}"
+if [ "$WITH_SFU" -eq 1 ]; then
+  echo "==> SFU (mediasoup)"
+  set_env PULSECORD_SFU "auto"
+  [ -n "$IPV6" ] && set_env PULSECORD_SFU_ANNOUNCED_IPV6 "$IPV6"
+  # IPv4 privado (atrás de NAT) só serve na rede local: troque pelo público em $ENV_FILE se for o caso
+  [ -n "$IPV4" ] && set_env PULSECORD_SFU_ANNOUNCED_IPV4 "$IPV4"
+fi
+# já estava ligado de uma instalação anterior? então o firewall também precisa da faixa
+SFU_ON=0
+grep -Eq '^PULSECORD_SFU=(1|on|true|auto)' "$ENV_FILE" && SFU_ON=1
+
 if [ "$WITH_HTTPS" -eq 1 ]; then
   echo "==> HTTPS (Caddy)"
   apt-get install -y caddy
@@ -177,12 +220,14 @@ if [ "$FIREWALL" -eq 1 ]; then
     grep -q '^IPV6=yes' /etc/default/ufw || echo "    ATENÇÃO: IPV6 não está 'yes' em /etc/default/ufw; o ufw não vai liberar IPv6."
     if [ "$WITH_HTTPS" -eq 1 ]; then ufw allow 80/tcp; ufw allow 443/tcp; ufw allow 443/udp; else ufw allow "$PORT"/tcp; fi
     if [ "$WITH_TURN" -eq 1 ]; then ufw allow 3478/tcp; ufw allow 3478/udp; ufw allow 49160:49200/udp; fi
+    if [ "$SFU_ON" -eq 1 ]; then ufw allow "$SFU_MIN_PORT:$SFU_MAX_PORT/udp"; ufw allow "$SFU_MIN_PORT:$SFU_MAX_PORT/tcp"; fi
   else
     echo "    ufw não está ativo: nada foi alterado."
     echo "    Se você usa nftables, veja $APP_DIR/deploy/debian/nftables-pulsecord.nft"
     echo "    Se o provedor tem firewall próprio (painel da hospedagem), libere lá também (IPv4 e IPv6):"
     if [ "$WITH_HTTPS" -eq 1 ]; then echo "      TCP 80, TCP 443, UDP 443"; else echo "      TCP $PORT"; fi
     [ "$WITH_TURN" -eq 1 ] && echo "      TCP/UDP 3478 e UDP 49160-49200 (TURN)"
+    [ "$SFU_ON" -eq 1 ] && echo "      UDP e TCP $SFU_MIN_PORT-$SFU_MAX_PORT (SFU)"
   fi
 fi
 

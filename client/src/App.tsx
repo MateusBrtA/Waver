@@ -31,6 +31,7 @@ import {
   upsertSavedServer,
 } from './lib/savedServers';
 import { WebRTCManager } from './lib/webrtc';
+import { SfuJoinInfo, sfuSupported } from './lib/sfuSession';
 import {
   AppMode,
   Attachment,
@@ -2555,7 +2556,8 @@ export default function App() {
 
       socket.emit(
         'voice:join',
-        { channelId, muted, deafened },
+        // sfu: este app sabe usar o SFU do servidor (calls grandes); o servidor decide se usa
+        { channelId, muted, deafened, sfu: sfuSupported() },
         async (res: {
           ok?: boolean;
           error?: string;
@@ -2563,6 +2565,7 @@ export default function App() {
           peers?: VoiceParticipant[];
           participants?: VoiceParticipant[];
           musicState?: MusicState;
+          sfu?: SfuJoinInfo | null;
         }) => {
           if (!res?.ok) {
             rtc.leaveChannel();
@@ -2578,7 +2581,7 @@ export default function App() {
           } else {
             setDmVoiceParticipants([]);
           }
-          await rtc.completeJoin(channelId, res.selfSocketId || socket.id || '', res.peers || []);
+          await rtc.completeJoin(channelId, res.selfSocketId || socket.id || '', res.peers || [], res.sfu);
           if (res.musicState) {
             setMusicState(res.musicState);
             audioEngine.syncMusicState(res.musicState);
@@ -2600,7 +2603,7 @@ export default function App() {
     rtc.resetPeersForRejoin(channelId, socket.id || '');
     socket.emit(
       'voice:join',
-      { channelId, muted, deafened },
+      { channelId, muted, deafened, sfu: sfuSupported() },
       async (res: {
         ok?: boolean;
         error?: string;
@@ -2609,6 +2612,7 @@ export default function App() {
         participants?: VoiceParticipant[];
         musicState?: MusicState;
         videoState?: VideoState;
+        sfu?: SfuJoinInfo | null;
       }) => {
         if (activeVoiceChannelIdRef.current !== channelId) return; // saiu da call enquanto reconectava
         if (!res?.ok) {
@@ -2620,7 +2624,7 @@ export default function App() {
         const selfId = res.selfSocketId || socket.id || '';
         setSelfSocketId(selfId);
         if (channelId.startsWith('dm:')) setDmVoiceParticipants(res.participants || []);
-        await rtc.completeJoin(channelId, selfId, res.peers || []);
+        await rtc.completeJoin(channelId, selfId, res.peers || [], res.sfu);
         if (res.musicState) {
           setMusicState(res.musicState);
           audioEngine.syncMusicState(res.musicState);

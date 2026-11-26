@@ -54,6 +54,37 @@ copyDir(path.join(root, 'client', 'dist'), path.join(stage, 'client', 'dist'));
 // scripts de instalação
 copyDir(path.join(root, 'deploy'), path.join(stage, 'deploy'));
 copyFile(path.join(root, 'deploy', 'README-SERVIDOR.md'), path.join(stage, 'LEIA-ME.md'));
+
+// SFU (mediasoup): na instalação o npm baixaria o binário do worker do GitHub, que não tem IPv6. Num servidor
+// só com IPv6 esse download falha e o SFU fica desligado; então o pacote já leva os binários prontos para Linux.
+async function bundleMediasoupWorkers() {
+  let version = '';
+  try {
+    const lock = JSON.parse(fs.readFileSync(path.join(root, 'server', 'package-lock.json'), 'utf8'));
+    version = lock.packages?.['node_modules/mediasoup']?.version || '';
+  } catch {}
+  if (!version) return;
+  const dir = path.join(stage, 'deploy', 'mediasoup-worker');
+  fs.mkdirSync(dir, { recursive: true });
+  // Debian 12 e 13 usam kernel 6
+  for (const arch of ['x64', 'arm64']) {
+    const name = `mediasoup-worker-${version}-linux-${arch}-kernel6.tgz`;
+    const cached = path.join(outDir, '.cache', name);
+    if (!fs.existsSync(cached)) {
+      try {
+        const res = await fetch(`https://github.com/versatica/mediasoup/releases/download/${version}/${name}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        fs.mkdirSync(path.dirname(cached), { recursive: true });
+        fs.writeFileSync(cached, Buffer.from(await res.arrayBuffer()));
+      } catch (err) {
+        console.warn(`(mediasoup ${arch}: não baixou o worker pronto (${err.message}); o servidor tenta baixar na instalação)`);
+        continue;
+      }
+    }
+    fs.copyFileSync(cached, path.join(dir, name));
+  }
+}
+await bundleMediasoupWorkers();
 // package.json mínimo: o servidor lê só a versão
 fs.writeFileSync(
   path.join(stage, 'package.json'),
