@@ -1,0 +1,23 @@
+#!/usr/sbin/nft -f
+# Exemplo para quem usa nftables direto (sem ufw). "inet" cobre IPv4 e IPv6 na mesma regra.
+# Junte estas linhas à sua chain de entrada (input) existente; NÃO rode sozinho se você
+# não tiver uma regra liberando o SSH, ou vai perder o acesso à máquina.
+#
+#   nft -f /opt/pulsecord/deploy/debian/nftables-pulsecord.nft
+#
+table inet pulsecord {
+	chain input {
+		type filter hook input priority 0; policy accept;
+
+		# PulseCord (troque 3000 se mudou a porta)
+		tcp dport 3000 accept
+
+		# HTTPS com Caddy (se usar --https)
+		#tcp dport { 80, 443 } accept
+		#udp dport 443 accept
+
+		# TURN (coturn)
+		#tcp dport 3478 accept
+		#udp dport { 3478, 49160-49200 } accept
+	}
+}

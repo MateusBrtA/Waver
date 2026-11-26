@@ -1,0 +1,39 @@
+# coturn para o PulseCord (gerado pelo install.sh --with-turn)
+# Sem listening-ip: escuta em todos os IPv4 e IPv6 da máquina.
+listening-port=3478
+
+# Faixa de portas UDP do relay (libere no firewall: UDP 49160-49200, IPv4 e IPv6)
+min-port=49160
+max-port=49200
+
+# Credenciais temporárias geradas pelo servidor PulseCord (mesmo segredo de PULSECORD_TURN_SECRET)
+use-auth-secret
+static-auth-secret=__SECRET__
+realm=__REALM__
+
+fingerprint
+no-cli
+no-tlsv1
+no-tlsv1_1
+no-multicast-peers
+# Se a máquina estiver atrás de NAT em IPv4, informe o IP público:
+#external-ip=IP_PUBLICO/IP_PRIVADO
+
+# Segurança: o relay não pode ser usado para alcançar a rede interna do servidor
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# Limites para não virar relay aberto de tráfego pesado
+total-quota=100
+bps-capacity=0
+stale-nonce=600
+log-file=syslog
+simple-log

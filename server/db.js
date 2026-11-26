@@ -426,6 +426,8 @@ function createInitialDb(soundsDir) {
     trelloBoards: {
       server: [createDefaultTrelloBoard('server', 'Projetos do Servidor')],
     },
+    threadMessages: {},
+    events: [],
     transfers: {}, // transferId -> { id, filename, originalName, mimeType, size, oneTime, downloadedCount, burned, expiredByCache, uploadedBy, createdAt }
     sounds: starterSounds,
     savedGifs: [],
@@ -504,6 +506,7 @@ export function loadDb(customDataDir) {
         visibility: ch.visibility || 'default',
         isPrivate: Boolean(ch.isPrivate),
         bitrateKbps: Number(ch.bitrateKbps || 128),
+        isStage: Boolean(ch.isStage),
         userLimit: Number(ch.userLimit || 0),
         overwrites: Array.isArray(ch.overwrites) ? ch.overwrites : [],
       }));
@@ -522,6 +525,9 @@ export function loadDb(customDataDir) {
         messages: vaultData?.messages || parsed.messages || base.messages,
         directMessages: vaultData?.directMessages || parsed.directMessages || {},
         groupMessages: vaultData?.groupMessages || parsed.groupMessages || {},
+        // respostas em threads (ficam no cofre criptografado junto com as mensagens)
+        threadMessages: vaultData?.threadMessages || parsed.threadMessages || {},
+        events: Array.isArray(parsed.events) ? parsed.events : [],
         dmGroups: parsed.dmGroups || {},
         trelloBoards: parsed.trelloBoards && parsed.trelloBoards.server ? parsed.trelloBoards : base.trelloBoards,
         transfers: parsed.transfers || {},
@@ -562,9 +568,10 @@ function snapshotForSave() {
     messages: db.messages || {},
     directMessages: db.directMessages || {},
     groupMessages: db.groupMessages || {},
+    threadMessages: db.threadMessages || {},
   });
   const vaultSig = crypto.createHash('sha1').update(vaultJson).digest('hex');
-  const { messages: _m, directMessages: _dm, groupMessages: _gm, ...metaOnly } = db;
+  const { messages: _m, directMessages: _dm, groupMessages: _gm, threadMessages: _tm, ...metaOnly } = db;
   // JSON compacto: sem indentação o arquivo fica menor e é gerado mais rápido
   return { vaultJson, vaultSig, metaJson: JSON.stringify(metaOnly) };
 }

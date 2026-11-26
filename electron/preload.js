@@ -2,6 +2,38 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   isElectron: true,
+  // Atalhos globais, notificações nativas e "Compartilhar no PulseCord"
+  setGlobalShortcuts: (map) => ipcRenderer.invoke('shortcuts:set', map),
+  setOverlayConfig: (cfg) => ipcRenderer.invoke('overlay:config', cfg),
+  sendOverlayState: (state) => ipcRenderer.send('overlay:state', state),
+  toggleOverlay: () => ipcRenderer.invoke('overlay:toggle'),
+  setMediaActivity: (enabled) => ipcRenderer.invoke('media-activity:set', enabled),
+  saveMediaFile: (name, bytes, kind) => ipcRenderer.invoke('media:save-file', name, bytes, kind),
+  recordingOpen: (name) => ipcRenderer.invoke('recording:open', name),
+  recordingAppend: (token, bytes) => ipcRenderer.invoke('recording:append', token, bytes),
+  recordingClose: (token) => ipcRenderer.invoke('recording:close', token),
+  revealMediaFile: (file) => ipcRenderer.invoke('media:reveal', file),
+  onGlobalShortcut: (cb) => {
+    const listener = (_e, action) => cb(action);
+    ipcRenderer.on('shortcut:fired', listener);
+    return () => ipcRenderer.removeListener('shortcut:fired', listener);
+  },
+  showNotification: (opts) => ipcRenderer.invoke('notify:show', opts),
+  onNotificationClicked: (cb) => {
+    const listener = (_e, route) => cb(route);
+    ipcRenderer.on('notify:clicked', listener);
+    return () => ipcRenderer.removeListener('notify:clicked', listener);
+  },
+  getShareMenu: () => ipcRenderer.invoke('share-menu:get'),
+  setShareMenu: (enabled) => ipcRenderer.invoke('share-menu:set', enabled),
+  takePendingShares: () => ipcRenderer.invoke('share:take-pending'),
+  readSharedFile: (p) => ipcRenderer.invoke('share:read', p),
+  clearPendingShares: () => ipcRenderer.invoke('share:clear'),
+  onSharedFiles: (cb) => {
+    const listener = (_e, list) => cb(list);
+    ipcRenderer.on('share:files', listener);
+    return () => ipcRenderer.removeListener('share:files', listener);
+  },
   platform: process.platform,
   getDesktopSources: () => ipcRenderer.invoke('desktop:get-sources'),
   prepareScreenCapture: (opts) => ipcRenderer.invoke('desktop:prepare-screen-capture', opts),

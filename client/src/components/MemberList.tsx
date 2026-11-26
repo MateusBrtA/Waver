@@ -3,6 +3,7 @@ import { Crown, Gamepad2, Headphones, Volume2 } from 'lucide-react';
 import { Role, User, VoiceParticipant } from '../types';
 import { Avatar, NAME_STYLES } from './Avatar';
 import { PanelResizer, usePersistentWidth } from './PanelResizer';
+import { activityShortLabel } from '../lib/activity';
 
 interface MemberListProps {
   members: User[];
@@ -102,7 +103,7 @@ export const MemberList: React.FC<MemberListProps> = ({
                       ) : (
                         <Gamepad2 className="w-3 h-3 text-[#23a55a] shrink-0" />
                       )}
-                      <span className="truncate">{m.currentActivity.name}</span>
+                      <span className="truncate">{activityShortLabel(m.currentActivity)}</span>
                     </div>
                   ) : m.customStatusText || m.customStatusEmoji ? (
                     <div className="text-[11px] text-[#949ba4] truncate">

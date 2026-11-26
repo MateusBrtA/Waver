@@ -38,6 +38,7 @@ import { AppearanceSettingsTab } from './AppearanceSettingsTab';
 import { formatBytes } from './FileTransferModal';
 import { ServerAdminPanel } from './ServerAdminPanel';
 import { useEscapeToClose } from '../lib/useEscapeToClose';
+import { WindowsIntegrationSettings } from './WindowsIntegrationSettings';
 
 export type SettingsTabId =
   | 'profile'
@@ -812,6 +813,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <p className="text-[12px] text-[#949ba4]">
                   Com o app nos ícones ocultos, clique com o botão direito no ícone do PulseCord e escolha "Sair do PulseCord" para fechar de vez.
                 </p>
+                <div className="h-px bg-[#3f4147]" />
+                <WindowsIntegrationSettings />
               </div>
             )}
 

@@ -31,6 +31,9 @@ import {
   Users,
   Volume2,
   X,
+  BarChart3,
+  CalendarDays,
+  MessagesSquare,
 } from 'lucide-react';
 import { ApiClient, resolveMediaUrl } from '../lib/api';
 import { detectCodeLanguage, formatLanguageLabel, parseMessageSegments } from '../lib/codeDetect';
@@ -51,6 +54,7 @@ import { FileTransferModal, formatBytes } from './FileTransferModal';
 import { extractEmbeddableMediaUrls, LinkEmbedCard } from './LinkEmbedCard';
 import { getFileExtension, is3DModelFilename } from '../lib/model3dUtils';
 import { VoiceMessagePlayer } from './VoiceMessagePlayer';
+import { MessageExtras, QuickReactButton } from './MessageExtras';
 import { toggleFavoriteGif, useFavoriteGifs } from '../lib/favoriteGifs';
 import { isTextureLikeName } from '../lib/model3dUtils';
 
@@ -81,6 +85,8 @@ interface ChatAreaProps {
   savedGifs: GifItem[];
   blockedUserIds: Set<string>;
   mentionRequest: { text: string; seq: number } | null;
+  incomingFilesRequest?: { files: File[]; seq: number } | null;
+  onIncomingFilesConsumed?: () => void;
   activeVoiceLabel: string | null;
   showMembers: boolean;
   onToggleMembers: () => void;
@@ -108,8 +114,21 @@ interface ChatAreaProps {
   }) => void;
   onPinMessage?: (messageId: string, pinned: boolean) => void;
   onDeleteMessage?: (messageId: string) => void;
+  /** reações, enquetes e threads (só canais do servidor) */
+  onReact?: (messageId: string, emoji: string) => void;
+  onVotePoll?: (messageId: string, optionIds: string[]) => void;
+  onClosePoll?: (messageId: string) => void;
+  onOpenThread?: (msg: ChatMessage) => void;
+  onCreatePoll?: () => void;
+  onOpenSearch?: () => void;
+  onOpenEvents?: () => void;
+  upcomingEventsCount?: number;
+  /** pedido para rolar até uma mensagem (vindo da busca) */
+  jumpRequest?: { id: string; seq: number } | null;
   onTyping?: (isTyping: boolean) => void;
 }
+
+let lastIncomingFilesSeq = 0;
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
   api,
@@ -126,6 +145,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   savedGifs,
   blockedUserIds,
   mentionRequest,
+  incomingFilesRequest,
+  onIncomingFilesConsumed,
   activeVoiceLabel,
   showMembers,
   onToggleMembers,
@@ -144,6 +165,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onSendMessage,
   onPinMessage,
   onDeleteMessage,
+  onReact,
+  onVotePoll,
+  onClosePoll,
+  onOpenThread,
+  onCreatePoll,
+  onOpenSearch,
+  onOpenEvents,
+  upcomingEventsCount = 0,
+  jumpRequest,
   onTyping,
 }) => {
   const isDm = Boolean(dmPeer);
@@ -259,6 +289,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setText((prev) => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}${mentionRequest.text} `);
     textAreaRef.current?.focus();
   }, [mentionRequest?.seq]);
+
+  // Arquivos do "Compartilhar no PulseCord" (Explorer): entram como anexos pendentes, prontos para enviar
+  useEffect(() => {
+    if (!incomingFilesRequest?.files?.length || incomingFilesRequest.seq === lastIncomingFilesSeq) return;
+    lastIncomingFilesSeq = incomingFilesRequest.seq;
+    handleFilesSelected(incomingFilesRequest.files);
+    onIncomingFilesConsumed?.();
+    textAreaRef.current?.focus();
+  }, [incomingFilesRequest?.seq]);
+
+  // Busca: rola até a mensagem quando ela estiver carregada
+  const pendingJumpRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (jumpRequest?.id) pendingJumpRef.current = jumpRequest.id;
+  }, [jumpRequest?.seq]);
+  useEffect(() => {
+    const id = pendingJumpRef.current;
+    if (!id || !messages.some((m) => m.id === id)) return;
+    pendingJumpRef.current = null;
+    setVisibleLimit((prev) => Math.max(prev, messages.length));
+    setHighlightedMsgId(id);
+    window.setTimeout(() => document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 60);
+    window.setTimeout(() => setHighlightedMsgId(null), 2600);
+  }, [messages, jumpRequest?.seq]);
 
   useEffect(() => {
     if (!showGifPicker || !api) return;
@@ -671,6 +725,31 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0 relative">
+          {onOpenEvents && (
+            <button
+              type="button"
+              onClick={onOpenEvents}
+              className="relative p-1.5 rounded-md text-[#b5bac1] hover:text-white hover:bg-[#383a40] transition cursor-pointer"
+              title="Eventos do servidor"
+            >
+              <CalendarDays className="w-4 h-4" />
+              {upcomingEventsCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-[#5865f2] text-white text-[9px] font-bold flex items-center justify-center">
+                  {upcomingEventsCount}
+                </span>
+              )}
+            </button>
+          )}
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              className="p-1.5 rounded-md text-[#b5bac1] hover:text-white hover:bg-[#383a40] transition cursor-pointer"
+              title="Buscar mensagens (Ctrl+F)"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+          )}
           {onOpenTrello && (isPrivateScope || permissions?.useTrello !== false) && (
             <button
               type="button"
@@ -952,7 +1031,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <div
               id={`msg-${msg.id}`}
               key={msg.id}
-              className={`group relative flex gap-3.5 px-2.5 py-1 rounded-md pc-message transition ${
+              className={`group relative flex gap-3.5 px-2.5 py-1 rounded-md pc-message pc-cv transition ${
                 isHighlighted
                   ? 'bg-[#f0b232]/20 ring-1 ring-[#f0b232]/60'
                   : msg.pinned
@@ -1261,10 +1340,34 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     })}
                   </div>
                 )}
+
+                {(onReact || onVotePoll || onOpenThread) && (
+                  <MessageExtras
+                    msg={msg}
+                    selfId={user.id}
+                    members={members}
+                    canManage={canManageMessages}
+                    onReact={onReact ? (e) => onReact(msg.id, e) : undefined}
+                    onVotePoll={onVotePoll ? (ids) => onVotePoll(msg.id, ids) : undefined}
+                    onClosePoll={onClosePoll ? () => onClosePoll(msg.id) : undefined}
+                    onOpenThread={onOpenThread ? () => onOpenThread(msg) : undefined}
+                  />
+                )}
               </div>
 
-              {/* Hover actions */}
-              <div className="opacity-0 group-hover:opacity-100 absolute right-3 -top-2.5 bg-[#2b2d31] border border-[#1e1f22] rounded-md shadow-lg flex items-center p-0.5 transition">
+              {/* Hover actions (dentro da linha: a lista usa content-visibility, que corta o que sai da caixa) */}
+              <div className="opacity-0 group-hover:opacity-100 absolute right-3 top-0.5 bg-[#2b2d31] border border-[#1e1f22] rounded-md shadow-lg flex items-center p-0.5 transition">
+                {onReact && <QuickReactButton onPick={(e) => onReact(msg.id, e)} />}
+                {onOpenThread && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenThread(msg)}
+                    className="p-1.5 text-[#b5bac1] hover:text-white hover:bg-[#383a40] rounded cursor-pointer"
+                    title={msg.thread?.count ? 'Abrir thread' : 'Criar thread'}
+                  >
+                    <MessagesSquare className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 {msg.pinned && (
                   <span className="px-1.5 text-[10px] font-bold text-[#f0b232]" title={`Fixada por ${msg.pinnedBy || 'alguém'}`}>
                     Fixada
@@ -1638,6 +1741,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               title={!canAttach ? 'Cargo sem permissão para anexos' : 'Enviar arquivo pesado até 1.85 GB (Disponível ou Download Único 🔥)'}
             >
               <HardDrive className="w-4 h-4" />
+            </button>
+          )}
+
+          {onCreatePoll && (
+            <button
+              type="button"
+              onClick={onCreatePoll}
+              disabled={!canSend}
+              className="p-2 rounded-full text-[#b5bac1] hover:text-white hover:bg-[#4e5058] transition cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Criar enquete"
+            >
+              <BarChart3 className="w-4 h-4" />
             </button>
           )}
 

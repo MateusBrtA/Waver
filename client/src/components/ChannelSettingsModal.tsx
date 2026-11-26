@@ -54,6 +54,7 @@ export const ChannelSettingsModal: React.FC<ChannelSettingsModalProps> = ({
   const [visibility, setVisibility] = useState<'default' | 'spoiler' | 'nsfw'>(channel.visibility || 'default');
   const [bitrateKbps, setBitrateKbps] = useState<number>(channel.bitrateKbps || 128);
   const [userLimit, setUserLimit] = useState<number>(channel.userLimit || 0);
+  const [isStage, setIsStage] = useState<boolean>(Boolean(channel.isStage));
 
   const [isPrivate, setIsPrivate] = useState<boolean>(Boolean(channel.isPrivate));
   const [overwrites, setOverwrites] = useState<ChannelPermissionOverwrite[]>(() =>
@@ -136,6 +137,7 @@ export const ChannelSettingsModal: React.FC<ChannelSettingsModalProps> = ({
         userLimit,
         isPrivate,
         overwrites,
+        ...(channel.type === 'voice' ? { isStage } : {}),
       });
       onUpdated(updated);
       setMsg('Alterações do canal salvas!');
@@ -356,6 +358,20 @@ export const ChannelSettingsModal: React.FC<ChannelSettingsModalProps> = ({
                         className="w-full accent-[#23a55a]"
                       />
                     </div>
+                    <label className="sm:col-span-2 flex items-start justify-between gap-3 cursor-pointer">
+                      <span>
+                        <span className="block font-bold text-white">Modo palco</span>
+                        <span className="block text-[11px] text-[#949ba4]">
+                          Quem entra fica na plateia, sem microfone, e pode levantar a mão. Moderadores (quem pode silenciar ou mover membros) falam e chamam pessoas para o palco.
+                        </span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={isStage}
+                        onChange={(e) => setIsStage(e.target.checked)}
+                        className="accent-[#5865f2] w-4 h-4 mt-1 shrink-0"
+                      />
+                    </label>
                   </div>
                 )}
               </div>

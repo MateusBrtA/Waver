@@ -256,6 +256,9 @@ interface VoiceStageProps {
   onVideoEnded: (queueId: string) => void;
   onVideoRemove: (index: number) => void;
   onVideoClear: () => void;
+  /** faixa no topo (modo palco) e botões extras no painel (gravar, clipe) */
+  topBanner?: React.ReactNode;
+  extraControls?: React.ReactNode;
 }
 
 export const VoiceStage: React.FC<VoiceStageProps> = ({
@@ -348,6 +351,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   onVideoEnded,
   onVideoRemove,
   onVideoClear,
+  topBanner,
+  extraControls,
 }) => {
   const [spotlightKey, setSpotlightKey] = useState<string | null>(null);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
@@ -1885,6 +1890,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
             </div>
           )}
 
+          {topBanner}
+
           {/* Participants Grid / Strip */}
           <div
             className={
@@ -1967,6 +1974,19 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                         <span className="text-[9px] font-bold bg-[#f23f42] text-white px-1.5 py-0.5 rounded">
                           AO VIVO
                         </span>
+                      )}
+                      {p.recording && (
+                        <span
+                          className="text-[9px] font-bold bg-black/80 text-[#f23f42] px-1.5 py-0.5 rounded flex items-center gap-1"
+                          title={p.recording === 'record' ? 'Gravando a chamada' : 'Guardando clipes da chamada'}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#f23f42] animate-pulse" />
+                          {p.recording === 'record' ? 'REC' : 'CLIPES'}
+                        </span>
+                      )}
+                      {p.handRaised && <span title="Levantou a mão">✋</span>}
+                      {p.stageRole === 'audience' && (
+                        <span className="text-[9px] font-bold bg-[#4e5058] text-white px-1.5 py-0.5 rounded">PLATEIA</span>
                       )}
                     </div>
 
@@ -2058,6 +2078,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
             >
               {deafened || user.serverDeafened ? <HeadphoneOff className="w-5 h-5" /> : <Headphones className="w-5 h-5" />}
             </button>
+
+            {extraControls}
 
             <button
               type="button"

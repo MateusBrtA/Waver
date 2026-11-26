@@ -1,6 +1,6 @@
 {
   "name": "pulsecord",
-  "version": "4.2.0",
+  "version": "4.3.0",
   "description": "PulseCord 4.0 - App estilo Discord com Sincronização Ultra-Rápida, YouTube Player, Parsec 60-120fps + Controle Xbox Virtual, Áudio no Chat, Fixação e Mensagens Privadas P2P em LAN",
   "main": "electron/main.js",
   "author": "PulseCord",
@@ -17,9 +17,12 @@
     "build:client": "npm --prefix client run build",
     "build": "npm run build:icon && npm run build:native && npm run build:client",
     "start:host": "node server/index.js",
+    "start:server": "node server/index.js",
+    "pack:server": "npm run build:client && node scripts/pack-server.mjs",
     "build:exe": "npm run build && electron-builder --win portable",
     "build:installer": "npm run build && electron-builder --win nsis",
-    "build:win": "npm run build && electron-builder --win nsis portable"
+    "build:win": "npm run build && electron-builder --win nsis portable",
+    "build:signed": "npm run build && node scripts/build-signed.mjs"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

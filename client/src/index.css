@@ -542,3 +542,9 @@
     animation: none;
   }
 }
+
+/* Lista de mensagens: o navegador só calcula layout/pintura das mensagens perto da tela */
+.pc-cv {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+}

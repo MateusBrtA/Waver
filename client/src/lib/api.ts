@@ -24,6 +24,9 @@ import {
   UpdateManifest,
   User,
   VideoQueueItem,
+  RsvpStatus,
+  SearchFilters,
+  ServerEvent,
 } from '../types';
 
 export function normalizeServerUrl(input: string): string {
@@ -33,6 +36,14 @@ export function normalizeServerUrl(input: string): string {
       return window.location.origin;
     }
     return 'http://localhost:3000';
+  }
+  // IPv6: "2804:14c::1" (sem porta), "[2804:14c::1]" ou "[2804:14c::1]:3000"
+  if (!/^https?:\/\//i.test(url)) {
+    if (/^\[[0-9a-f:.]+\](:\d+)?$/i.test(url)) {
+      url = `http://${url}`;
+    } else if (/^[0-9a-f]*:[0-9a-f:.]*:[0-9a-f:.]*$/i.test(url) && !url.includes('[')) {
+      url = `http://[${url}]`;
+    }
   }
   if (!/^https?:\/\//i.test(url)) {
     const isIpOrLocal = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|26\.|100\.|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/i.test(
@@ -45,7 +56,7 @@ export function normalizeServerUrl(input: string): string {
   try {
     const parsed = new URL(url);
     const isBareIpOrLocal =
-      parsed.hostname === 'localhost' || /^\d{1,3}(\.\d{1,3}){3}$/.test(parsed.hostname);
+      parsed.hostname === 'localhost' || /^\d{1,3}(\.\d{1,3}){3}$/.test(parsed.hostname) || parsed.hostname.startsWith('[');
     if (isBareIpOrLocal && !parsed.port && parsed.protocol === 'http:') {
       parsed.port = '3000';
       return parsed.origin;
@@ -127,6 +138,8 @@ export class ApiClient {
     password?: string;
     invitePassword?: string;
     hostSelfJoin?: boolean;
+    /** código do dono de um servidor dedicado (Debian/Windows sem tela) */
+    ownerCode?: string;
   }) {
     return this.request<{ token: string; user: User; server: ServerInfo }>('/api/auth/login', {
       method: 'POST',
@@ -334,7 +347,7 @@ export class ApiClient {
     return this.request<{ ok: boolean }>(`/api/categories/${categoryId}`, { method: 'DELETE' });
   }
 
-  createChannel(payload: { name: string; type: 'text' | 'voice'; topic?: string; categoryId?: string | null; isPrivate?: boolean }) {
+  createChannel(payload: { name: string; type: 'text' | 'voice'; topic?: string; categoryId?: string | null; isPrivate?: boolean; isStage?: boolean }) {
     return this.request<{ channel: Channel }>('/api/channels', { method: 'POST', body: JSON.stringify(payload) });
   }
 
@@ -350,6 +363,7 @@ export class ApiClient {
       isPrivate?: boolean;
       bitrateKbps?: number;
       userLimit?: number;
+      isStage?: boolean;
       overwrites?: ChannelPermissionOverwrite[];
       syncWithCategory?: boolean;
     }
@@ -404,6 +418,46 @@ export class ApiClient {
 
   getMessages(channelId: string) {
     return this.request<{ messages: ChatMessage[] }>(`/api/channels/${channelId}/messages`);
+  }
+
+  getThread(channelId: string, parentId: string) {
+    return this.request<{ parent: ChatMessage; messages: ChatMessage[] }>(
+      `/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(parentId)}`
+    );
+  }
+
+  deleteThreadMessage(channelId: string, parentId: string, messageId: string) {
+    return this.request<{ ok: boolean }>(
+      `/api/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(parentId)}/messages/${encodeURIComponent(messageId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  getEvents() {
+    return this.request<{ events: ServerEvent[] }>('/api/events');
+  }
+
+  createEvent(payload: { title: string; description?: string; startsAt: number; endsAt?: number | null; channelId?: string | null; location?: string }) {
+    return this.request<{ event: ServerEvent }>('/api/events', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  rsvpEvent(eventId: string, status: RsvpStatus | null) {
+    return this.request<{ event: ServerEvent }>(`/api/events/${encodeURIComponent(eventId)}/rsvp`, {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  deleteEvent(eventId: string) {
+    return this.request<{ ok: boolean }>(`/api/events/${encodeURIComponent(eventId)}`, { method: 'DELETE' });
+  }
+
+  searchMessages(filters: SearchFilters) {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== '' && v !== 0) qs.set(k, String(v));
+    }
+    return this.request<{ results: ChatMessage[]; total: number }>(`/api/search?${qs.toString()}`);
   }
 
   getChannelPins(channelId: string) {
@@ -573,6 +627,10 @@ export class ApiClient {
   }
 
   // In-App Auto-Updater
+  getIceServers() {
+    return this.request<{ iceServers: RTCIceServer[] }>('/api/rtc/ice-servers');
+  }
+
   getUpdateManifest() {
     return this.request<UpdateManifest>('/api/update/manifest');
   }

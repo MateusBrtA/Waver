@@ -54,6 +54,7 @@ import { useIsSpeaking } from '../lib/speakingStore';
 import { Avatar } from './Avatar';
 import { PanelResizer, usePersistentWidth } from './PanelResizer';
 import type { SettingsTabId } from './SettingsModal';
+import { activityShortLabel } from '../lib/activity';
 
 
 /** Nome do participante na lista de voz: fica branco enquanto a pessoa fala (lido do speakingStore) */
@@ -694,7 +695,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <div className="min-w-0">
                           <div className="text-sm font-medium truncate text-white">{m.displayName}</div>
                           <div className="text-[10px] text-[#4ade80] truncate">
-                            {m.currentActivity ? `${m.currentActivity.icon} ${m.currentActivity.name}` : `LAN P2P • ${peer.ip}`}
+                            {m.currentActivity ? `${m.currentActivity.icon} ${activityShortLabel(m.currentActivity)}` : `LAN P2P • ${peer.ip}`}
                           </div>
                         </div>
                       </div>
@@ -762,7 +763,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           {(m.customStatusText || m.currentActivity) && (
                             <div className="text-[11px] text-[#949ba4] truncate">
                               {m.currentActivity
-                                ? `${m.currentActivity.icon} ${m.currentActivity.name}`
+                                ? `${m.currentActivity.icon} ${activityShortLabel(m.currentActivity)}`
                                 : `${m.customStatusEmoji || ''} ${m.customStatusText || ''}`}
                             </div>
                           )}
@@ -1028,6 +1029,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                   </span>
                                 )}
                                 {p.cameraOn && <Camera className="w-3 h-3 text-[#b5bac1]" />}
+                                {p.recording && (
+                                  <span
+                                    className="w-2 h-2 rounded-full bg-[#f23f42] animate-pulse"
+                                    title={p.recording === 'record' ? 'Gravando a chamada' : 'Guardando clipes'}
+                                  />
+                                )}
+                                {p.handRaised && <span className="text-[11px]" title="Levantou a mão">✋</span>}
                                 {p.deafened || p.serverDeafened ? (
                                   <HeadphoneOff
                                     className={`w-3.5 h-3.5 ${p.serverDeafened ? 'text-[#f23f42]' : 'text-[#949ba4]'}`}

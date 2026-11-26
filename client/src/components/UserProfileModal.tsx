@@ -23,6 +23,7 @@ import { AVATAR_DECORATIONS, Avatar, NAME_STYLES } from './Avatar';
 import { PROFILE_EFFECTS, ProfileEffectLayer } from './ProfileEffect';
 import { CONNECTION_PLATFORM_OPTIONS, ConnectionCard } from './ConnectionBadge';
 import { useEscapeToClose } from '../lib/useEscapeToClose';
+import { formatActivityElapsed } from '../lib/activity';
 
 const BANNER_COLORS = ['#5865F2', '#7c3aed', '#23a55a', '#db2777', '#ea580c', '#0284c7', '#dc2626', '#1e1f22'];
 const STATUS_OPTIONS: Array<{ value: PresenceStatus; label: string; dot: string }> = [
@@ -454,7 +455,17 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                         ● Ativo Agora
                       </div>
                       <div className="text-sm font-bold text-white truncate">{user.currentActivity.name}</div>
-                      <div className="text-xs text-[#949ba4]">Detectado automaticamente no Windows</div>
+                      {user.currentActivity.details && (
+                        <div className="text-xs text-[#dbdee1] truncate">
+                          {user.currentActivity.details}
+                          {user.currentActivity.state ? ` — ${user.currentActivity.state}` : ''}
+                        </div>
+                      )}
+                      <div className="text-xs text-[#949ba4]">
+                        {user.currentActivity.startedAt
+                          ? `${user.currentActivity.category === 'music' ? 'Ouvindo' : 'Jogando'} ${formatActivityElapsed(user.currentActivity.startedAt)}`
+                          : 'Detectado automaticamente no Windows'}
+                      </div>
                     </div>
                   </div>
                 )}

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data: http: https:; style-src 'unsafe-inline'; script-src 'self'"
+    />
+    <title>PulseCord Overlay</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        user-select: none;
+      }
+      #root {
+        position: fixed;
+        inset: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      body.bottom #root {
+        justify-content: flex-end;
+      }
+      body.right #root {
+        align-items: flex-end;
+      }
+      .head {
+        font-size: 11px;
+        font-weight: 700;
+        color: #dbdee1;
+        text-shadow: 0 1px 2px #000;
+        padding: 0 4px 2px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 28px;
+        max-width: 260px;
+        padding: 0 8px 0 2px;
+        border-radius: 14px;
+        background: rgba(17, 18, 20, 0.62);
+        color: #f2f3f5;
+        font-size: 13px;
+        font-weight: 600;
+        transition: opacity 0.2s;
+      }
+      body.right .row {
+        flex-direction: row-reverse;
+        padding: 0 2px 0 8px;
+      }
+      .row.idle {
+        opacity: 0.78;
+      }
+      .av {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        display: grid;
+        place-items: center;
+        font-size: 11px;
+        color: #fff;
+        background-size: cover;
+        background-position: center;
+        box-sizing: border-box;
+        border: 2px solid transparent;
+      }
+      .row.speaking .av {
+        border-color: #23a55a;
+        box-shadow: 0 0 0 1px #23a55a;
+      }
+      .name {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 1px #000;
+      }
+      .ico {
+        font-size: 11px;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="overlayRenderer.js"></script>
+  </body>
+</html>

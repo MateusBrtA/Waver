@@ -57,6 +57,23 @@ export function getNetworkAddresses(port) {
   for (const [name, infos] of Object.entries(interfaces)) {
     if (!infos) continue;
     for (const info of infos) {
+      const isV6 = info.family === 'IPv6' || info.family === 6;
+      if (isV6 && !info.internal) {
+        const a = String(info.address || '').toLowerCase();
+        // só endereços alcançáveis: global (2000::/3) e local da rede (fc00::/7); link-local fe80:: fica de fora
+        // Teredo (2001:0::/32) é um túnel do Windows que quase nunca recebe conexões: fica de fora
+        const isGlobal = /^[23]/.test(a) && !/^2001:0?:/.test(a);
+        const isUla = /^f[cd]/.test(a);
+        if (!isGlobal && !isUla) continue;
+        addresses.push({
+          name: `${name} (IPv6${isGlobal ? ' público' : ' da rede local'})`,
+          address: a,
+          url: `http://[${a}]:${port}`,
+          priority: isGlobal ? 4 : 5,
+          family: 'IPv6',
+        });
+        continue;
+      }
       if (info.family === 'IPv4' && !info.internal) {
         let label = name;
         let priority = 3;
@@ -79,6 +96,8 @@ export function getNetworkAddresses(port) {
       }
     }
   }
+  const publicUrl = String(process.env.PULSECORD_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+  if (publicUrl) addresses.push({ name: 'Endereço público', address: publicUrl, url: publicUrl, priority: 0 });
   return addresses.sort((a, b) => a.priority - b.priority);
 }
 
@@ -99,7 +118,9 @@ function saveDataUrlImage(dataUrl, destDir, prefix) {
 
 export function createPulseCordServer(options = {}) {
   const PORT = Number(options.port || process.env.PORT || 3000);
-  const HOST = options.host || process.env.HOST || '0.0.0.0';
+  // '::' escuta IPv6 e IPv4 ao mesmo tempo (dual-stack) no Linux e no Windows; sem IPv6 cai para 0.0.0.0
+  const HOST = options.host || process.env.PULSECORD_HOST || process.env.HOST || '::';
+  const HEADLESS = Boolean(options.headless);
   const dataDir = options.dataDir || process.env.PULSECORD_DATA_DIR;
   const clientDist = options.clientDistDir || path.join(__dirname, '..', 'client', 'dist');
   const downloadsDir = options.downloadsDir || path.join(__dirname, '..', 'dist-app');
@@ -132,6 +153,71 @@ export function createPulseCordServer(options = {}) {
   });
 
   const app = express();
+  // atrás de um proxy reverso (Caddy/nginx com HTTPS): IP real do cliente vem do X-Forwarded-For
+  const trustProxy = String(options.trustProxy ?? process.env.PULSECORD_TRUST_PROXY ?? '').trim();
+  if (trustProxy) app.set('trust proxy', trustProxy === 'true' ? true : /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+
+  // Código do dono (servidor sem tela, ex. Debian): quem entra com ele vira o Host do servidor.
+  let OWNER_CODE = '';
+  if (HEADLESS) {
+    OWNER_CODE = String(process.env.PULSECORD_OWNER_CODE || '').trim();
+    const ownerFile = path.join(DATA_DIR, 'owner-code.txt');
+    if (!OWNER_CODE) {
+      try {
+        OWNER_CODE = fs.readFileSync(ownerFile, 'utf8').trim();
+      } catch {}
+    }
+    if (!OWNER_CODE) {
+      OWNER_CODE = crypto.randomBytes(9).toString('base64url');
+      try {
+        fs.writeFileSync(ownerFile, OWNER_CODE + '\n', { mode: 0o600 });
+      } catch {}
+    }
+  }
+  const isOwnerCode = (code) => {
+    if (!OWNER_CODE || !code) return false;
+    const a = Buffer.from(String(code));
+    const b = Buffer.from(OWNER_CODE);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  };
+
+  // Limite de tentativas de login por IP (servidor exposto na internet 24 h)
+  const loginAttempts = new Map(); // ip -> { count, resetAt }
+  const loginRateLimited = (ip) => {
+    const now = Date.now();
+    let rec = loginAttempts.get(ip);
+    if (!rec || rec.resetAt < now) {
+      rec = { count: 0, resetAt: now + 60_000 };
+      loginAttempts.set(ip, rec);
+    }
+    rec.count += 1;
+    if (loginAttempts.size > 5000) {
+      for (const [k, v] of loginAttempts) if (v.resetAt < now) loginAttempts.delete(k);
+    }
+    return rec.count > 12;
+  };
+
+  // TURN próprio (coturn com use-auth-secret): credenciais temporárias geradas aqui, sem senha fixa no cliente
+  const TURN_URLS = String(options.turnUrls ?? process.env.PULSECORD_TURN_URLS ?? '')
+    .split(',')
+    .map((u) => u.trim())
+    .filter(Boolean);
+  const TURN_SECRET = String(options.turnSecret ?? process.env.PULSECORD_TURN_SECRET ?? '');
+  const STUN_URLS = String(options.stunUrls ?? process.env.PULSECORD_STUN_URLS ?? '')
+    .split(',')
+    .map((u) => u.trim())
+    .filter(Boolean);
+  function buildIceServers(userId) {
+    const list = [];
+    if (STUN_URLS.length) list.push({ urls: STUN_URLS });
+    if (TURN_URLS.length && TURN_SECRET) {
+      const username = `${Math.floor(Date.now() / 1000) + 12 * 3600}:${userId}`;
+      const credential = crypto.createHmac('sha1', TURN_SECRET).update(username).digest('base64');
+      list.push({ urls: TURN_URLS, username, credential });
+    }
+    return list;
+  }
+
   app.use(
     cors({
       origin: '*',
@@ -672,6 +758,24 @@ export function createPulseCordServer(options = {}) {
   // a lista inteira de membros/salas não é serializada e enviada a todos várias vezes seguidas.
   let usersBroadcastTimer = null;
   let roomsBroadcastTimer = null;
+// Atividade vinda do app (jogo, música): só campos conhecidos e com tamanho limitado
+function sanitizeActivity(a) {
+  if (!a || typeof a !== 'object' || typeof a.name !== 'string' || !a.name.trim()) return null;
+  const str = (v, n) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : undefined);
+  const num = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.floor(Number(v)) : undefined);
+  return {
+    name: a.name.trim().slice(0, 64),
+    icon: str(a.icon, 8) || '🎮',
+    category: ['game', 'music', 'app'].includes(a.category) ? a.category : 'app',
+    color: /^#[0-9a-f]{3,8}$/i.test(String(a.color || '')) ? a.color : '#5865f2',
+    details: str(a.details, 128),
+    state: str(a.state, 128),
+    startedAt: num(a.startedAt),
+    lastPlayedAt: num(a.lastPlayedAt),
+    totalMinutes: Number.isFinite(Number(a.totalMinutes)) ? Math.max(0, Number(a.totalMinutes)) : undefined,
+  };
+}
+
   function broadcastUsers() {
     if (usersBroadcastTimer) return;
     usersBroadcastTimer = setTimeout(() => {
@@ -711,6 +815,13 @@ export function createPulseCordServer(options = {}) {
     return candidates.find((p) => fs.existsSync(p)) || null;
   }
 
+  function isStageModerator(user, chPerms) {
+    if (!user) return false;
+    if (user.role === 'host') return true;
+    const p = chPerms || {};
+    return Boolean(p.administrator || p.muteMembers || p.moveMembers || p.manageChannels);
+  }
+
   function syncUserIntoVoiceRooms(user) {
     for (const roomMap of voiceRooms.values()) {
       for (const p of roomMap.values()) {
@@ -719,7 +830,7 @@ export function createPulseCordServer(options = {}) {
           p.avatarColor = user.avatarColor;
           p.avatarUrl = user.avatarUrl;
           p.avatarDecoration = user.avatarDecoration || 'none';
-          p.serverMuted = Boolean(user.serverMuted);
+          p.serverMuted = Boolean(user.serverMuted) || Boolean(p.noSpeak) || p.stageRole === 'audience';
           p.serverDeafened = Boolean(user.serverDeafened);
         }
       }
@@ -1036,6 +1147,11 @@ export function createPulseCordServer(options = {}) {
     }
   });
 
+  // Servidores STUN/TURN que este servidor oferece aos clientes (configurados no host)
+  app.get('/api/rtc/ice-servers', requireAuth, (req, res) => {
+    res.json({ iceServers: buildIceServers(req.user.id) });
+  });
+
   // Auth
   app.post('/api/auth/login', (req, res) => {
     const db = getDb();
@@ -1062,7 +1178,14 @@ export function createPulseCordServer(options = {}) {
     const remoteAddr = req.socket?.remoteAddress || '';
     const isLoopbackReq =
       remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
-    const isHostBypass = hostSelfJoin && isLoopbackReq;
+    if (!isLoopbackReq && loginRateLimited(req.ip || remoteAddr)) {
+      return res.status(429).json({ error: 'Muitas tentativas de entrar. Espere um minuto e tente de novo.' });
+    }
+    const ownerCodeOk = isOwnerCode(req.body?.ownerCode);
+    if (req.body?.ownerCode && !ownerCodeOk) {
+      return res.status(403).json({ error: 'Código do dono incorreto.' });
+    }
+    const isHostBypass = (hostSelfJoin && isLoopbackReq) || ownerCodeOk;
 
     // Check Ban list
     const banned = db.bans.find((b) => b.username === normalized);
@@ -1101,7 +1224,8 @@ export function createPulseCordServer(options = {}) {
         user.role = 'host';
       }
     } else {
-      const isFirstUser = db.users.length === 0 || isHostBypass;
+      // servidor dedicado na internet: ninguém vira dono só por ser o primeiro; precisa do código do dono
+      const isFirstUser = (!HEADLESS && db.users.length === 0) || isHostBypass;
       const color = AVATAR_COLORS[db.users.length % AVATAR_COLORS.length];
       user = {
         id: uuidv4(),
@@ -1474,6 +1598,10 @@ export function createPulseCordServer(options = {}) {
       emitToUser(target.id, 'moderation:voice-enforced', {
         serverMuted: Boolean(target.serverMuted),
         serverDeafened: Boolean(target.serverDeafened),
+        // quem está na plateia de um palco continua sem microfone
+        stageAudience: Array.from(voiceRooms.values()).some((room) =>
+          Array.from(room.values()).some((p) => p.userId === target.id && p.stageRole === 'audience')
+        ),
         by: req.user.displayName,
       });
       broadcastUsers();
@@ -1855,6 +1983,7 @@ export function createPulseCordServer(options = {}) {
       visibility: ['default', 'spoiler', 'nsfw'].includes(req.body?.visibility) ? req.body.visibility : 'default',
       isPrivate: isPrivateReq,
       bitrateKbps: Math.max(32, Math.min(384, Number(req.body?.bitrateKbps || 128))),
+      isStage: type === 'voice' && Boolean(req.body?.isStage),
       userLimit: Math.max(0, Math.min(99, Number(req.body?.userLimit || 0))),
       overwrites: Array.isArray(req.body?.overwrites) ? req.body.overwrites : [],
       createdAt: Date.now(),
@@ -1921,6 +2050,7 @@ export function createPulseCordServer(options = {}) {
     if (['default', 'spoiler', 'nsfw'].includes(b.visibility)) channel.visibility = b.visibility;
     if (typeof b.isPrivate === 'boolean') channel.isPrivate = b.isPrivate;
     if (typeof b.bitrateKbps === 'number') channel.bitrateKbps = Math.max(32, Math.min(384, b.bitrateKbps));
+    if (typeof b.isStage === 'boolean' && channel.type === 'voice') channel.isStage = b.isStage;
     if (typeof b.userLimit === 'number') channel.userLimit = Math.max(0, Math.min(99, b.userLimit));
     if (Array.isArray(b.overwrites)) channel.overwrites = b.overwrites;
     if (b.syncWithCategory && channel.categoryId) {
@@ -2010,6 +2140,248 @@ export function createPulseCordServer(options = {}) {
   });
 
   // Channel Messages (with private channel view check!)
+  // Só quem pode ver o canal recebe os eventos dele (mensagens de canal privado não vão para o resto do servidor)
+  function emitToChannel(ch, event, payload) {
+    const dbNow = getDb();
+    const byId = new Map(dbNow.users.map((u) => [u.id, u]));
+    const allowed = new Map();
+    for (const sock of io.sockets.sockets.values()) {
+      const uid = sock.data?.userId;
+      if (!uid) continue;
+      if (!allowed.has(uid)) {
+        const u = byId.get(uid);
+        allowed.set(uid, Boolean(u && computeChannelPermissions(dbNow, u, ch).viewChannels));
+      }
+      if (allowed.get(uid)) sock.emit(event, payload);
+    }
+  }
+
+  function findChannelMessage(dbObj, channelId, messageId, threadParentId) {
+    if (threadParentId) {
+      const list = (dbObj.threadMessages || {})[threadParentId];
+      return list ? list.find((m) => m.id === messageId) || null : null;
+    }
+    const list = dbObj.messages[channelId];
+    return list ? list.find((m) => m.id === messageId) || null : null;
+  }
+
+  function emitMessageUpdated(ch, msg) {
+    if (msg.threadParentId) {
+      emitToChannel(ch, 'chat:thread-message-updated', { channelId: ch.id, parentId: msg.threadParentId, message: msg });
+    } else {
+      emitToChannel(ch, 'chat:message-updated', { channelId: ch.id, message: msg });
+    }
+  }
+
+  function sanitizePoll(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const question = String(raw.question || '').trim().slice(0, 300);
+    const opts = (Array.isArray(raw.options) ? raw.options : [])
+      .map((o) => String(o || '').trim().slice(0, 80))
+      .filter(Boolean)
+      .slice(0, 10);
+    if (!question || opts.length < 2) return null;
+    const hours = Math.min(24 * 7, Math.max(0, Number(raw.durationHours) || 0));
+    return {
+      question,
+      multi: Boolean(raw.multi),
+      options: opts.map((text, i) => ({ id: `o${i}`, text, votes: [] })),
+      endsAt: hours ? Date.now() + hours * 3600 * 1000 : null,
+    };
+  }
+
+  // ---- Threads (respostas presas a uma mensagem)
+  app.get('/api/channels/:id/threads/:parentId', requireAuth, (req, res) => {
+    const db = getDb();
+    const ch = db.channels.find((c) => c.id === req.params.id);
+    if (!ch || !computeChannelPermissions(db, req.user, ch).viewChannels) {
+      return res.status(403).json({ error: 'Sem acesso a este canal.' });
+    }
+    const parent = findChannelMessage(db, ch.id, req.params.parentId);
+    if (!parent) return res.status(404).json({ error: 'Mensagem não encontrada.' });
+    res.json({ parent, messages: ((db.threadMessages || {})[parent.id] || []).slice(-500) });
+  });
+
+  app.delete('/api/channels/:channelId/threads/:parentId/messages/:messageId', requireAuth, (req, res) => {
+    const db = getDb();
+    const ch = db.channels.find((c) => c.id === req.params.channelId);
+    const parent = ch ? findChannelMessage(db, ch.id, req.params.parentId) : null;
+    const list = parent ? (db.threadMessages || {})[parent.id] : null;
+    if (!ch || !parent || !list) return res.status(404).json({ error: 'Thread não encontrada.' });
+    const idx = list.findIndex((m) => m.id === req.params.messageId);
+    if (idx === -1) return res.status(404).json({ error: 'Mensagem não encontrada.' });
+    if (list[idx].authorId !== req.user.id && !computeChannelPermissions(db, req.user, ch).manageMessages) {
+      return res.status(403).json({ error: 'Você não pode excluir esta mensagem.' });
+    }
+    list.splice(idx, 1);
+    parent.thread = list.length
+      ? { ...(parent.thread || {}), count: list.length, lastAt: list[list.length - 1].createdAt }
+      : null;
+    saveDb();
+    emitToChannel(ch, 'chat:thread-message-deleted', { channelId: ch.id, parentId: parent.id, messageId: req.params.messageId });
+    emitToChannel(ch, 'chat:message-updated', { channelId: ch.id, message: parent });
+    res.json({ ok: true });
+  });
+
+  // ---- Eventos agendados (com presença confirmada e lembrete no app)
+  function visibleEvents() {
+    const cutoff = Date.now() - 12 * 3600 * 1000;
+    return (getDb().events || [])
+      .filter((e) => (e.endsAt || e.startsAt + 3 * 3600 * 1000) >= cutoff)
+      .sort((a, b) => a.startsAt - b.startsAt);
+  }
+  function broadcastEvents() {
+    io.emit('events:updated', visibleEvents());
+  }
+  function canManageEvent(db, user, ev) {
+    if (!user) return false;
+    if (ev.createdBy === user.id || user.role === 'host') return true;
+    const p = computeServerPermissions(db, user);
+    return Boolean(p.administrator || p.manageChannels || p.manageServer);
+  }
+
+  app.get('/api/events', requireAuth, (_req, res) => {
+    res.json({ events: visibleEvents() });
+  });
+
+  app.post('/api/events', requireAuth, (req, res) => {
+    const db = getDb();
+    const title = String(req.body?.title || '').trim().slice(0, 100);
+    const description = String(req.body?.description || '').trim().slice(0, 1000);
+    const startsAt = Math.floor(Number(req.body?.startsAt) || 0);
+    const endsAtRaw = Math.floor(Number(req.body?.endsAt) || 0);
+    const location = String(req.body?.location || '').trim().slice(0, 100);
+    const channelId = String(req.body?.channelId || '');
+    if (!title) return res.status(400).json({ error: 'Dê um nome ao evento.' });
+    if (!startsAt || startsAt < Date.now() - 5 * 60 * 1000) return res.status(400).json({ error: 'Escolha uma data no futuro.' });
+    if (startsAt > Date.now() + 366 * 24 * 3600 * 1000) return res.status(400).json({ error: 'Data muito distante.' });
+    const channel = channelId ? db.channels.find((c) => c.id === channelId) : null;
+    if (channelId && !channel) return res.status(400).json({ error: 'Canal não encontrado.' });
+    const ev = {
+      id: `evt-${uuidv4()}`,
+      title,
+      description,
+      startsAt,
+      endsAt: endsAtRaw > startsAt ? endsAtRaw : null,
+      channelId: channel ? channel.id : null,
+      location: channel ? '' : location,
+      createdBy: req.user.id,
+      createdByName: req.user.displayName,
+      createdAt: Date.now(),
+      rsvps: { [req.user.id]: 'going' },
+    };
+    if (!Array.isArray(db.events)) db.events = [];
+    // limpa eventos que acabaram há mais de 7 dias
+    const old = Date.now() - 7 * 24 * 3600 * 1000;
+    db.events = db.events.filter((e) => (e.endsAt || e.startsAt + 3 * 3600 * 1000) >= old).slice(-200);
+    db.events.push(ev);
+    saveDb();
+    broadcastEvents();
+    res.json({ event: ev });
+  });
+
+  app.post('/api/events/:id/rsvp', requireAuth, (req, res) => {
+    const db = getDb();
+    const ev = (db.events || []).find((e) => e.id === req.params.id);
+    if (!ev) return res.status(404).json({ error: 'Evento não encontrado.' });
+    const status = req.body?.status;
+    if (!ev.rsvps || typeof ev.rsvps !== 'object') ev.rsvps = {};
+    if (status === 'going' || status === 'maybe' || status === 'no') ev.rsvps[req.user.id] = status;
+    else delete ev.rsvps[req.user.id];
+    saveDb();
+    broadcastEvents();
+    res.json({ event: ev });
+  });
+
+  app.delete('/api/events/:id', requireAuth, (req, res) => {
+    const db = getDb();
+    const ev = (db.events || []).find((e) => e.id === req.params.id);
+    if (!ev) return res.status(404).json({ error: 'Evento não encontrado.' });
+    if (!canManageEvent(db, req.user, ev)) return res.status(403).json({ error: 'Só quem criou o evento pode cancelá-lo.' });
+    db.events = db.events.filter((e) => e.id !== ev.id);
+    saveDb();
+    broadcastEvents();
+    res.json({ ok: true });
+  });
+
+  // ---- Busca no histórico dos canais (com filtros)
+  const foldText = (t) =>
+    String(t || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+  function messageHas(m, has) {
+    const atts = Array.isArray(m.attachments) ? m.attachments : [];
+    switch (has) {
+      case 'file':
+        return atts.length > 0 || Boolean(m.transfer);
+      case 'image':
+        return Boolean(m.gifUrl) || atts.some((a) => a.kind === 'image' || a.kind === 'gif');
+      case 'video':
+        return atts.some((a) => a.kind === 'video');
+      case 'audio':
+        return atts.some((a) => a.kind === 'audio' || a.isVoiceMessage);
+      case 'link':
+        return /https?:\/\//i.test(m.content || '');
+      case 'poll':
+        return Boolean(m.poll);
+      case 'pinned':
+        return Boolean(m.pinned);
+      default:
+        return true;
+    }
+  }
+
+  app.get('/api/search', requireAuth, (req, res) => {
+    const db = getDb();
+    const q = foldText(req.query.q).trim().slice(0, 200);
+    const fromQ = foldText(req.query.from).trim().replace(/^@/, '').slice(0, 64);
+    const has = String(req.query.has || '');
+    const channelId = String(req.query.channelId || '');
+    const before = Number(req.query.before) || 0;
+    const after = Number(req.query.after) || 0;
+    if (!q && !fromQ && !has && !before && !after) return res.json({ results: [], total: 0 });
+    const channels = db.channels.filter(
+      (c) => c.type === 'text' && (!channelId || c.id === channelId) && computeChannelPermissions(db, req.user, c).viewChannels
+    );
+    const fromIds = fromQ
+      ? new Set(
+          db.users
+            .filter((u) => foldText(u.displayName).includes(fromQ) || foldText(u.username).includes(fromQ))
+            .map((u) => u.id)
+        )
+      : null;
+    const PER_CHANNEL = 50;
+    let total = 0;
+    const found = [];
+    for (const ch of channels) {
+      const list = db.messages[ch.id] || [];
+      let kept = 0;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const m = list[i];
+        if (after && m.createdAt < after) break; // lista em ordem de envio
+        if (before && m.createdAt >= before) continue;
+        if (fromIds && !fromIds.has(m.authorId)) continue;
+        if (has && !messageHas(m, has)) continue;
+        if (q) {
+          const hay = foldText(
+            `${m.content || ''} ${(m.attachments || []).map((a) => a.name).join(' ')} ${m.poll?.question || ''} ${
+              m.transfer?.originalName || ''
+            }`
+          );
+          if (!hay.includes(q)) continue;
+        }
+        total++;
+        if (kept < PER_CHANNEL) {
+          found.push({ ...m, channelName: ch.name });
+          kept++;
+        }
+      }
+    }
+    found.sort((a, b) => b.createdAt - a.createdAt);
+    res.json({ results: found.slice(0, 50), total });
+  });
+
   app.get('/api/channels/:id/messages', requireAuth, (req, res) => {
     const db = getDb();
     const ch = db.channels.find((c) => c.id === req.params.id);
@@ -2057,7 +2429,7 @@ export function createPulseCordServer(options = {}) {
     });
     saveDb();
 
-    io.emit('chat:message-pinned', {
+    emitToChannel(ch, 'chat:message-pinned', {
       channelId: req.params.channelId,
       message: msg,
       pinnedBy: req.user.displayName,
@@ -2077,6 +2449,7 @@ export function createPulseCordServer(options = {}) {
       return res.status(403).json({ error: 'Você não pode excluir esta mensagem.' });
     }
     list.splice(idx, 1);
+    if (db.threadMessages && db.threadMessages[msg.id]) delete db.threadMessages[msg.id];
     if (msg.authorId !== req.user.id) {
       appendAuditLog({
         type: 'message_delete',
@@ -2087,7 +2460,7 @@ export function createPulseCordServer(options = {}) {
       });
     }
     saveDb();
-    io.emit('chat:message-deleted', { channelId: req.params.channelId, messageId: req.params.messageId });
+    emitToChannel(ch, 'chat:message-deleted', { channelId: req.params.channelId, messageId: req.params.messageId });
     res.json({ ok: true });
   });
 
@@ -2671,11 +3044,13 @@ export function createPulseCordServer(options = {}) {
     advertiser?.broadcastNow();
 
     // Live Game/App Activity & Status Presence
-    socket.on('user:activity', ({ currentActivity, recentActivities }) => {
+    socket.on('user:activity', (payload) => {
       const u = getDb().users.find((x) => x.id === socket.data.userId);
       if (!u) return;
-      u.currentActivity = currentActivity || null;
-      if (Array.isArray(recentActivities)) u.recentActivities = recentActivities.slice(0, 12);
+      u.currentActivity = sanitizeActivity(payload?.currentActivity);
+      if (Array.isArray(payload?.recentActivities)) {
+        u.recentActivities = payload.recentActivities.slice(0, 12).map(sanitizeActivity).filter(Boolean);
+      }
       saveDb();
       broadcastUsers();
     });
@@ -2734,7 +3109,13 @@ export function createPulseCordServer(options = {}) {
 
       const replyTo = payload?.replyTo || null;
 
-      if (!content && attachments.length === 0 && !gifUrl && !transfer) return cb?.({ error: 'Mensagem vazia.' });
+      const threadParentId = typeof payload?.threadParentId === 'string' ? payload.threadParentId : '';
+      const threadParent = threadParentId ? findChannelMessage(currentDb, channelId, threadParentId) : null;
+      if (threadParentId && !threadParent) return cb?.({ error: 'A mensagem da thread não existe mais.' });
+      const poll = threadParent ? null : sanitizePoll(payload?.poll);
+      if (payload?.poll && !poll && !threadParent) return cb?.({ error: 'A enquete precisa de uma pergunta e pelo menos 2 opções.' });
+
+      if (!content && attachments.length === 0 && !gifUrl && !transfer && !poll) return cb?.({ error: 'Mensagem vazia.' });
 
       const msg = {
         id: `msg-${uuidv4()}`,
@@ -2756,6 +3137,24 @@ export function createPulseCordServer(options = {}) {
           : null,
         createdAt: Date.now(),
       };
+      if (poll) msg.poll = poll;
+
+      if (threadParent) {
+        msg.threadParentId = threadParent.id;
+        if (!currentDb.threadMessages) currentDb.threadMessages = {};
+        const tl = currentDb.threadMessages[threadParent.id] || (currentDb.threadMessages[threadParent.id] = []);
+        tl.push(msg);
+        if (tl.length > 1000) currentDb.threadMessages[threadParent.id] = tl.slice(-1000);
+        threadParent.thread = {
+          count: currentDb.threadMessages[threadParent.id].length,
+          lastAt: msg.createdAt,
+          lastAuthorName: author.displayName,
+        };
+        saveDb();
+        emitToChannel(channel, 'chat:thread-message', { channelId, parentId: threadParent.id, message: msg });
+        emitToChannel(channel, 'chat:message-updated', { channelId, message: threadParent });
+        return cb?.({ ok: true, message: msg });
+      }
 
       if (!currentDb.messages[channelId]) currentDb.messages[channelId] = [];
       currentDb.messages[channelId].push(msg);
@@ -2765,8 +3164,70 @@ export function createPulseCordServer(options = {}) {
       }
       saveDb();
 
-      io.emit('chat:message', msg);
+      emitToChannel(channel, 'chat:message', msg);
       cb?.({ ok: true, message: msg });
+    });
+
+    // Reações (toque de novo para tirar)
+    socket.on('chat:react', (payload, cb) => {
+      const db = getDb();
+      const actor = db.users.find((u) => u.id === socket.data.userId);
+      const ch = db.channels.find((c) => c.id === payload?.channelId && c.type === 'text');
+      if (!actor || !ch || !computeChannelPermissions(db, actor, ch).viewChannels) return cb?.({ error: 'Sem acesso a este canal.' });
+      const emoji = String(payload?.emoji || '').trim();
+      if (!emoji || emoji.length > 16 || /[<>\s]/.test(emoji)) return cb?.({ error: 'Reação inválida.' });
+      const msg = findChannelMessage(db, ch.id, String(payload?.messageId || ''), payload?.threadParentId || '');
+      if (!msg) return cb?.({ error: 'Mensagem não encontrada.' });
+      if (!msg.reactions || typeof msg.reactions !== 'object') msg.reactions = {};
+      const list = Array.isArray(msg.reactions[emoji]) ? msg.reactions[emoji] : null;
+      if (list && list.includes(actor.id)) {
+        msg.reactions[emoji] = list.filter((id) => id !== actor.id);
+        if (!msg.reactions[emoji].length) delete msg.reactions[emoji];
+      } else {
+        if (!list && Object.keys(msg.reactions).length >= 20) return cb?.({ error: 'Limite de 20 reações diferentes.' });
+        msg.reactions[emoji] = [...(list || []), actor.id];
+      }
+      saveDb();
+      emitMessageUpdated(ch, msg);
+      cb?.({ ok: true });
+    });
+
+    // Enquetes: votar (substitui o voto anterior) e encerrar
+    socket.on('chat:poll-vote', (payload, cb) => {
+      const db = getDb();
+      const actor = db.users.find((u) => u.id === socket.data.userId);
+      const ch = db.channels.find((c) => c.id === payload?.channelId && c.type === 'text');
+      if (!actor || !ch || !computeChannelPermissions(db, actor, ch).viewChannels) return cb?.({ error: 'Sem acesso a este canal.' });
+      const msg = findChannelMessage(db, ch.id, String(payload?.messageId || ''));
+      if (!msg?.poll) return cb?.({ error: 'Enquete não encontrada.' });
+      if (msg.poll.closed || (msg.poll.endsAt && Date.now() > msg.poll.endsAt)) return cb?.({ error: 'Esta enquete já foi encerrada.' });
+      const valid = new Set(msg.poll.options.map((o) => o.id));
+      let chosen = (Array.isArray(payload?.optionIds) ? payload.optionIds : []).map(String).filter((id) => valid.has(id));
+      if (!msg.poll.multi) chosen = chosen.slice(0, 1);
+      for (const o of msg.poll.options) {
+        o.votes = (o.votes || []).filter((id) => id !== actor.id);
+        if (chosen.includes(o.id)) o.votes.push(actor.id);
+      }
+      saveDb();
+      emitMessageUpdated(ch, msg);
+      cb?.({ ok: true });
+    });
+
+    socket.on('chat:poll-close', (payload, cb) => {
+      const db = getDb();
+      const actor = db.users.find((u) => u.id === socket.data.userId);
+      const ch = db.channels.find((c) => c.id === payload?.channelId && c.type === 'text');
+      if (!actor || !ch) return cb?.({ error: 'Canal inválido.' });
+      const msg = findChannelMessage(db, ch.id, String(payload?.messageId || ''));
+      if (!msg?.poll) return cb?.({ error: 'Enquete não encontrada.' });
+      if (msg.authorId !== actor.id && !computeChannelPermissions(db, actor, ch).manageMessages) {
+        return cb?.({ error: 'Só quem criou pode encerrar a enquete.' });
+      }
+      msg.poll.closed = true;
+      msg.poll.endsAt = Math.min(msg.poll.endsAt || Date.now(), Date.now());
+      saveDb();
+      emitMessageUpdated(ch, msg);
+      cb?.({ ok: true });
     });
 
     socket.on('clock:sync', (clientSentAt, cb) => {
@@ -2796,7 +3257,7 @@ export function createPulseCordServer(options = {}) {
         details: `${nextPinned ? 'Fixou' : 'Desafixou'} mensagem em #${ch.name}`,
       });
       saveDb();
-      io.emit('chat:message-pinned', { channelId, message: msg, pinnedBy: actor.displayName });
+      emitToChannel(ch, 'chat:message-pinned', { channelId, message: msg, pinnedBy: actor.displayName });
       cb?.({ ok: true, message: msg });
     });
 
@@ -3014,8 +3475,13 @@ export function createPulseCordServer(options = {}) {
       // não entram como peers: são removidos logo abaixo
       const existingPeers = Array.from(roomMap.values()).filter((p) => p.userId !== currentUser.id);
 
-      const canSpeakHere = channelObj ? computeChannelPermissions(currentDb, currentUser, channelObj).speakVoice : true;
-      const effectiveServerMuted = Boolean(currentUser.serverMuted || !canSpeakHere);
+      const joinPerms = channelObj ? computeChannelPermissions(currentDb, currentUser, channelObj) : null;
+      const canSpeakHere = joinPerms ? joinPerms.speakVoice : true;
+      // Palco: moderadores entram falando; o resto entra na plateia (sem microfone) e pode levantar a mão
+      const isStage = Boolean(channelObj?.isStage);
+      const stageMod = isStage && isStageModerator(currentUser, joinPerms);
+      const stageRole = isStage ? (stageMod ? 'speaker' : 'audience') : null;
+      const effectiveServerMuted = Boolean(currentUser.serverMuted || !canSpeakHere || stageRole === 'audience');
 
       const participant = {
         socketId: socket.id,
@@ -3033,6 +3499,10 @@ export function createPulseCordServer(options = {}) {
         screenLabel: '',
         streamsMeta: null,
         joinedAt: Date.now(),
+        noSpeak: !canSpeakHere,
+        stageRole,
+        handRaised: false,
+        recording: null,
       };
 
       roomMap.set(socket.id, participant);
@@ -3132,6 +3602,19 @@ export function createPulseCordServer(options = {}) {
       if (typeof state?.cameraOn === 'boolean') participant.cameraOn = canStreamHere ? state.cameraOn : false;
       if (typeof state?.screenSharing === 'boolean') participant.screenSharing = canStreamHere ? state.screenSharing : false;
       if (typeof state?.screenLabel === 'string') participant.screenLabel = state.screenLabel.slice(0, 64);
+      // aviso para todos quando alguém grava a chamada (ou mantém clipes)
+      if ('recording' in (state || {})) {
+        const prevRec = participant.recording || null;
+        participant.recording = state.recording === 'record' || state.recording === 'clips' ? state.recording : null;
+        if (participant.recording !== prevRec) {
+          io.to(`voice:${channelId}`).emit('voice:recording-changed', {
+            channelId,
+            socketId: socket.id,
+            displayName: participant.displayName,
+            recording: participant.recording,
+          });
+        }
+      }
 
       if ((channelId.startsWith('dm:') || channelId.startsWith('group:')) && roomMap) {
         io.to(`voice:${channelId}`).emit('voice:dm-participants', {
@@ -3140,6 +3623,53 @@ export function createPulseCordServer(options = {}) {
         });
       }
       broadcastVoiceRooms();
+    });
+
+    // ---- Palco: levantar a mão, chamar para falar, voltar para a plateia
+    socket.on('stage:raise-hand', (payload, cb) => {
+      const channelId = socketVoiceChannel.get(socket.id);
+      const participant = channelId ? voiceRooms.get(channelId)?.get(socket.id) : null;
+      if (!participant || !participant.stageRole) return cb?.({ error: 'Você não está num palco.' });
+      participant.handRaised = participant.stageRole === 'audience' && Boolean(payload?.raised);
+      broadcastVoiceRooms();
+      if (participant.handRaised) {
+        io.to(`voice:${channelId}`).emit('stage:hand-raised', { channelId, socketId: socket.id, displayName: participant.displayName });
+      }
+      cb?.({ ok: true });
+    });
+
+    socket.on('stage:set-speaker', (payload, cb) => {
+      const channelId = socketVoiceChannel.get(socket.id);
+      const roomMap = channelId ? voiceRooms.get(channelId) : null;
+      const actorP = roomMap?.get(socket.id);
+      const db = getDb();
+      const actor = db.users.find((u) => u.id === socket.data.userId);
+      const ch = db.channels.find((c) => c.id === channelId);
+      if (!actorP || !actor || !ch?.isStage) return cb?.({ error: 'Você não está num palco.' });
+      const targetSid = String(payload?.socketId || socket.id);
+      const target = roomMap.get(targetSid);
+      if (!target) return cb?.({ error: 'Participante não encontrado.' });
+      const speaker = Boolean(payload?.speaker);
+      const isSelf = targetSid === socket.id;
+      // qualquer um pode descer do palco sozinho; subir alguém (ou tirar outra pessoa) é coisa de moderador
+      if (!(isSelf && !speaker) && !isStageModerator(actor, computeChannelPermissions(db, actor, ch))) {
+        return cb?.({ error: 'Só moderadores do palco podem fazer isso.' });
+      }
+      const targetUser = db.users.find((u) => u.id === target.userId);
+      target.stageRole = speaker ? 'speaker' : 'audience';
+      target.handRaised = false;
+      target.serverMuted = Boolean(targetUser?.serverMuted) || Boolean(target.noSpeak) || !speaker;
+      if (target.serverMuted) target.muted = true;
+      const tSock = io.sockets.sockets.get(targetSid);
+      tSock?.emit('stage:role', {
+        channelId,
+        role: target.stageRole,
+        serverMuted: target.serverMuted,
+        serverDeafened: Boolean(target.serverDeafened),
+        by: isSelf ? null : actor.displayName,
+      });
+      broadcastVoiceRooms();
+      cb?.({ ok: true });
     });
 
     // WebRTC Signaling
@@ -4040,8 +4570,21 @@ export function createPulseCordServer(options = {}) {
           hasPassword: Boolean(getDb().server.hasInvitePassword && getDb().server.invitePasswordHash),
         });
       };
-      server.once('error', onError);
       server.once('listening', onListening);
+      if (HOST === '::') {
+        // máquina sem IPv6: tenta de novo só em IPv4
+        server.once('error', (err) => {
+          if (err?.code === 'EAFNOSUPPORT' || err?.code === 'EADDRNOTAVAIL' || err?.code === 'EINVAL') {
+            console.warn('[PulseCord] IPv6 indisponível nesta máquina; escutando só em IPv4.');
+            server.once('error', onError);
+            server.listen(listenPort, '0.0.0.0');
+          } else {
+            onError(err);
+          }
+        });
+      } else {
+        server.once('error', onError);
+      }
       server.listen(listenPort, HOST);
     });
   }
@@ -4071,6 +4614,8 @@ export function createPulseCordServer(options = {}) {
     setServerMeta,
     getAddresses: () => getNetworkAddresses(activePort),
     getPort: () => activePort,
+    getOwnerCode: () => OWNER_CODE,
+    getDataDir: () => DATA_DIR,
   };
 }
 
@@ -4078,17 +4623,36 @@ const isDirectRun =
   process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isDirectRun) {
-  const instance = createPulseCordServer();
+  // Modo servidor dedicado (Debian/Windows sem tela): node server/index.js [--port 3000] [--host ::] [--data /var/lib/pulsecord]
+  const argv = process.argv.slice(2);
+  const arg = (name) => {
+    const i = argv.indexOf(`--${name}`);
+    if (i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--')) return argv[i + 1];
+    const eq = argv.find((a) => a.startsWith(`--${name}=`));
+    return eq ? eq.slice(name.length + 3) : undefined;
+  };
+  const instance = createPulseCordServer({
+    port: arg('port'),
+    host: arg('host'),
+    dataDir: arg('data'),
+    headless: true,
+    enableDiscovery: process.env.PULSECORD_LAN_DISCOVERY === '1' || argv.includes('--lan-discovery'),
+  });
   instance
     .start()
     .then(({ port, addresses }) => {
       console.log('\n=======================================================');
-      console.log('  🎙️  PulseCord Server 2.0 iniciado com sucesso!');
+      console.log('  PulseCord Server iniciado (modo dedicado)');
       console.log('=======================================================');
       console.log(`  Local:        http://localhost:${port}`);
       for (const a of addresses) {
-        console.log(`  ${a.name.padEnd(22)} ${a.url}`);
+        console.log(`  ${a.name.padEnd(34)} ${a.url}`);
       }
+      console.log(`  Dados:        ${instance.getDataDir()}`);
+      console.log('-------------------------------------------------------');
+      console.log(`  Código do dono: ${instance.getOwnerCode()}`);
+      console.log('  (no app: "Sou o dono deste servidor" na tela de entrar;');
+      console.log('   ele também fica salvo em owner-code.txt na pasta de dados)');
       console.log('=======================================================\n');
     })
     .catch((err) => {
@@ -4096,12 +4660,20 @@ if (isDirectRun) {
       process.exit(1);
     });
 
-  process.on('SIGINT', async () => {
-    await instance.stop();
-    process.exit(0);
-  });
-  process.on('SIGTERM', async () => {
-    await instance.stop();
-    process.exit(0);
-  });
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    const force = setTimeout(() => process.exit(0), 8000);
+    try {
+      await instance.stop();
+    } finally {
+      clearTimeout(force);
+      process.exit(0);
+    }
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  // um erro inesperado não deve derrubar o servidor 24 h: registra e segue (o systemd reinicia se cair)
+  process.on('unhandledRejection', (err) => console.error('[PulseCord] Promessa rejeitada sem tratamento:', err));
 }

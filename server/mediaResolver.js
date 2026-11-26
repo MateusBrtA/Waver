@@ -69,7 +69,8 @@ function findExistingYtDlp(dataDir) {
   if (cachedYtDlpPath && fs.existsSync(cachedYtDlpPath)) return cachedYtDlpPath;
 
   const candidates = [];
-  if (dataDir) candidates.push(path.join(dataDir, 'bin', 'yt-dlp.exe'));
+  // a cópia gerenciada pelo app vem primeiro: a do sistema (ex. apt do Debian) costuma estar desatualizada
+  if (dataDir) candidates.push(path.join(dataDir, 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'));
   if (process.platform === 'win32') {
     const pathDirs = (process.env.PATH || '').split(';').filter(Boolean);
     for (const d of pathDirs) candidates.push(path.join(d, 'yt-dlp.exe'));
@@ -162,10 +163,18 @@ export async function ensureYtDlp(dataDir) {
           cachedYtDlpPath = outPath;
           return outPath;
         }
-        const dlUrl =
+        // Linux: binário independente (não precisa de Python instalado no servidor)
+        const asset =
           process.platform === 'win32'
-            ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
-            : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+            ? 'yt-dlp.exe'
+            : process.platform === 'linux' && process.arch === 'x64'
+              ? 'yt-dlp_linux'
+              : process.platform === 'linux' && process.arch === 'arm64'
+                ? 'yt-dlp_linux_aarch64'
+                : process.platform === 'darwin'
+                  ? 'yt-dlp_macos'
+                  : 'yt-dlp';
+        const dlUrl = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${asset}`;
 
         const resp = await fetch(dlUrl, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(45000) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -258,12 +267,40 @@ function runYtDlpJsonOnce(binPath, args, timeoutMs = 28000) {
   return p;
 }
 
-function runYtDlpJsonProcess(binPath, args, timeoutMs) {
+/**
+ * O YouTube agora exige um motor JavaScript para o yt-dlp resolver os desafios (sem ele, poucos formatos).
+ * Usamos o próprio Node que roda o servidor (no app Electron, o Electron em modo Node), se o yt-dlp suportar.
+ */
+const jsRuntimeSupport = new Map(); // binPath -> Promise<boolean>
+function ytDlpSupportsJsRuntimes(binPath) {
+  if (!jsRuntimeSupport.has(binPath)) {
+    jsRuntimeSupport.set(
+      binPath,
+      new Promise((resolve) => {
+        execFile(binPath, ['--help'], { timeout: 30000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) =>
+          resolve(!err && String(stdout).includes('--js-runtimes'))
+        );
+      })
+    );
+  }
+  return jsRuntimeSupport.get(binPath);
+}
+
+async function ytDlpRuntimeOptions(binPath) {
+  if (process.env.PULSECORD_YTDLP_JS_RUNTIME === 'off') return { args: [], env: process.env };
+  if (!(await ytDlpSupportsJsRuntimes(binPath))) return { args: [], env: process.env };
+  const env = { ...process.env };
+  if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1';
+  return { args: ['--js-runtimes', `node:${process.execPath}`], env };
+}
+
+async function runYtDlpJsonProcess(binPath, args, timeoutMs) {
+  const rt = await ytDlpRuntimeOptions(binPath);
   return new Promise((resolve, reject) => {
     execFile(
       binPath,
-      ['--no-warnings', ...args],
-      { maxBuffer: 25 * 1024 * 1024, timeout: timeoutMs, windowsHide: true },
+      ['--no-warnings', ...rt.args, ...args],
+      { maxBuffer: 25 * 1024 * 1024, timeout: timeoutMs, windowsHide: true, env: rt.env },
       (err, stdout, stderr) => {
         if (err) {
           const msg = (stderr || err.message || 'Erro ao executar yt-dlp').toString().trim();

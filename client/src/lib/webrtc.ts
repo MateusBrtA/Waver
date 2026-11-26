@@ -194,8 +194,16 @@ export class WebRTCManager {
     this.applyMicEnabledState();
   }
 
+  /** Mute imposto pelo canal atual (plateia do palco, cargo sem permissão de falar). */
+  private channelMuted = false;
+  setChannelMuted(on: boolean) {
+    if (this.channelMuted === on) return;
+    this.channelMuted = on;
+    this.applyMicEnabledState();
+  }
+
   private isEffectivelyMuted(): boolean {
-    return this.muted || this.deafened || this.serverMuted || this.serverDeafened;
+    return this.muted || this.deafened || this.serverMuted || this.serverDeafened || this.channelMuted;
   }
 
   private applyMicEnabledState() {
@@ -284,8 +292,16 @@ export class WebRTCManager {
     return this.rcFastSeq;
   }
 
+  private serverIceServers: RTCIceServer[] = [];
+
+  /** Servidores STUN/TURN informados pelo servidor PulseCord conectado (credenciais temporárias). */
+  setServerIceServers(list: RTCIceServer[] | null | undefined) {
+    this.serverIceServers = Array.isArray(list) ? list.filter((s) => s && s.urls) : [];
+  }
+
   private getIceServers(): RTCIceServer[] {
-    const servers = [...DEFAULT_ICE_SERVERS];
+    // TURN/STUN oferecidos pelo próprio servidor (ex. coturn no Debian) vêm primeiro
+    const servers = [...this.serverIceServers, ...DEFAULT_ICE_SERVERS];
     if (this.settings.customTurnUrl?.trim()) {
       servers.push({
         urls: this.settings.customTurnUrl.trim(),
@@ -771,7 +787,7 @@ export class WebRTCManager {
         if (track) {
           ctx.camSender = ctx.pc.addTrack(track, stream);
           preferHighQualityVideoCodecs(ctx.pc, ctx.camSender);
-          this.applyVideoSenderParams(ctx.camSender, 5, 30, 'motion');
+          this.applyVideoSenderParams(ctx.camSender, this.meshCamProfile().mbps, 30, 'motion', this.meshCamProfile().scale);
         }
       }
 
@@ -926,7 +942,7 @@ export class WebRTCManager {
       for (const ctx of this.peers.values()) {
         ctx.screenVideoSender = ctx.pc.addTrack(videoTrack, stream);
         preferHighQualityVideoCodecs(ctx.pc, ctx.screenVideoSender);
-        await this.applyVideoSenderParams(ctx.screenVideoSender, startBitrate, targetFps, config.contentMode);
+        await this.applyVideoSenderParams(ctx.screenVideoSender, Math.min(startBitrate, this.meshScreenCapMbps()), targetFps, config.contentMode);
 
         if (audioTrack) {
           ctx.screenAudioSender = ctx.pc.addTrack(audioTrack, stream);
@@ -987,14 +1003,15 @@ export class WebRTCManager {
     sender: RTCRtpSender,
     bitrateMbps: number,
     fps: number,
-    contentMode: 'motion' | 'detail'
+    contentMode: 'motion' | 'detail',
+    scaleDown = 1
   ) {
     try {
       const params = sender.getParameters();
       if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
       params.encodings[0].maxBitrate = Math.round(bitrateMbps * 1_000_000);
       params.encodings[0].maxFramerate = fps;
-      params.encodings[0].scaleResolutionDownBy = 1;
+      params.encodings[0].scaleResolutionDownBy = scaleDown;
       params.degradationPreference =
         contentMode === 'detail'
           ? 'maintain-resolution'
@@ -1005,6 +1022,37 @@ export class WebRTCManager {
     } catch (err) {
       console.warn('[WebRTC] setParameters video warning:', err);
     }
+  }
+
+  // Chamada em malha (mesh): cada participante recebe uma cópia do seu vídeo. Com mais gente,
+  // cada cópia fica mais leve para o upload de quem envia não saturar (e o áudio não picotar).
+  private meshCamProfile() {
+    const n = this.peers.size;
+    if (n <= 2) return { mbps: 5, scale: 1 };
+    if (n <= 4) return { mbps: 2.5, scale: 1 };
+    if (n <= 6) return { mbps: 1.4, scale: 1.5 };
+    return { mbps: 0.8, scale: 2 };
+  }
+
+  private meshScreenCapMbps() {
+    const n = this.peers.size;
+    return n <= 2 ? Infinity : Math.max(3, Math.round(40 / n));
+  }
+
+  private meshRebalanceTimer: number | null = null;
+  private scheduleMeshRebalance() {
+    if (this.meshRebalanceTimer) window.clearTimeout(this.meshRebalanceTimer);
+    this.meshRebalanceTimer = window.setTimeout(() => {
+      this.meshRebalanceTimer = null;
+      const cam = this.meshCamProfile();
+      const screenMbps = Math.min(this.adaptiveBitrateMbps, this.meshScreenCapMbps());
+      for (const ctx of this.peers.values()) {
+        if (ctx.camSender) this.applyVideoSenderParams(ctx.camSender, cam.mbps, 30, 'motion', cam.scale);
+        if (ctx.screenVideoSender && this.screenConfig) {
+          this.applyVideoSenderParams(ctx.screenVideoSender, screenMbps, this.screenConfig.fps, this.screenConfig.contentMode);
+        }
+      }
+    }, 600);
   }
 
   private async applyAudioSenderParams(sender: RTCRtpSender, maxBitrateBps: number) {
@@ -1125,6 +1173,7 @@ export class WebRTCManager {
     }
 
     this.peers.set(remoteSocketId, ctx);
+    this.scheduleMeshRebalance();
 
     if (this.micStream) {
       const micTrack = this.micStream.getAudioTracks()[0];
@@ -1141,7 +1190,7 @@ export class WebRTCManager {
       if (camTrack) {
         ctx.camSender = pc.addTrack(camTrack, this.camStream);
         preferHighQualityVideoCodecs(pc, ctx.camSender);
-        this.applyVideoSenderParams(ctx.camSender, 5, 30, 'motion');
+        this.applyVideoSenderParams(ctx.camSender, this.meshCamProfile().mbps, 30, 'motion', this.meshCamProfile().scale);
       }
     }
     if (this.screenStream && this.screenConfig) {
@@ -1151,7 +1200,7 @@ export class WebRTCManager {
         preferHighQualityVideoCodecs(pc, ctx.screenVideoSender);
         this.applyVideoSenderParams(
           ctx.screenVideoSender,
-          this.adaptiveBitrateMbps,
+          Math.min(this.adaptiveBitrateMbps, this.meshScreenCapMbps()),
           this.screenConfig.fps,
           this.screenConfig.contentMode
         );
@@ -1421,6 +1470,7 @@ export class WebRTCManager {
       ctx.pc.close();
     } catch {}
     this.peers.delete(socketId);
+    this.scheduleMeshRebalance();
     this.emitPeersState();
   };
 
@@ -1594,7 +1644,7 @@ export class WebRTCManager {
                   if (pCtx.screenVideoSender && this.screenConfig) {
                     this.applyVideoSenderParams(
                       pCtx.screenVideoSender,
-                      nextTarget,
+                      Math.min(nextTarget, this.meshScreenCapMbps()),
                       this.screenConfig.fps,
                       this.screenConfig.contentMode
                     );

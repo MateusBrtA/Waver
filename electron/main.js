@@ -25,6 +25,9 @@ const { WindowsRemoteController } = require('./remoteControl');
 const { ActivityDetector } = require('./activityDetector');
 const { ProcessLoopbackCapture } = require('./audioLoopback');
 const { LanPeerMessenger } = require('./lanPeerMessenger');
+const { setupDesktopIntegration } = require('./desktopIntegration');
+const { HostProcessServer } = require('./hostProcess');
+let desktopIntegration = null;
 
 // ========================
 // Proteção contra "write EPIPE" ao fechar o app (stdout/stderr ou pipes de helpers
@@ -207,6 +210,12 @@ function readEncryptedLocalJson(fileName, fallback) {
 // Embedded Host, LAN Scanner & Tunnel State
 // ========================
 let embeddedServerInstance = null;
+// O servidor do Host roda num processo separado; se esse processo não abrir neste PC, volta a rodar aqui dentro.
+let hostInProcessFallback = process.env.PULSECORD_HOST_INPROCESS === '1';
+let lastHostOpts = null;
+let hostCrashTimes = [];
+let hostQuitFlushed = false;
+const loadServerModule = () => import(pathToFileURL(path.join(__dirname, '..', 'server', 'index.js')).href);
 let lanScanner = null;
 let discoveredLanServers = [];
 let hostState = {
@@ -263,14 +272,14 @@ async function startEmbeddedHost(preferredPortOrOpts = 3000) {
       (hostOpts.serverName || hostOpts.iconColor || hostOpts.iconDataUrl || hostOpts.password !== undefined)
     ) {
       if (hostOpts.serverName || hostOpts.iconColor || hostOpts.iconDataUrl) {
-        embeddedServerInstance.setServerMeta?.({
+        await embeddedServerInstance.setServerMeta?.({
           name: hostOpts.serverName,
           iconColor: hostOpts.iconColor,
           iconDataUrl: hostOpts.iconDataUrl,
         });
       }
       if (hostOpts.password !== undefined) {
-        const info = embeddedServerInstance.setServerPassword?.(hostOpts.password || '');
+        const info = await embeddedServerInstance.setServerPassword?.(hostOpts.password || '');
         hostState.hasPassword = Boolean(info?.hasInvitePassword);
         broadcastHostState();
       }
@@ -283,8 +292,7 @@ async function startEmbeddedHost(preferredPortOrOpts = 3000) {
   broadcastHostState();
 
   try {
-    const serverModUrl = pathToFileURL(path.join(__dirname, '..', 'server', 'index.js')).href;
-    const { createPulseCordServer, getNetworkAddresses } = await import(serverModUrl);
+    lastHostOpts = { ...hostOpts };
 
     const dataDir = path.join(app.getPath('userData'), 'server-data');
     // No portable, app.getPath('exe') é a cópia extraída em %TEMP%: usa a pasta do .exe real.
@@ -296,20 +304,31 @@ async function startEmbeddedHost(preferredPortOrOpts = 3000) {
     let targetPort = Number(hostOpts.port) || 3000;
     let startedInfo = null;
 
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const candidate = createPulseCordServer({
+    for (let attempt = 0; attempt < 7; attempt++) {
+      const serverOptions = {
         port: targetPort,
-        host: '0.0.0.0',
+        host: '::', // IPv6 + IPv4 (cai para só IPv4 se a máquina não tiver IPv6)
         dataDir,
         clientDistDir: getActiveDistDir(),
         downloadsDir,
-      });
+      };
+      const useUtility = !hostInProcessFallback;
+      const candidate = useUtility
+        ? new HostProcessServer(serverOptions)
+        : (await loadServerModule()).createPulseCordServer(serverOptions);
 
       try {
         startedInfo = await candidate.start(targetPort);
         embeddedServerInstance = candidate;
+        if (useUtility) candidate.on('crash', (code) => handleHostCrash(candidate, code));
         break;
       } catch (err) {
+        if (useUtility && err && err.code !== 'EADDRINUSE') {
+          // processo separado não funcionou aqui (antivírus, módulo, etc.): tenta de novo dentro do app
+          console.warn('[Host] Processo separado falhou, usando o servidor dentro do app:', err?.message || err);
+          hostInProcessFallback = true;
+          continue;
+        }
         if (err && err.code === 'EADDRINUSE') {
           try {
             const resp = await fetch(`http://127.0.0.1:${targetPort}/api/health`, {
@@ -324,7 +343,7 @@ async function startEmbeddedHost(preferredPortOrOpts = 3000) {
                   starting: false,
                   port: targetPort,
                   localUrl: `http://localhost:${targetPort}`,
-                  addresses: health.addresses || getNetworkAddresses(targetPort),
+                  addresses: health.addresses || (await loadServerModule()).getNetworkAddresses(targetPort),
                   hasPassword: Boolean(health.server?.hasInvitePassword),
                   externalExisting: true,
                   error: '',
@@ -349,14 +368,14 @@ async function startEmbeddedHost(preferredPortOrOpts = 3000) {
 
     if (embeddedServerInstance) {
       if (hostOpts.serverName || hostOpts.iconColor || hostOpts.iconDataUrl) {
-        embeddedServerInstance.setServerMeta?.({
+        await embeddedServerInstance.setServerMeta?.({
           name: hostOpts.serverName,
           iconColor: hostOpts.iconColor,
           iconDataUrl: hostOpts.iconDataUrl,
         });
       }
       if (hostOpts.password) {
-        const info = embeddedServerInstance.setServerPassword?.(hostOpts.password);
+        const info = await embeddedServerInstance.setServerPassword?.(hostOpts.password);
         startedInfo.hasPassword = Boolean(info?.hasInvitePassword);
       }
     }
@@ -384,6 +403,29 @@ async function startEmbeddedHost(preferredPortOrOpts = 3000) {
     };
     broadcastHostState();
     return { ...hostState };
+  }
+}
+
+// O processo do servidor caiu: avisa e reinicia (até 3 vezes em 10 minutos)
+function handleHostCrash(instance, code) {
+  if (embeddedServerInstance !== instance) return;
+  embeddedServerInstance = null;
+  console.error('[Host] O processo do servidor fechou inesperadamente (código', code, ')');
+  const now = Date.now();
+  hostCrashTimes = hostCrashTimes.filter((t) => now - t < 10 * 60 * 1000);
+  hostCrashTimes.push(now);
+  const canRetry = hostCrashTimes.length <= 3 && lastHostOpts;
+  hostState = {
+    ...hostState,
+    running: false,
+    starting: Boolean(canRetry),
+    error: canRetry ? 'O servidor parou de repente; reiniciando...' : 'O servidor parou várias vezes. Inicie de novo pelo app.',
+  };
+  broadcastHostState();
+  if (canRetry) {
+    setTimeout(() => {
+      if (!isQuitting && !embeddedServerInstance) startEmbeddedHost({ ...lastHostOpts, port: hostState.port || lastHostOpts.port });
+    }, 2000);
   }
 }
 
@@ -647,7 +689,8 @@ const gotLock = allowMulti ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    desktopIntegration?.handleArgv(argv); // "Compartilhar no PulseCord" com o app já aberto
     if (mainWindow) {
       if (!mainWindow.isVisible()) mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -1167,9 +1210,9 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
     ipcMain.handle('host:start', (_event, opts) => startEmbeddedHost(opts || 3000));
     ipcMain.handle('host:stop', () => stopEmbeddedHost());
     ipcMain.handle('host:status', () => ({ ...hostState }));
-    ipcMain.handle('host:set-password', (_event, password) => {
+    ipcMain.handle('host:set-password', async (_event, password) => {
       if (embeddedServerInstance) {
-        const info = embeddedServerInstance.setServerPassword(password || '');
+        const info = await embeddedServerInstance.setServerPassword(password || '');
         hostState.hasPassword = Boolean(info?.hasInvitePassword);
         broadcastHostState();
       }
@@ -1274,6 +1317,19 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
     ensureLanScanner();
     createTray();
     createWindow();
+    desktopIntegration = setupDesktopIntegration({
+      getWindow: () => mainWindow,
+      getActivityDetector: () => activityDetector,
+      showWindow: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+        if (!mainWindow.isVisible()) mainWindow.show();
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.webContents.setFrameRate(60);
+        mainWindow.focus();
+      },
+      iconPath: fs.existsSync(path.join(__dirname, 'icon.ico')) ? path.join(__dirname, 'icon.ico') : path.join(__dirname, 'icon.png'),
+    });
+    desktopIntegration.handleArgv(process.argv);
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1281,7 +1337,16 @@ Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
     });
   });
 
-  app.on('before-quit', () => {
+  app.on('before-quit', (event) => {
+    // o servidor em processo separado grava o banco antes de fechar (senão as últimas mensagens se perderiam)
+    if (embeddedServerInstance?.isUtility && !hostQuitFlushed) {
+      hostQuitFlushed = true;
+      event.preventDefault();
+      isQuitting = true;
+      const inst = embeddedServerInstance;
+      Promise.race([inst.stop(), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.quit());
+      return;
+    }
     isQuitting = true;
     // garante que localStorage (sessão, servidores salvos, ajustes) chegou no disco antes de sair
     try {

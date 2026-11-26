@@ -1,6 +1,7 @@
 const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { mediaAppName } = require('./mediaWatcher');
 
 // Curated Windows game & app catalog (lowercase exe -> display metadata)
 const KNOWN_APPS = {
@@ -55,7 +56,41 @@ class ActivityDetector {
     this.scanProcessesFn = scanProcessesFn;
     this.timer = null;
     this.currentActivity = null;
+    this.baseActivity = null; // jogo/app detectado pelos processos
+    this.media = null; // música tocando (controle de mídia do Windows)
+    this.mediaStartedAt = 0;
+    this.lastKey = '';
     this.recentActivities = this.loadHistory();
+  }
+
+  /** Música tocando agora ({ title, artist, app } ou null). Jogo aberto tem prioridade. */
+  setMedia(media) {
+    const sameTrack = media && this.media && media.title === this.media.title && media.artist === this.media.artist;
+    if (media && !sameTrack) this.mediaStartedAt = Date.now();
+    this.media = media || null;
+    this.compose();
+  }
+
+  compose() {
+    const base = this.baseActivity;
+    let next = base;
+    if (this.media && (!base || base.category !== 'game')) {
+      next = {
+        name: mediaAppName(this.media.app),
+        icon: '🎧',
+        category: 'music',
+        color: base?.category === 'music' ? base.color : '#1db954',
+        details: this.media.title,
+        state: this.media.artist || undefined,
+        startedAt: this.mediaStartedAt || Date.now(),
+      };
+    }
+    this.currentActivity = next || null;
+    const key = next ? `${next.name}|${next.details || ''}|${next.state || ''}` : '';
+    if (key !== this.lastKey) {
+      this.lastKey = key;
+      this.onChange?.(this.getState());
+    }
   }
 
   loadHistory() {
@@ -116,12 +151,12 @@ class ActivityDetector {
 
     const chosen = detected || fallbackApp;
     const now = Date.now();
-    const prevName = this.currentActivity?.name || null;
+    const prevName = this.baseActivity?.name || null;
     const nextName = chosen?.name || null;
 
     if (chosen) {
-      const startedAt = prevName === nextName ? this.currentActivity.startedAt : now;
-      this.currentActivity = {
+      const startedAt = prevName === nextName ? this.baseActivity.startedAt : now;
+      this.baseActivity = {
         name: chosen.name,
         icon: chosen.icon,
         category: chosen.category,
@@ -153,12 +188,9 @@ class ActivityDetector {
         .slice(0, 12);
       this.saveHistory();
     } else {
-      this.currentActivity = null;
+      this.baseActivity = null;
     }
-
-    if (prevName !== nextName) {
-      this.onChange?.(this.getState());
-    }
+    this.compose();
   }
 
   async poll() {

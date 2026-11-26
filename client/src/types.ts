@@ -6,6 +6,10 @@ export interface ActivityEntry {
   category: 'game' | 'music' | 'app';
   color: string;
   startedAt?: number;
+  /** linha 2 do status (ex.: nome da música) */
+  details?: string;
+  /** linha 3 (ex.: artista) */
+  state?: string;
   lastPlayedAt?: number;
   totalMinutes?: number;
 }
@@ -205,6 +209,8 @@ export interface Channel {
   visibility?: 'default' | 'spoiler' | 'nsfw';
   isPrivate?: boolean;
   bitrateKbps?: number;
+  /** canal de voz em modo palco (plateia + quem fala) */
+  isStage?: boolean;
   userLimit?: number;
   overwrites?: ChannelPermissionOverwrite[];
   createdAt: number;
@@ -412,7 +418,49 @@ export interface ChatMessage {
   pinned?: boolean;
   pinnedAt?: number | null;
   pinnedBy?: string | null;
+  /** emoji -> ids de quem reagiu */
+  reactions?: Record<string, string[]>;
+  poll?: MessagePoll | null;
+  /** resumo da thread presa a esta mensagem */
+  thread?: { count: number; lastAt: number; lastAuthorName?: string } | null;
+  /** esta mensagem é uma resposta dentro da thread desta mensagem */
+  threadParentId?: string;
+  /** só nos resultados de busca */
+  channelName?: string;
   createdAt: number;
+}
+
+export interface MessagePoll {
+  question: string;
+  multi: boolean;
+  options: Array<{ id: string; text: string; votes: string[] }>;
+  endsAt: number | null;
+  closed?: boolean;
+}
+
+export type RsvpStatus = 'going' | 'maybe' | 'no';
+
+export interface ServerEvent {
+  id: string;
+  title: string;
+  description: string;
+  startsAt: number;
+  endsAt: number | null;
+  channelId: string | null;
+  location: string;
+  createdBy: string;
+  createdByName: string;
+  createdAt: number;
+  rsvps: Record<string, RsvpStatus>;
+}
+
+export interface SearchFilters {
+  q?: string;
+  from?: string;
+  has?: string;
+  channelId?: string;
+  before?: number;
+  after?: number;
 }
 
 export interface StreamsMeta {
@@ -442,6 +490,13 @@ export interface VoiceParticipant {
   screenLabel: string;
   streamsMeta?: StreamsMeta | null;
   joinedAt: number;
+  /** canal de palco: quem fala e quem assiste */
+  stageRole?: 'speaker' | 'audience' | null;
+  handRaised?: boolean;
+  /** sem permissão de falar neste canal */
+  noSpeak?: boolean;
+  /** está gravando a chamada ou mantendo clipes */
+  recording?: 'record' | 'clips' | null;
 }
 
 export interface StreamStats {
@@ -766,9 +821,41 @@ export interface LanPeer {
   online: boolean;
 }
 
+export interface SharedFileInfo {
+  path: string;
+  name: string;
+  size: number;
+}
+
+export interface OverlayState {
+  channelName: string;
+  participants: Array<{ name: string; avatarUrl: string | null; avatarColor: string; speaking: boolean; muted: boolean; deafened: boolean }>;
+}
+
+export type NotificationRoute = { type: 'channel'; id: string } | { type: 'dm'; userId: string } | null;
+
 export interface ElectronAPI {
   isElectron: boolean;
   platform: string;
+  setGlobalShortcuts?: (map: Record<string, string>) => Promise<{ ok: boolean; failed: string[] }>;
+  onGlobalShortcut?: (cb: (action: string) => void) => () => void;
+  showNotification?: (opts: { title: string; body: string; iconDataUrl?: string; route?: NotificationRoute; silent?: boolean }) => Promise<{ ok: boolean }>;
+  onNotificationClicked?: (cb: (route: NotificationRoute) => void) => () => void;
+  getShareMenu?: () => Promise<{ supported: boolean; enabled: boolean }>;
+  setShareMenu?: (enabled: boolean) => Promise<{ ok: boolean; enabled?: boolean; error?: string }>;
+  setOverlayConfig?: (cfg: { enabled: boolean; corner: string; onlySpeaking: boolean; onlyInGames: boolean }) => Promise<unknown>;
+  sendOverlayState?: (state: OverlayState | null) => void;
+  toggleOverlay?: () => Promise<boolean>;
+  setMediaActivity?: (enabled: boolean) => Promise<boolean>;
+  saveMediaFile?: (name: string, bytes: Uint8Array, kind: 'clip' | 'recording') => Promise<string>;
+  recordingOpen?: (name: string) => Promise<string>;
+  recordingAppend?: (token: string, bytes: Uint8Array) => Promise<boolean>;
+  recordingClose?: (token: string) => Promise<string | null>;
+  revealMediaFile?: (file: string) => Promise<boolean>;
+  takePendingShares?: () => Promise<SharedFileInfo[]>;
+  readSharedFile?: (path: string) => Promise<Uint8Array>;
+  clearPendingShares?: () => Promise<boolean>;
+  onSharedFiles?: (cb: (list: SharedFileInfo[]) => void) => () => void;
   getDesktopSources: () => Promise<DesktopSourceItem[]>;
   prepareScreenCapture: (opts: { sourceId: string; shareAudio: boolean; useProcessLoopback?: boolean }) => Promise<boolean>;
   // Zero-Echo WASAPI Process Loopback

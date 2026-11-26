@@ -3,6 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import {
   AlertCircle,
   CheckCircle2,
+  CircleDot,
   Download,
   Loader2,
   MicOff,
@@ -10,12 +11,13 @@ import {
   MonitorCog,
   Phone,
   PhoneOff,
+  Scissors,
   ShieldAlert,
   Square,
   WifiOff,
   X,
 } from 'lucide-react';
-import { ApiClient, normalizeServerUrl, setLocalP2pBaseUrl } from './lib/api';
+import { ApiClient, normalizeServerUrl, resolveMediaUrl, setLocalP2pBaseUrl } from './lib/api';
 import { audioEngine } from './lib/audioEngine';
 import { GamepadBridge } from './lib/gamepadBridge';
 import { computeChannelPermissions, computeServerPermissions } from './lib/permissions';
@@ -62,6 +64,10 @@ import {
   User,
   VideoState,
   VoiceParticipant,
+  NotificationRoute,
+  RsvpStatus,
+  ServerEvent,
+  SharedFileInfo,
 } from './types';
 import { Avatar } from './components/Avatar';
 import { ChannelContextMenu } from './components/ChannelContextMenu';
@@ -82,6 +88,14 @@ import { UserProfilePopout } from './components/UserProfilePopout';
 import { VoiceAudioBridge } from './components/VoiceAudioBridge';
 import { VoiceStage } from './components/VoiceStage';
 import { LazyBoundary } from './components/LazyBoundary';
+import { ShareTargetModal } from './components/ShareTargetModal';
+import { ThreadPanel } from './components/ThreadPanel';
+import { EventsModal } from './components/EventsModal';
+import { SearchModal } from './components/SearchModal';
+import { PollComposerModal, PollDraft } from './components/PollComposerModal';
+import { StageBar } from './components/StageBar';
+import { CallRecording, ClipBuffer, RecSource } from './lib/callRecorder';
+import { getDesktopPrefs, prettyAccelerator, useDesktopPrefs } from './lib/desktopPrefs';
 
 // Janelas pesadas só carregam quando abertas (menos JS na memória do cliente)
 const ChannelSettingsModal = React.lazy(() => import('./components/ChannelSettingsModal').then((m) => ({ default: m.ChannelSettingsModal })));
@@ -283,6 +297,17 @@ function mergePrivateGroups(prev: PrivateGroup[], incoming: PrivateGroup[]): Pri
   return acc;
 }
 
+const MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac',
+  pdf: 'application/pdf', txt: 'text/plain', json: 'application/json', zip: 'application/zip',
+};
+function guessMimeFromName(name: string) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  return MIME_BY_EXT[ext] || 'application/octet-stream';
+}
+
 export default function App() {
   const isElectron = Boolean(window.electronAPI?.isElectron);
 
@@ -397,6 +422,25 @@ export default function App() {
   const [profilePopout, setProfilePopout] = useState<{ userId: string; x: number; y: number } | null>(null);
   const [profileModal, setProfileModal] = useState<{ userId: string; edit: boolean } | null>(null);
   const [mentionRequest, setMentionRequest] = useState<{ text: string; seq: number } | null>(null);
+  // arquivos vindos do "Compartilhar no PulseCord" do Explorer
+  const [incomingFilesRequest, setIncomingFilesRequest] = useState<{ files: File[]; seq: number } | null>(null);
+  const [pendingShareFiles, setPendingShareFiles] = useState<SharedFileInfo[]>([]);
+  const [shareBusy, setShareBusy] = useState(false);
+  // threads, eventos, busca e enquetes
+  const [threadView, setThreadView] = useState<{
+    channelId: string;
+    parent: ChatMessage;
+    messages: ChatMessage[];
+    loading: boolean;
+  } | null>(null);
+  const threadViewRef = useRef(threadView);
+  threadViewRef.current = threadView;
+  const [serverEvents, setServerEvents] = useState<ServerEvent[]>([]);
+  const [showEvents, setShowEvents] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [pollComposerOpen, setPollComposerOpen] = useState(false);
+  const [jumpRequest, setJumpRequest] = useState<{ id: string; seq: number } | null>(null);
+  const desktopPrefs = useDesktopPrefs();
 
   // Local mute & block lists
   const [localMutedUserIds, setLocalMutedUserIds] = useState<Set<string>>(() => loadStringSet('pulsecord_local_mutes'));
@@ -462,6 +506,7 @@ export default function App() {
   const p2pCallSocketRef = useRef<Socket | null>(null);
   const isLanCallActiveRef = useRef(false);
   const rtcRef = useRef<WebRTCManager | null>(null);
+  const serverIceServersRef = useRef<RTCIceServer[]>([]);
   const gamepadBridgeRef = useRef<GamepadBridge | null>(null);
   const soundboardTimersRef = useRef<Map<string, number>>(new Map());
   const mutedAlertTimerRef = useRef<number | null>(null);
@@ -572,6 +617,31 @@ export default function App() {
     window.addEventListener('keydown', onSafeKey);
     return () => window.removeEventListener('keydown', onSafeKey);
   }, [showToast]);
+
+  // STUN/TURN do servidor conectado (credenciais do TURN expiram em 12 h: renova a cada 6 h)
+  useEffect(() => {
+    if (!token || !api) return;
+    let alive = true;
+    const load = () =>
+      api
+        .getIceServers()
+        .then((r) => {
+          if (!alive) return;
+          serverIceServersRef.current = r.iceServers || [];
+          rtcRef.current?.setServerIceServers(serverIceServersRef.current);
+        })
+        .catch(() => {
+          if (!alive) return;
+          serverIceServersRef.current = [];
+          rtcRef.current?.setServerIceServers([]);
+        });
+    load();
+    const id = window.setInterval(load, 6 * 3600 * 1000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [token, api]);
 
   // In-App Auto-Updater checks & progress subscription
   useEffect(() => {
@@ -699,6 +769,66 @@ export default function App() {
   // Subscribe to Electron embedded Host status, LAN discovery, LAN P2P DMs, ViGEm & Activity Detector
   const toggleMuteRef = useRef<() => void>(() => {});
   const toggleDeafenRef = useRef<() => void>(() => {});
+  const overlayToggleRef = useRef<() => void>(() => {});
+  const clipSaveRef = useRef<() => void>(() => {});
+  const isStageModRef = useRef(false);
+  const localMicStreamRef = useRef<MediaStream | null>(null);
+  const desktopNotifyRef = useRef<(msg: ChatMessage, kind: 'channel' | 'dm') => void>(() => {});
+
+  // Atalhos globais (funcionam com o PulseCord em segundo plano, inclusive dentro de jogos)
+  useEffect(() => {
+    if (!window.electronAPI?.setGlobalShortcuts) return;
+    window.electronAPI
+      .setGlobalShortcuts({ ...desktopPrefs.shortcuts })
+      .then((r) => {
+        if (r && !r.ok && r.failed?.length) console.warn('[PulseCord] Atalhos em uso por outro programa:', r.failed.join(', '));
+      })
+      .catch(() => {});
+  }, [desktopPrefs.shortcuts.mute, desktopPrefs.shortcuts.deafen, desktopPrefs.shortcuts.overlay]);
+
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const offShortcut = api.onGlobalShortcut?.((action) => {
+      if (action === 'mute') toggleMuteRef.current();
+      else if (action === 'deafen') toggleDeafenRef.current();
+      else if (action === 'overlay') overlayToggleRef.current();
+      else if (action === 'clip') clipSaveRef.current();
+    });
+    const offNotify = api.onNotificationClicked?.((route: NotificationRoute) => {
+      if (!route) return;
+      if (route.type === 'channel') {
+        setNavArea('server');
+        setActiveTextChannelId(route.id);
+      } else {
+        const uid = route.userId;
+        setNavArea('dms');
+        setActiveGroupId(null);
+        setActiveDmUserId(uid);
+        setUnreadDmByUser((prev) => {
+          if (!prev[uid]) return prev;
+          const copy = { ...prev };
+          delete copy[uid];
+          return copy;
+        });
+      }
+      setViewMode('chat');
+    });
+    const addShares = (list: SharedFileInfo[]) => {
+      if (!Array.isArray(list) || !list.length) return;
+      setPendingShareFiles((prev) => {
+        const seen = new Set(prev.map((f) => f.path));
+        return [...prev, ...list.filter((f) => !seen.has(f.path))];
+      });
+    };
+    api.takePendingShares?.().then(addShares).catch(() => {});
+    const offShare = api.onSharedFiles?.(addShares);
+    return () => {
+      offShortcut?.();
+      offNotify?.();
+      offShare?.();
+    };
+  }, []);
 
   useEffect(() => {
     const bridge = new GamepadBridge({
@@ -765,6 +895,7 @@ export default function App() {
       ) {
         setUnreadDmByUser((prev) => ({ ...prev, [fromPeerId]: (prev[fromPeerId] || 0) + 1 }));
         audioEngine.playUiTone('unmute');
+        desktopNotifyRef.current({ ...message, authorId: fromPeerId }, 'dm');
       }
     });
     const unsubLanPin = window.electronAPI.onLanDmPinned?.(({ pairKey, messageId, pinned, pinnedAt, pinnedBy }) => {
@@ -1282,6 +1413,7 @@ export default function App() {
       onPeersUpdated: (peers) => setRemotePeers(peers),
       onLocalStateUpdated: (st) => {
         setHasLocalMic(Boolean(st.micStream && st.micStream.getAudioTracks().length > 0));
+        localMicStreamRef.current = st.micStream;
         setLocalCamStream(st.camStream);
         setLocalScreenStream(st.screenStream);
         setLocalSpeaking(st.localSpeaking);
@@ -1328,6 +1460,7 @@ export default function App() {
     });
     rtc.setServerModeration(Boolean(user.serverMuted), Boolean(user.serverDeafened));
     rtcRef.current = rtc;
+    rtc.setServerIceServers(serverIceServersRef.current);
 
     return () => {
       revokeRemoteControlInternal(false);
@@ -1534,9 +1667,65 @@ export default function App() {
         const nextList = list.length >= MAX_CACHED_MESSAGES ? [...list.slice(-(MAX_CACHED_MESSAGES - 1)), msg] : [...list, msg];
         return { ...prev, [msg.channelId]: nextList };
       });
+      desktopNotifyRef.current(msg, 'channel');
+    });
+
+    socket.on('chat:message-updated', ({ channelId, message }: { channelId: string; message: ChatMessage }) => {
+      if (!channelId || !message?.id) return;
+      setMessagesByChannel((prev) => {
+        const list = prev[channelId];
+        if (!list || !list.some((m) => m.id === message.id)) return prev;
+        return { ...prev, [channelId]: list.map((m) => (m.id === message.id ? message : m)) };
+      });
+      setThreadView((tv) => (tv && tv.parent.id === message.id ? { ...tv, parent: message } : tv));
+    });
+    socket.on('chat:thread-message', ({ parentId, message }: { parentId: string; message: ChatMessage }) => {
+      setThreadView((tv) =>
+        tv && tv.parent.id === parentId && !tv.messages.some((m) => m.id === message.id)
+          ? { ...tv, messages: [...tv.messages, message] }
+          : tv
+      );
+    });
+    socket.on('chat:thread-message-updated', ({ parentId, message }: { parentId: string; message: ChatMessage }) => {
+      setThreadView((tv) =>
+        tv && tv.parent.id === parentId ? { ...tv, messages: tv.messages.map((m) => (m.id === message.id ? message : m)) } : tv
+      );
+    });
+    socket.on('chat:thread-message-deleted', ({ parentId, messageId }: { parentId: string; messageId: string }) => {
+      setThreadView((tv) => (tv && tv.parent.id === parentId ? { ...tv, messages: tv.messages.filter((m) => m.id !== messageId) } : tv));
+    });
+    socket.on(
+      'voice:recording-changed',
+      ({ socketId, displayName, recording }: { socketId: string; displayName: string; recording: 'record' | 'clips' | null }) => {
+        if (socketId === socket.id) return;
+        showToast(
+          recording === 'record'
+            ? `🔴 ${displayName} começou a gravar a chamada.`
+            : recording === 'clips'
+            ? `${displayName} está com os clipes ligados (pode salvar trechos da chamada).`
+            : `${displayName} parou de gravar.`,
+          'info'
+        );
+      }
+    );
+    socket.on('stage:role', ({ role, by }: { role: 'speaker' | 'audience'; by: string | null }) => {
+      audioEngine.playUiTone(role === 'speaker' ? 'join' : 'leave');
+      showToast(
+        role === 'speaker'
+          ? `${by ? `${by} chamou você` : 'Você subiu'} para falar no palco.`
+          : `${by ? `${by} mandou você` : 'Você foi'} para a plateia.`,
+        'info'
+      );
+    });
+    socket.on('stage:hand-raised', ({ socketId, displayName }: { socketId: string; displayName: string }) => {
+      if (socketId !== socket.id && isStageModRef.current) showToast(`✋ ${displayName} levantou a mão no palco.`, 'info');
+    });
+    socket.on('events:updated', (list: ServerEvent[]) => {
+      if (Array.isArray(list)) setServerEvents(list);
     });
 
     socket.on('chat:message-deleted', ({ channelId, messageId }: { channelId: string; messageId: string }) => {
+      setThreadView((tv) => (tv && tv.parent.id === messageId ? null : tv));
       setMessagesByChannel((prev) => ({
         ...prev,
         [channelId]: (prev[channelId] || []).filter((m) => m.id !== messageId),
@@ -1624,6 +1813,7 @@ export default function App() {
       ) {
         setUnreadDmByUser((prev) => ({ ...prev, [otherUserId]: (prev[otherUserId] || 0) + 1 }));
         audioEngine.playUiTone('unmute');
+        desktopNotifyRef.current(msg, 'dm');
       }
     });
 
@@ -2659,6 +2849,89 @@ export default function App() {
   toggleMuteRef.current = handleToggleMute;
   toggleDeafenRef.current = handleToggleDeafen;
 
+  // Notificação do Windows para mensagens que chegam com o PulseCord fora de foco
+  desktopNotifyRef.current = (msg, kind) => {
+    const me = userRef.current;
+    const prefs = getDesktopPrefs();
+    if (!me || msg.authorId === me.id || !prefs.notifications || !window.electronAPI?.showNotification) return;
+    if (document.hasFocus() || me.statusType === 'dnd') return;
+    if (blockedUserIds.has(msg.authorId)) return;
+    let title = msg.authorName || 'PulseCord';
+    let route: NotificationRoute = null;
+    if (kind === 'dm') {
+      route = { type: 'dm', userId: msg.authorId };
+    } else {
+      const ch = channels.find((c) => c.id === msg.channelId);
+      if (!ch) return;
+      const level = channelNotifyMap[msg.channelId] || serverNotifyLevel;
+      if (level === 'nothing') return;
+      if (level === 'mentions') {
+        const text = (msg.content || '').toLowerCase();
+        const mentioned =
+          text.includes('@everyone') ||
+          text.includes('@here') ||
+          text.includes('@' + (me.displayName || '').toLowerCase()) ||
+          text.includes('@' + (me.username || '').toLowerCase()) ||
+          (Boolean(msg.replyTo?.authorName) && msg.replyTo?.authorName === me.displayName);
+        if (!mentioned) return;
+      }
+      title = `${msg.authorName} (#${ch.name})`;
+      route = { type: 'channel', id: ch.id };
+    }
+    const body =
+      (msg.content || '').trim() ||
+      (msg.attachments?.length ? '📎 Enviou um anexo' : msg.gifUrl ? 'Enviou um GIF' : msg.transfer ? '📦 Enviou um arquivo' : 'Nova mensagem');
+    window.electronAPI
+      .showNotification({
+        title,
+        body: body.slice(0, 220),
+        iconDataUrl: msg.authorAvatar && msg.authorAvatar.startsWith('data:image/') ? msg.authorAvatar : undefined,
+        route,
+        // DMs já tocam o som do app
+        silent: kind === 'dm' || !prefs.notificationSound,
+      })
+      .catch(() => {});
+  };
+
+  const handlePickShareTarget = async (target: { type: 'channel'; id: string } | { type: 'dm'; userId: string }) => {
+    const api = window.electronAPI;
+    if (!api?.readSharedFile || !pendingShareFiles.length) return;
+    const LIMIT = 55 * 1024 * 1024;
+    const big = pendingShareFiles.filter((f) => f.size > LIMIT);
+    const ok = pendingShareFiles.filter((f) => f.size <= LIMIT).slice(0, 6);
+    if (!ok.length) {
+      showError('Arquivos acima de 55 MB: use a Transferência Pesada (botão + no chat).');
+      return;
+    }
+    setShareBusy(true);
+    try {
+      const files: File[] = [];
+      for (const f of ok) {
+        const bytes = await api.readSharedFile(f.path);
+        files.push(new File([bytes as BlobPart], f.name, { type: guessMimeFromName(f.name) }));
+      }
+      if (target.type === 'channel') {
+        setNavArea('server');
+        setActiveTextChannelId(target.id);
+      } else {
+        setNavArea('dms');
+        setActiveGroupId(null);
+        setActiveDmUserId(target.userId);
+      }
+      setViewMode('chat');
+      setIncomingFilesRequest({ files, seq: Date.now() });
+      const skippedCount = pendingShareFiles.length - ok.length;
+      setPendingShareFiles([]);
+      api.clearPendingShares?.().catch(() => {});
+      if (big.length) showToast(`${big.length} arquivo(s) acima de 55 MB ficaram de fora: use a Transferência Pesada.`, 'info');
+      else if (skippedCount > 0) showToast('Só 6 arquivos por mensagem: os demais ficaram de fora.', 'info');
+    } catch (err: unknown) {
+      showError((err as Error).message || 'Não foi possível ler os arquivos.');
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
   const handlePinMessage = useCallback(
     async (messageId: string, pinned: boolean) => {
       if (!user) return;
@@ -3386,6 +3659,334 @@ export default function App() {
     return set;
   }, [localSpeaking, selfSocketId, remotePeers]);
 
+  // Overlay da chamada sobre jogos (janela própria no Electron)
+  useEffect(() => {
+    window.electronAPI?.setOverlayConfig?.({
+      enabled: desktopPrefs.overlayEnabled,
+      corner: desktopPrefs.overlayCorner,
+      onlySpeaking: desktopPrefs.overlayOnlySpeaking,
+      onlyInGames: desktopPrefs.overlayOnlyInGames,
+    });
+  }, [desktopPrefs.overlayEnabled, desktopPrefs.overlayCorner, desktopPrefs.overlayOnlySpeaking, desktopPrefs.overlayOnlyInGames]);
+
+  useEffect(() => {
+    window.electronAPI?.setMediaActivity?.(desktopPrefs.mediaActivity).catch(() => {});
+  }, [desktopPrefs.mediaActivity]);
+
+  overlayToggleRef.current = () => {
+    if (!getDesktopPrefs().overlayEnabled) return;
+    window.electronAPI
+      ?.toggleOverlay?.()
+      .then((visible) => showToast(visible ? 'Overlay visível' : 'Overlay escondido', 'info'))
+      .catch(() => {});
+  };
+
+  const overlayParticipants = activeVoiceChannelId ? voiceRooms[activeVoiceChannelId] : undefined;
+  const overlaySentRef = useRef('');
+  useEffect(() => {
+    const send = window.electronAPI?.sendOverlayState;
+    if (!send) return;
+    if (!desktopPrefs.overlayEnabled || !activeVoiceChannelId) {
+      if (overlaySentRef.current !== '') {
+        overlaySentRef.current = '';
+        send(null);
+      }
+      return;
+    }
+    const state = {
+      channelName: activeVoiceLabel || 'Chamada',
+      participants: (overlayParticipants || []).map((p) => {
+        const self = p.socketId === selfSocketId;
+        return {
+          name: p.displayName,
+          avatarUrl: p.avatarUrl ? resolveMediaUrl(serverUrl, p.avatarUrl) : null,
+          avatarColor: p.avatarColor,
+          speaking: speakingSocketIds.has(p.socketId),
+          muted: self ? muted : Boolean(p.muted || p.serverMuted),
+          deafened: self ? deafened : Boolean(p.deafened || p.serverDeafened),
+        };
+      }),
+    };
+    const key = JSON.stringify(state);
+    if (key === overlaySentRef.current) return;
+    overlaySentRef.current = key;
+    send(state);
+  }, [
+    desktopPrefs.overlayEnabled,
+    activeVoiceChannelId,
+    activeVoiceLabel,
+    overlayParticipants,
+    speakingSocketIds,
+    selfSocketId,
+    muted,
+    deafened,
+    serverUrl,
+  ]);
+
+  // ---------- Reações, enquetes, threads, eventos e busca
+  const emitAck = useCallback(
+    (event: string, payload: object) =>
+      new Promise<void>((resolve, reject) => {
+        const sock = socketRef.current;
+        if (!sock?.connected) return reject(new Error('Sem conexão com o servidor.'));
+        sock.timeout(10000).emit(event, payload, (err: Error | null, res?: { error?: string }) => {
+          if (err) reject(new Error('O servidor não respondeu. Tente de novo.'));
+          else if (res?.error) reject(new Error(res.error));
+          else resolve();
+        });
+      }),
+    []
+  );
+  const handleReact = (channelId: string, messageId: string, emoji: string, threadParentId?: string) =>
+    emitAck('chat:react', { channelId, messageId, emoji, threadParentId }).catch((err: Error) => showError(err.message));
+  const handleVotePoll = (channelId: string, messageId: string, optionIds: string[]) =>
+    emitAck('chat:poll-vote', { channelId, messageId, optionIds }).catch((err: Error) => showError(err.message));
+  const handleClosePoll = (channelId: string, messageId: string) =>
+    emitAck('chat:poll-close', { channelId, messageId }).catch((err: Error) => showError(err.message));
+  const handleSubmitPoll = (channelId: string, draft: PollDraft) =>
+    emitAck('chat:send', { channelId, content: '', attachments: [], poll: draft })
+      .then(() => setPollComposerOpen(false))
+      .catch((err: Error) => showError(err.message));
+  const handleOpenThread = (channelId: string, msg: ChatMessage) => {
+    if (!api) return;
+    const hasReplies = Boolean(msg.thread?.count);
+    setThreadView({ channelId, parent: msg, messages: [], loading: hasReplies });
+    if (!hasReplies) return;
+    api
+      .getThread(channelId, msg.id)
+      .then((r) =>
+        setThreadView((tv) => (tv && tv.parent.id === msg.id ? { ...tv, parent: r.parent, messages: r.messages, loading: false } : tv))
+      )
+      .catch((err: Error) => {
+        showError(err.message || 'Não foi possível abrir a thread.');
+        setThreadView((tv) => (tv && tv.parent.id === msg.id ? { ...tv, loading: false } : tv));
+      });
+  };
+  const handleSendThread = (text: string) => {
+    const tv = threadViewRef.current;
+    if (!tv) return Promise.resolve();
+    return emitAck('chat:send', { channelId: tv.channelId, content: text, attachments: [], threadParentId: tv.parent.id }).catch(
+      (err: Error) => {
+        showError(err.message);
+        throw err;
+      }
+    );
+  };
+  const messagesByChannelRef = useRef(messagesByChannel);
+  messagesByChannelRef.current = messagesByChannel;
+  const handleSearchJump = (msg: ChatMessage) => {
+    setShowSearch(false);
+    setNavArea('server');
+    setActiveTextChannelId(msg.channelId);
+    setViewMode('chat');
+    setJumpRequest({ id: msg.id, seq: Date.now() });
+    window.setTimeout(() => {
+      const list = messagesByChannelRef.current[msg.channelId] || [];
+      if (!list.some((m) => m.id === msg.id)) showToast('Essa mensagem é antiga demais para aparecer na conversa carregada.', 'info');
+    }, 2500);
+  };
+
+  // ---------- Gravação da chamada, clipes e palco
+  const callRecordingRef = useRef<CallRecording | null>(null);
+  const clipBufferRef = useRef<ClipBuffer | null>(null);
+  const [recordingSince, setRecordingSince] = useState<number | null>(null);
+  const [clipsActive, setClipsActive] = useState(false);
+  const recSourcesRef = useRef<() => RecSource[]>(() => []);
+  recSourcesRef.current = () => {
+    const list: RecSource[] = [{ key: 'self', stream: localMicStreamRef.current }];
+    for (const p of Object.values(remotePeers)) {
+      list.push({ key: `${p.socketId}:mic`, stream: p.micStream });
+      if (p.screenAudioStream) list.push({ key: `${p.socketId}:screen`, stream: p.screenAudioStream });
+    }
+    return list;
+  };
+  const localScreenVideo = localScreenStream?.getVideoTracks()[0] || null;
+  const localScreenVideoRef = useRef(localScreenVideo);
+  localScreenVideoRef.current = localScreenVideo;
+  const recMode: 'record' | 'clips' | null = recordingSince ? 'record' : clipsActive ? 'clips' : null;
+
+  useEffect(() => {
+    callRecordingRef.current?.updateSources(recSourcesRef.current());
+    clipBufferRef.current?.updateSources(recSourcesRef.current(), localScreenVideo);
+  }, [remotePeers, hasLocalMic, localScreenVideo]);
+
+  useEffect(() => {
+    const want = desktopPrefs.clipsEnabled && Boolean(activeVoiceChannelId) && typeof MediaRecorder !== 'undefined';
+    if (want && !clipBufferRef.current) {
+      try {
+        clipBufferRef.current = new ClipBuffer(recSourcesRef.current(), localScreenVideoRef.current);
+        setClipsActive(true);
+      } catch (err) {
+        console.warn('[PulseCord] Clipes indisponíveis:', err);
+      }
+    } else if (!want && clipBufferRef.current) {
+      clipBufferRef.current.stop();
+      clipBufferRef.current = null;
+      setClipsActive(false);
+    }
+  }, [desktopPrefs.clipsEnabled, activeVoiceChannelId]);
+
+  useEffect(
+    () => () => {
+      clipBufferRef.current?.stop();
+      clipBufferRef.current = null;
+      callRecordingRef.current?.stop().catch(() => {});
+      callRecordingRef.current = null;
+    },
+    []
+  );
+
+  // avisa o servidor (todos na chamada veem REC / CLIPES); repete depois de reconectar
+  useEffect(() => {
+    if (!activeVoiceChannelId) return;
+    (p2pCallSocketRef.current || socketRef.current)?.emit('voice:media-state', { recording: recMode });
+  }, [recMode, activeVoiceChannelId, selfSocketId]);
+
+  const handleToggleRecording = async () => {
+    const current = callRecordingRef.current;
+    if (current) {
+      callRecordingRef.current = null;
+      setRecordingSince(null);
+      try {
+        const file = await current.stop();
+        showToast(file ? `Gravação salva em ${file}` : 'Gravação baixada.', 'info');
+        if (file) window.electronAPI?.revealMediaFile?.(file).catch(() => {});
+      } catch {
+        showError('Não foi possível salvar a gravação.');
+      }
+      return;
+    }
+    if (!activeVoiceChannelId || typeof MediaRecorder === 'undefined') return;
+    if (!window.confirm('Gravar a chamada? Todos na chamada vão ver o aviso "REC" ao lado do seu nome enquanto a gravação estiver ligada.')) return;
+    try {
+      callRecordingRef.current = new CallRecording(recSourcesRef.current(), localScreenVideoRef.current);
+      setRecordingSince(Date.now());
+      showToast(localScreenVideoRef.current ? 'Gravando a chamada e a sua transmissão.' : 'Gravando o áudio da chamada.', 'info');
+    } catch {
+      showError('Este computador não conseguiu iniciar a gravação.');
+    }
+  };
+  const stopRecordingRef = useRef(handleToggleRecording);
+  stopRecordingRef.current = handleToggleRecording;
+  useEffect(() => {
+    if (!activeVoiceChannelId && callRecordingRef.current) stopRecordingRef.current();
+  }, [activeVoiceChannelId]);
+
+  clipSaveRef.current = async () => {
+    const buf = clipBufferRef.current;
+    if (!buf) {
+      showToast(
+        getDesktopPrefs().clipsEnabled ? 'Os clipes funcionam durante uma chamada.' : 'Ligue os clipes em Configurações → Windows.',
+        'info'
+      );
+      return;
+    }
+    try {
+      const r = await buf.save();
+      if (!r.seconds) return;
+      audioEngine.playUiTone('unmute');
+      showToast(r.path ? `Clipe de ${r.seconds} s salvo em Vídeos\\PulseCord\\Clipes.` : `Clipe de ${r.seconds} s baixado.`, 'info');
+    } catch {
+      showError('Não foi possível salvar o clipe.');
+    }
+  };
+
+  const myVoiceParticipant = activeVoiceChannelId
+    ? (voiceRooms[activeVoiceChannelId] || []).find((p) => p.socketId === selfSocketId)
+    : undefined;
+  const channelForcesMute = Boolean(myVoiceParticipant && (myVoiceParticipant.stageRole === 'audience' || myVoiceParticipant.noSpeak));
+  useEffect(() => {
+    rtcRef.current?.setChannelMuted(channelForcesMute);
+  }, [channelForcesMute]);
+  const isStageMod = Boolean(
+    activeVoicePermissions.administrator ||
+      activeVoicePermissions.muteMembers ||
+      activeVoicePermissions.moveMembers ||
+      activeVoicePermissions.manageChannels ||
+      user?.role === 'host'
+  );
+  isStageModRef.current = isStageMod;
+
+  // fecha a thread ao trocar de canal
+  useEffect(() => {
+    setThreadView((tv) => (tv && tv.channelId !== activeTextChannel?.id ? null : tv));
+  }, [activeTextChannel?.id]);
+
+  // eventos do servidor
+  useEffect(() => {
+    if (!api) {
+      setServerEvents([]);
+      return;
+    }
+    api
+      .getEvents()
+      .then((r) => setServerEvents(r.events || []))
+      .catch(() => {});
+  }, [api]);
+  const upcomingEventsCount = useMemo(
+    () => serverEvents.filter((e) => (e.endsAt || e.startsAt + 3 * 3600 * 1000) > Date.now()).length,
+    [serverEvents]
+  );
+
+  // lembretes: 10 min antes e na hora, para quem marcou "Vou" ou "Talvez"
+  useEffect(() => {
+    const myId = user?.id;
+    if (!serverEvents.length || !myId) return;
+    const check = () => {
+      const now = Date.now();
+      let reminded: Record<string, number> = {};
+      try {
+        reminded = JSON.parse(localStorage.getItem('pc.eventReminders') || '{}') || {};
+      } catch {}
+      let changed = false;
+      for (const ev of serverEvents) {
+        const st = ev.rsvps?.[myId];
+        if (st !== 'going' && st !== 'maybe') continue;
+        const stages: Array<['soon' | 'start', boolean]> = [
+          ['soon', now >= ev.startsAt - 10 * 60000 && now < ev.startsAt],
+          ['start', now >= ev.startsAt && now < ev.startsAt + 15 * 60000],
+        ];
+        for (const [stage, due] of stages) {
+          const key = `${ev.id}:${stage}`;
+          if (!due || reminded[key]) continue;
+          reminded[key] = now;
+          changed = true;
+          const text =
+            stage === 'soon'
+              ? `"${ev.title}" começa em ${Math.max(1, Math.round((ev.startsAt - now) / 60000))} min`
+              : `"${ev.title}" está começando agora`;
+          showToast(`📅 ${text}`, 'info');
+          audioEngine.playUiTone('join');
+          if (getDesktopPrefs().notifications && !document.hasFocus()) {
+            window.electronAPI?.showNotification?.({ title: 'Evento do servidor', body: text, route: null }).catch(() => {});
+          }
+        }
+      }
+      if (changed) {
+        for (const k of Object.keys(reminded)) if (now - reminded[k] > 3 * 24 * 3600 * 1000) delete reminded[k];
+        try {
+          localStorage.setItem('pc.eventReminders', JSON.stringify(reminded));
+        } catch {}
+      }
+    };
+    check();
+    const t = window.setInterval(check, 30000);
+    return () => window.clearInterval(t);
+  }, [serverEvents, user?.id, showToast]);
+
+  // Ctrl+F abre a busca no servidor
+  useEffect(() => {
+    if (!api) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && navAreaRef.current === 'server') {
+        e.preventDefault();
+        setShowSearch(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [api]);
+
   const activeTypingUsers = useMemo(() => {
     if (navArea !== 'server' || !activeTextChannel) return [];
     return Object.entries(typingByChannel[activeTextChannel.id] || {})
@@ -3944,6 +4545,43 @@ export default function App() {
           {/* Main Area: Voice Stage OR Private Group/DM Chat OR Server Text Channel + Member List */}
           {viewMode === 'voice' && activeVoiceChannelId ? (
             <VoiceStage
+              topBanner={
+                activeVoiceChannel?.isStage ? (
+                  <StageBar
+                    participants={voiceRooms[activeVoiceChannelId] || []}
+                    selfSocketId={selfSocketId}
+                    isModerator={isStageMod}
+                    onRaiseHand={(raised) => emitAck('stage:raise-hand', { raised }).catch((err: Error) => showError(err.message))}
+                    onSetSpeaker={(sid, speaker) =>
+                      emitAck('stage:set-speaker', { socketId: sid, speaker }).catch((err: Error) => showError(err.message))
+                    }
+                  />
+                ) : undefined
+              }
+              extraControls={
+                <>
+                  <button
+                    type="button"
+                    onClick={handleToggleRecording}
+                    className={`w-11 h-11 rounded-full flex items-center justify-center transition cursor-pointer ${
+                      recordingSince ? 'bg-[#f23f42] text-white animate-pulse' : 'bg-[#313338] hover:bg-[#404249] text-white'
+                    }`}
+                    title={recordingSince ? 'Parar e salvar a gravação' : 'Gravar a chamada'}
+                  >
+                    <CircleDot className="w-5 h-5" />
+                  </button>
+                  {clipsActive && (
+                    <button
+                      type="button"
+                      onClick={() => clipSaveRef.current()}
+                      className="w-11 h-11 rounded-full flex items-center justify-center transition cursor-pointer bg-[#313338] hover:bg-[#404249] text-white"
+                      title={`Salvar clipe (${prettyAccelerator(desktopPrefs.shortcuts.clip) || 'sem atalho'})`}
+                    >
+                      <Scissors className="w-5 h-5" />
+                    </button>
+                  )}
+                </>
+              }
               api={api}
               socket={p2pCallSocketRef.current || socketRef.current}
               channelId={activeVoiceChannelId}
@@ -4180,6 +4818,8 @@ export default function App() {
                 savedGifs={savedGifs}
                 blockedUserIds={blockedUserIds}
                 mentionRequest={mentionRequest}
+                incomingFilesRequest={incomingFilesRequest}
+                onIncomingFilesConsumed={() => setIncomingFilesRequest(null)}
                 activeVoiceLabel={activeVoiceChannelId ? activeVoiceLabel : null}
                 showMembers={false}
                 onToggleMembers={() => {}}
@@ -4224,6 +4864,8 @@ export default function App() {
                 savedGifs={savedGifs}
                 blockedUserIds={blockedUserIds}
                 mentionRequest={mentionRequest}
+                incomingFilesRequest={incomingFilesRequest}
+                onIncomingFilesConsumed={() => setIncomingFilesRequest(null)}
                 activeVoiceLabel={activeVoiceChannelId ? activeVoiceLabel : null}
                 showMembers={false}
                 onToggleMembers={() => {}}
@@ -4280,6 +4922,8 @@ export default function App() {
                 savedGifs={savedGifs}
                 blockedUserIds={blockedUserIds}
                 mentionRequest={mentionRequest}
+                incomingFilesRequest={incomingFilesRequest}
+                onIncomingFilesConsumed={() => setIncomingFilesRequest(null)}
                 activeVoiceLabel={activeVoiceChannelId ? activeVoiceLabel : null}
                 showMembers={showMembers}
                 onToggleMembers={() => setShowMembers((v) => !v)}
@@ -4299,20 +4943,49 @@ export default function App() {
                 onUserContextMenu={handleOpenUserContextMenu}
                 onSendMessage={handleSendMessage}
                 onDeleteMessage={(msgId) => api?.deleteMessage(activeTextChannel.id, msgId).catch(() => {})}
+                onReact={(mid, e) => handleReact(activeTextChannel.id, mid, e)}
+                onVotePoll={(mid, ids) => handleVotePoll(activeTextChannel.id, mid, ids)}
+                onClosePoll={(mid) => handleClosePoll(activeTextChannel.id, mid)}
+                onOpenThread={(m) => handleOpenThread(activeTextChannel.id, m)}
+                onCreatePoll={() => setPollComposerOpen(true)}
+                onOpenSearch={api ? () => setShowSearch(true) : undefined}
+                onOpenEvents={api ? () => setShowEvents(true) : undefined}
+                upcomingEventsCount={upcomingEventsCount}
+                jumpRequest={jumpRequest}
                 onTyping={(isTyping) =>
                   socketRef.current?.emit('chat:typing', { channelId: activeTextChannel.id, isTyping })
                 }
               />
-              {showMembers && (
-                <MemberList
+              {threadView && threadView.channelId === activeTextChannel.id ? (
+                <ThreadPanel
+                  channelName={activeTextChannel.name}
+                  parent={threadView.parent}
+                  messages={threadView.messages}
+                  loading={threadView.loading}
+                  selfId={user.id}
                   members={members}
-                  roles={roles}
-                  voiceRooms={voiceRooms}
-                  soundboardActiveUserIds={soundboardActiveUserIds}
                   serverUrl={serverUrl}
-                  onMemberClick={handleOpenUserProfilePopout}
-                  onMemberContextMenu={handleOpenUserContextMenu}
+                  canSend={activeTextPermissions.sendMessages !== false}
+                  canManage={Boolean(activeTextPermissions.manageMessages) || user.role === 'host'}
+                  onSend={handleSendThread}
+                  onReact={(mid, e, inThread) => handleReact(threadView.channelId, mid, e, inThread ? threadView.parent.id : undefined)}
+                  onDelete={(mid) =>
+                    api?.deleteThreadMessage(threadView.channelId, threadView.parent.id, mid).catch((err: Error) => showError(err.message))
+                  }
+                  onClose={() => setThreadView(null)}
                 />
+              ) : (
+                showMembers && (
+                  <MemberList
+                    members={members}
+                    roles={roles}
+                    voiceRooms={voiceRooms}
+                    soundboardActiveUserIds={soundboardActiveUserIds}
+                    serverUrl={serverUrl}
+                    onMemberClick={handleOpenUserProfilePopout}
+                    onMemberContextMenu={handleOpenUserContextMenu}
+                  />
+                )
               )}
             </>
           ) : (
@@ -4571,6 +5244,70 @@ export default function App() {
             onClose={() => setShow3DViewer(false)}
           />
         </LazyBoundary>
+      )}
+
+      {pendingShareFiles.length > 0 && (
+        <ShareTargetModal
+          files={pendingShareFiles}
+          channels={channels}
+          members={members}
+          selfId={user.id}
+          busy={shareBusy}
+          onPick={handlePickShareTarget}
+          onClose={() => {
+            setPendingShareFiles([]);
+            window.electronAPI?.clearPendingShares?.().catch(() => {});
+          }}
+        />
+      )}
+
+      {showSearch && api && (
+        <SearchModal
+          api={api}
+          channels={channels}
+          currentChannel={navArea === 'server' ? activeTextChannel : null}
+          onJump={handleSearchJump}
+          onClose={() => setShowSearch(false)}
+        />
+      )}
+
+      {showEvents && api && (
+        <EventsModal
+          events={serverEvents}
+          channels={channels}
+          members={members}
+          selfId={user.id}
+          canManageAll={Boolean(serverPermissions.manageChannels || serverPermissions.administrator || user.role === 'host')}
+          onCreate={async (p) => {
+            const r = await api.createEvent(p);
+            setServerEvents((prev) => (prev.some((e) => e.id === r.event.id) ? prev : [...prev, r.event].sort((a, b) => a.startsAt - b.startsAt)));
+          }}
+          onRsvp={(id, status: RsvpStatus | null) =>
+            api
+              .rsvpEvent(id, status)
+              .then((r) => setServerEvents((prev) => prev.map((e) => (e.id === r.event.id ? r.event : e))))
+              .catch((err: Error) => showError(err.message))
+          }
+          onDelete={(id) =>
+            api
+              .deleteEvent(id)
+              .then(() => setServerEvents((prev) => prev.filter((e) => e.id !== id)))
+              .catch((err: Error) => showError(err.message))
+          }
+          onJoinVoice={(cid) => {
+            setShowEvents(false);
+            handleJoinOrFocusVoiceChannel(cid);
+          }}
+          onClose={() => setShowEvents(false)}
+        />
+      )}
+
+      {pollComposerOpen && activeTextChannel && (
+        <PollComposerModal
+          channelName={activeTextChannel.name}
+          onSubmit={(d) => handleSubmitPoll(activeTextChannel.id, d)}
+          onClose={() => setPollComposerOpen(false)}
+        />
       )}
 
       {createChannelMeta && api && (

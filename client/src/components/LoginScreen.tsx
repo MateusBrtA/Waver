@@ -95,6 +95,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [clientServerPassword, setClientServerPassword] = useState('');
   const [showClientPass, setShowClientPass] = useState(false);
   const [passwordRequired, setPasswordRequired] = useState(false);
+  const [showOwnerCode, setShowOwnerCode] = useState(false);
+  const [ownerCode, setOwnerCode] = useState('');
 
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<{
@@ -228,7 +230,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     const trimmedNick = nick.trim();
 
     if (!trimmedIp) {
-      setError('Cole o IPv4 do Host ou clique em um servidor encontrado na rede.');
+      setError('Cole o endereço do Host (IPv4, IPv6 ou domínio) ou clique em um servidor encontrado na rede.');
       return;
     }
     if (trimmedNick.length < 2) {
@@ -244,6 +246,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         username: trimmedNick,
         displayName: trimmedNick,
         invitePassword: clientServerPassword.trim() || undefined,
+        ownerCode: ownerCode.trim() || undefined,
       });
 
       localStorage.setItem('pulsecord_last_nick', trimmedNick);
@@ -464,13 +467,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
               <div className="space-y-1.5">
                 <label className="block text-xs font-bold uppercase tracking-wider text-[#b5bac1]">
-                  IPv4 do Servidor <span className="text-[#f23f42]">*</span>
+                  Endereço do Servidor <span className="text-[#f23f42]">*</span>
                 </label>
                 <input
                   type="text"
                   value={clientIpv4}
                   onChange={(e) => setClientIpv4(e.target.value)}
-                  placeholder="Ex: 26.15.40.12 ou 192.168.1.10"
+                  placeholder="Ex: 192.168.1.10, [2804:14c::1]:3000 ou meuservidor.com"
                   autoFocus={!clientIpv4}
                   required
                   className="w-full bg-[#1e1f22] border border-[#3f4147] focus:border-[#5865f2] rounded-lg px-4 py-3 text-base font-mono text-white placeholder-[#6d6f78] outline-none transition"
@@ -489,7 +492,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                   ) : probeResult && !probeResult.ok ? (
                     <span className="text-[11px] text-[#f0b232]">{probeResult.error}</span>
                   ) : (
-                    <span className="text-[11px] text-[#949ba4]">Aceita IPv4 direto ou link trycloudflare.com.</span>
+                    <span className="text-[11px] text-[#949ba4]">Aceita IPv4, IPv6, domínio ou link trycloudflare.com.</span>
                   )}
                 </div>
               </div>
@@ -536,6 +539,28 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                     </button>
                   </div>
                 </div>
+              )}
+
+              {showOwnerCode ? (
+                <div className="space-y-1.5 animate-fade-up">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-[#b5bac1]">Código do dono</label>
+                  <input
+                    type="password"
+                    value={ownerCode}
+                    onChange={(e) => setOwnerCode(e.target.value)}
+                    placeholder="Aparece no terminal do servidor (owner-code.txt)"
+                    className="w-full bg-[#1e1f22] border border-[#3f4147] focus:border-[#5865f2] rounded-lg px-4 py-3 text-sm text-white outline-none transition"
+                  />
+                  <p className="text-[11px] text-[#949ba4]">Com ele você entra como Host de um servidor dedicado (Debian/Windows).</p>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowOwnerCode(true)}
+                  className="text-[12px] text-[#00a8fc] hover:underline cursor-pointer"
+                >
+                  Sou o dono deste servidor
+                </button>
               )}
 
               {error && (

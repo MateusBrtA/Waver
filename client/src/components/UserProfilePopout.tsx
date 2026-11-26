@@ -11,6 +11,7 @@ import { Role, User } from '../types';
 import { Avatar, NAME_STYLES } from './Avatar';
 import { ConnectionIcon, getConnectionInfo } from './ConnectionBadge';
 import { ProfileEffectLayer } from './ProfileEffect';
+import { formatActivityElapsed } from '../lib/activity';
 
 interface UserProfilePopoutProps {
   user: User;
@@ -196,6 +197,15 @@ export const UserProfilePopout: React.FC<UserProfilePopoutProps> = ({
                 {user.currentActivity.category === 'music' ? 'Ouvindo agora' : 'Jogando agora'}
               </div>
               <div className="text-xs font-bold text-white truncate">{user.currentActivity.name}</div>
+              {user.currentActivity.details && (
+                <div className="text-[11px] text-[#dbdee1] truncate">
+                  {user.currentActivity.details}
+                  {user.currentActivity.state ? ` — ${user.currentActivity.state}` : ''}
+                </div>
+              )}
+              {user.currentActivity.startedAt && (
+                <div className="text-[10px] text-[#949ba4]">{formatActivityElapsed(user.currentActivity.startedAt)}</div>
+              )}
             </div>
           </div>
         ) : recentGames.length > 0 ? (
