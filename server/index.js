@@ -125,7 +125,8 @@ export function createPulseCordServer(options = {}) {
   const HOST = options.host || process.env.PULSECORD_HOST || process.env.HOST || '::';
   const HEADLESS = Boolean(options.headless);
   const dataDir = options.dataDir || process.env.PULSECORD_DATA_DIR;
-  const clientDist = options.clientDistDir || path.join(__dirname, '..', 'client', 'dist');
+  // let: a atualização automática do servidor dedicado pode trocar a interface servida sem reiniciar
+  let clientDist = options.clientDistDir || path.join(__dirname, '..', 'client', 'dist');
   const downloadsDir = options.downloadsDir || path.join(__dirname, '..', 'dist-app');
 
   loadDb(dataDir);
@@ -148,7 +149,7 @@ export function createPulseCordServer(options = {}) {
     if (pkg?.version) appVersion = pkg.version;
   } catch {}
 
-  const updateHelper = createUpdateHelper({
+  let updateHelper = createUpdateHelper({
     appVersion,
     clientDistDir: clientDist,
     downloadsDir,
@@ -1027,6 +1028,7 @@ function sanitizeActivity(a) {
       addresses: getNetworkAddresses(activePort),
       hasDownloadableExe: Boolean(findDownloadableExe('setup') || findDownloadableExe('portable')),
       sfu: sfu.publicInfo(),
+      ...(updateStatusProvider ? { autoUpdate: updateStatusProvider() } : {}),
     });
   });
 
@@ -4921,16 +4923,16 @@ function sanitizeActivity(a) {
     });
   });
 
+  const clientStaticOptions = {
+    // arquivos com hash no nome nunca mudam: o navegador não precisa pedir de novo
+    setHeaders: (res, filePath) => {
+      if (/[\\/]assets[\\/]/.test(filePath)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      else res.setHeader('Cache-Control', 'no-cache');
+    },
+  };
+  let serveClient = express.static(clientDist, clientStaticOptions);
   if (clientDist && fs.existsSync(clientDist)) {
-    app.use(
-      express.static(clientDist, {
-        // arquivos com hash no nome nunca mudam: o navegador não precisa pedir de novo
-        setHeaders: (res, filePath) => {
-          if (/[\\/]assets[\\/]/.test(filePath)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-          else res.setHeader('Cache-Control', 'no-cache');
-        },
-      })
-    );
+    app.use((req, res, next) => serveClient(req, res, next));
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path.startsWith('/socket.io')) {
         return next();
@@ -5023,8 +5025,27 @@ function sanitizeActivity(a) {
       sfu.close().catch(() => {});
       io.close(() => {
         server.close(() => resolve());
+        // conexões HTTP paradas (keep-alive) não seguram o desligamento
+        server.closeAllConnections?.();
       });
     });
+  }
+
+  // ---- usados pela atualização automática do servidor dedicado (selfUpdate.js) ----
+  let updateStatusProvider = null;
+  /** troca a interface servida (versão nova que só mudou client/dist) sem reiniciar */
+  function swapClientDist(dir, version) {
+    if (!fs.existsSync(path.join(dir, 'index.html'))) throw new Error('interface nova sem index.html');
+    clientDist = dir;
+    serveClient = express.static(dir, clientStaticOptions);
+    if (version) appVersion = String(version);
+    updateHelper = createUpdateHelper({ appVersion, clientDistDir: clientDist, downloadsDir, updatesDir: UPDATES_DIR });
+  }
+  /** quantas pessoas estão em chamada agora (canais de voz, chamadas de DM e de grupo) */
+  function getVoicePeopleCount() {
+    let n = 0;
+    for (const room of voiceRooms.values()) n += room.size;
+    return n;
   }
 
   return {
@@ -5040,6 +5061,11 @@ function sanitizeActivity(a) {
     getOwnerCode: () => OWNER_CODE,
     getDataDir: () => DATA_DIR,
     sfu,
+    swapClientDist,
+    getVoicePeopleCount,
+    setUpdateStatusProvider: (fn) => {
+      updateStatusProvider = typeof fn === 'function' ? fn : null;
+    },
   };
 }
 
@@ -5061,6 +5087,8 @@ if (isDirectRun) {
     dataDir: arg('data'),
     headless: true,
     enableDiscovery: process.env.PULSECORD_LAN_DISCOVERY === '1' || argv.includes('--lan-discovery'),
+    // pelo supervisor (launch.js) o código pode estar numa versão baixada; o .exe dos amigos fica na instalação
+    downloadsDir: process.env.PULSECORD_DOWNLOADS_DIR || undefined,
   });
   instance
     .start()
@@ -5078,6 +5106,20 @@ if (isDirectRun) {
       console.log('  (no app: "Sou o dono deste servidor" na tela de entrar;');
       console.log('   ele também fica salvo em owner-code.txt na pasta de dados)');
       console.log('=======================================================\n');
+      // supervisor (launch.js): avisa que subiu e liga a atualização automática pelo GitHub
+      if (typeof process.send === 'function') {
+        process.send({ type: 'ready' });
+        import('./selfUpdate.js')
+          .then(({ startSelfUpdate }) => {
+            let version = '0.0.0';
+            try {
+              version = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version || version;
+            } catch {}
+            const updater = startSelfUpdate({ instance, appVersion: version });
+            instance.setUpdateStatusProvider(updater.getStatus);
+          })
+          .catch((err) => console.error('[auto-update] não iniciou:', err?.message || err));
+      }
     })
     .catch((err) => {
       console.error('Erro ao iniciar servidor Waver:', err);
@@ -5098,6 +5140,8 @@ if (isDirectRun) {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  // o supervisor (launch.js) foi encerrado (no Windows, "finalizar tarefa" não avisa o processo filho): desliga junto
+  if (typeof process.send === 'function') process.on('disconnect', shutdown);
   // um erro inesperado não deve derrubar o servidor 24 h: registra e segue (o systemd reinicia se cair)
   process.on('unhandledRejection', (err) => console.error('[Waver] Promessa rejeitada sem tratamento:', err));
 }

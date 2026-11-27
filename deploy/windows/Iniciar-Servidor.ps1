@@ -83,7 +83,8 @@ if ($AbrirFirewall) {
 
 $nodeArgs = @()
 if (Test-Path $EnvFile) { $nodeArgs += "--env-file=$EnvFile" }
-$nodeArgs += @((Join-Path $Servidor 'index.js'), '--port', "$Porta", '--data', $Dados)
+# launch.js escolhe a versão (a instalada ou uma baixada pela atualização automática) e reinicia ao atualizar
+$nodeArgs += @((Join-Path $Servidor 'launch.js'), '--port', "$Porta", '--data', $Dados)
 
 if ($IniciarComWindows) {
   if (-not (Test-Admin)) { throw 'Rode como administrador para registrar o início automático.' }

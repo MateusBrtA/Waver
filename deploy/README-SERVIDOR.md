@@ -86,9 +86,35 @@ curl -6 http://[::1]:3000/api/health
 ```
 
 ### Atualizar
-Gere um pacote novo, extraia no servidor e rode o mesmo `install.sh` de novo.
+A partir do pacote 4.5.2 o servidor **se atualiza sozinho** pelo GitHub.
+Quem instalou um pacote mais velho precisa instalar o 4.5.2 (ou mais novo) à mão uma vez, como explicado abaixo.
+
+**Automático**
+- A cada 6 horas, o servidor olha a última versão publicada no GitHub.
+- Ele baixa só os arquivos que mudaram (costuma ser algumas centenas de KB) e confere a **assinatura oficial**. A chave usada é a da pasta instalada, nunca uma que veio no download. Atualização sem assinatura válida, alterada ou de versão mais velha é recusada.
+- A versão nova é montada em `/var/lib/pulsecord/server-live/<versão>`. A pasta `/opt/pulsecord` continua só leitura para o serviço.
+- **Se só a interface mudou**, troca na hora, sem reiniciar. Ninguém percebe.
+- **Se o servidor mudou**, ele precisa reiniciar, e o reinício derrubaria as chamadas. Por isso espera **não ter ninguém em chamada** (canais de voz, chamadas privadas e de grupo) e reinicia em uns 2 segundos. Quem está no chat vê "reconectando" por um instante.
+- Se em 24 horas as chamadas nunca ficarem vazias, ele reinicia entre 4h e 6h da manhã, no horário do servidor.
+- **Se a versão nova cair ao iniciar** (antes de ficar 60 segundos de pé), o servidor volta sozinho para a anterior e não tenta mais aquela versão.
+- Ficam guardadas só a versão em uso e a anterior. As outras são apagadas.
+- Se as dependências do servidor mudarem, ele usa as bibliotecas que vêm na atualização. Se a versão do SFU (mediasoup) mudar, as chamadas ficam em malha até você instalar o pacote novo à mão.
+- **Precisa de saída para a internet em IPv4**, porque o GitHub não tem IPv6. Num servidor só com IPv6, a checagem falha, o servidor segue na versão atual e você atualiza à mão.
+
+Para acompanhar:
+```
+journalctl -u pulsecord | grep auto-update               # o que ele encontrou, baixou e aplicou
+curl -s http://[::1]:3000/api/health                     # campo "autoUpdate": estado e versão esperando
+```
+No `/etc/pulsecord/pulsecord.env`:
+- `PULSECORD_AUTO_UPDATE=0` desliga a atualização automática.
+- `PULSECORD_AUTO_UPDATE_HOURS` muda o intervalo (padrão 6).
+- `PULSECORD_AUTO_UPDATE_MAX_WAIT_H` muda o limite de espera (padrão 24; 0 = só reinicia com as chamadas vazias).
+
+**À mão**
+Extraia o pacote novo no servidor e rode o mesmo `install.sh` de novo.
 Os dados e a configuração são mantidos.
-Se o pacote trouxer o `Waver-Portable.exe` novo, os amigos recebem a atualização do app pelo próprio Waver.
+Um pacote instalado à mão sempre ganha das versões baixadas, se for igual ou mais novo.
 
 ### Backup
 Pare o serviço, copie `/var/lib/pulsecord` e `/etc/pulsecord` e inicie de novo:
@@ -147,6 +173,8 @@ deploy\windows\Iniciar-Servidor.ps1 -RemoverInicio        # desfaz o início aut
 - **Configuração:** copie `deploy\debian\pulsecord.env.example` para `deploy\windows\pulsecord.env` e ajuste. As opções são as mesmas do Debian.
 - **SFU:** funciona no Windows também (o mediasoup tem binário pronto). Ligue `PULSECORD_SFU=auto` no `pulsecord.env` e rode `-AbrirFirewall` de novo: ele libera a faixa do SFU.
 - **Dados:** ficam na pasta `data` do pacote. O código do dono fica em `data\owner-code.txt`.
+- **Atualização automática:** igual à do Debian. As versões baixadas ficam em `data\server-live`.
+  Quem já usava `-IniciarComWindows` com um pacote antigo deve rodar `-IniciarComWindows` de novo depois de instalar o pacote novo: a tarefa passa a iniciar pelo supervisor (`server\launch.js`).
 
 ## Configuração (`/etc/pulsecord/pulsecord.env`)
 | Variável | Para quê |
@@ -165,6 +193,9 @@ deploy\windows\Iniciar-Servidor.ps1 -RemoverInicio        # desfaz o início aut
 | `PULSECORD_SFU_TCP` | `0` desliga a mídia por TCP (padrão: UDP preferido, TCP de reserva) |
 | `PULSECORD_SFU_WORKERS` | processos do mediasoup (padrão 1) |
 | `PULSECORD_SFU_MAX_INCOMING_KBPS` | limite de envio de cada pessoa ao SFU (padrão 30000) |
+| `PULSECORD_AUTO_UPDATE` | `0` desliga a atualização automática pelo GitHub (padrão: ligada) |
+| `PULSECORD_AUTO_UPDATE_HOURS` | de quantas em quantas horas confere (padrão 6) |
+| `PULSECORD_AUTO_UPDATE_MAX_WAIT_H` | horas esperando a chamada esvaziar antes de reiniciar entre 4h e 6h (padrão 24; `0` = nunca força) |
 
 ## Requisitos
 - Debian 12 ou 13 (amd64 ou arm64). Com 1 vCPU e 1 GB de RAM roda bem para um grupo de amigos; o yt-dlp usa mais CPU por alguns segundos ao tocar uma música.

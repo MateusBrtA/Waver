@@ -208,6 +208,12 @@ journalctl -u pulsecord -f     # logs ao vivo
 - HTTPS automático com Caddy e Let's Encrypt, TURN (coturn) para quem está atrás de NAT difícil e SFU opcional.
 - Funciona em IPv4 e IPv6 e atrás de proxy reverso ou do túnel da Cloudflare.
 - Cache de mídia com teto de 2 GB e limpeza pelos moderadores.
+- **Atualização automática pelo GitHub:**
+  - O servidor confere a cada 6 horas e baixa só o que mudou, com a mesma assinatura conferida pelos apps.
+  - Se só a interface mudou, troca na hora, sem reiniciar.
+  - Se o servidor mudou, espera não ter ninguém em chamada e reinicia em uns 2 segundos; os apps reconectam sozinhos.
+  - Se a versão nova não subir, volta para a anterior.
+  - Precisa de saída em IPv4, porque o GitHub não tem IPv6. Detalhes em [deploy/README-SERVIDOR.md](deploy/README-SERVIDOR.md).
 
 ## Atualizações
 

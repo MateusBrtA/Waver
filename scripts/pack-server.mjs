@@ -49,6 +49,9 @@ function copyDir(src, dest, skip = () => false) {
 
 // servidor (sem node_modules nem dados)
 copyDir(path.join(root, 'server'), path.join(stage, 'server'), (n) => ['node_modules', 'data'].includes(n));
+// chave pública oficial: a atualização automática do servidor (server/selfUpdate.js) só aplica o que vier
+// assinado com ela, e sempre lê a chave desta pasta instalada (nunca a do download)
+copyFile(path.join(root, 'electron', 'release-public-key.json'), path.join(stage, 'server', 'release-public-key.json'));
 // interface web já compilada (servida pelo próprio servidor)
 copyDir(path.join(root, 'client', 'dist'), path.join(stage, 'client', 'dist'));
 // scripts de instalação
@@ -85,10 +88,14 @@ async function bundleMediasoupWorkers() {
   }
 }
 await bundleMediasoupWorkers();
-// package.json mínimo: o servidor lê só a versão
+// package.json mínimo: o servidor lê a versão, e a atualização automática o repositório do GitHub
 fs.writeFileSync(
   path.join(stage, 'package.json'),
-  JSON.stringify({ name: 'pulsecord', version: pkg.version, private: true }, null, 2) + '\n'
+  JSON.stringify(
+    { name: 'pulsecord', version: pkg.version, private: true, pulsecordUpdate: { githubRepo: pkg.pulsecordUpdate?.githubRepo } },
+    null,
+    2
+  ) + '\n'
 );
 // exe do app: o servidor oferece a atualização aos amigos
 fs.mkdirSync(path.join(stage, 'dist-app'), { recursive: true });
