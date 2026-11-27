@@ -144,6 +144,7 @@ journalctl -u pulsecord -f     # logs ao vivo
 - **Blocos de código** com detecção da linguagem.
 - **GIFs** pelo KLIPY ou GIPHY (com a chave do dono do servidor) mais os GIFs enviados pelo próprio grupo, e favoritos.
 - **Mensagens diretas e grupos** com ícone e nome próprios.
+- **Mensagens salvas no PC:** as últimas 150 de cada canal ficam guardadas comprimidas e criptografadas (AES-256-GCM, chave protegida pelo Windows), separadas por servidor e conta. O canal abre na hora e o servidor atualiza em seguida. Sair da conta não apaga: ao entrar de novo, as conversas voltam.
 
 ### Voz e vídeo
 
@@ -159,6 +160,11 @@ journalctl -u pulsecord -f     # logs ao vivo
   | Taxa máxima | 6, 12, 22 ou 28 Mbps (ou automática) |
   | Codec | H.264 de preferência; modo de baixa latência para jogos |
 
+- **Palco com várias telas:** assista a várias transmissões ao mesmo tempo, lado a lado e do mesmo tamanho, com os participantes embaixo. Arraste as divisórias para os lados, para cima e na diagonal (no cruzamento delas), e a borda de baixo para mudar a altura do palco. Arrastar até uma tela sumir foca a outra; clicar numa tela ou num participante foca nele, e clicar de novo volta à grade com os tamanhos que você deixou. O alfinete no canto fixa a tela em foco.
+- **Foco em quem fala:** em foco, sem transmissão nem vídeo do YouTube, o palco mostra quem está falando (só entre quem está com câmera, se alguém estiver).
+- **Parar de assistir:** sai de uma transmissão e fica só no áudio da chamada. O vídeo e o áudio da tela param de chegar para você, e quem transmite deixa de enviar para você.
+- **Caminho da conexão:** as estatísticas mostram por onde a chamada passa (LAN, direto, VPN ou relay). Com Radmin/Hamachi o app prefere a conexão direta pela internet quando ela funciona, em vez do servidor da VPN.
+- **PC fraco:** se o processador não dá conta da transmissão, ela cai sozinha para 30 fps e tenta voltar depois.
 - **Chamadas grandes (SFU):** com o mediasoup ligado no servidor, a chamada passa a ser repassada por ele quando tem mais de 4 pessoas (ajustável), ou sempre, se o dono preferir. Assim cada um envia o próprio vídeo uma vez só.
 - **Gravação:** a chamada (e a sua transmissão) vira um `.webm` (VP9/Opus) na pasta `Vídeos\Waver\Gravações`. Antes de gravar, **todos na chamada precisam permitir**; uma recusa ou 60 s sem resposta cancela. Todos veem "REC" ao lado do nome de quem grava. Vale também nas chamadas diretas da rede local.
 - **Clipes:** guarda o último minuto da chamada para salvar com um atalho, em `Vídeos\Waver\Clipes`. Os outros veem que os clipes estão ligados.
@@ -203,10 +209,11 @@ journalctl -u pulsecord -f     # logs ao vivo
 
 ## Atualizações
 
-- O app procura uma versão nova no GitHub ao abrir e a cada 4 horas, com uma consulta pequena.
-- Se houver, baixa em segundo plano: no máximo 3 MB/s, **pausando durante chamadas** e continuando de onde parou se a conexão cair.
-- Pronto o download, aparece **"Reiniciar e atualizar"**. A instalação só acontece quando você clica.
-- Todo `.exe` publicado tem uma **assinatura Ed25519** feita com a chave privada de quem publica, que não fica no GitHub. O app confere a assinatura, a versão e o SHA-256 antes de oferecer a atualização. Um arquivo trocado, alterado ou de versão mais velha é recusado, mesmo que venha do GitHub.
+- O app procura uma versão nova no GitHub logo ao abrir e a cada hora, com uma consulta pequena.
+- **Atualização leve:** baixa só os arquivos que mudaram, direto da versão mais nova (quem está várias versões atrás não passa por cada uma). Costuma ser de alguns KB a 2 MB. Se só a interface mudou, aplica recarregando a janela; senão, o app reabre em segundos, sem instalador. Quando a versão nova troca o Electron ou os programas auxiliares, vem o `.exe` completo.
+- O download aparece num card com barra de progresso enquanto você usa o app: no máximo 6 MB/s, **pausando durante chamadas** e continuando de onde parou se a conexão cair. Ao baixar uma versão nova, as baixadas antes são apagadas.
+- Pronto o download, aparece **"Aplicar agora"** (quando só a interface mudou) ou **"Reiniciar e atualizar"**. Nada é aplicado sem o seu clique.
+- Todo `.exe` e todo pacote de atualização leve publicado tem uma **assinatura Ed25519** feita com a chave privada de quem publica, que não fica no GitHub. O app confere a assinatura, a versão e o SHA-256 antes de oferecer a atualização. Um arquivo trocado, alterado ou de versão mais velha é recusado, mesmo que venha do GitHub.
 - Quem está na **4.4.1 ou 4.4.2** precisa atualizar à mão uma vez: nessas versões o botão "Reiniciar e atualizar" fecha o app sem instalar nada. Baixe o `.exe` da [última versão](https://github.com/MateusBrtA/Waver/releases/latest) e troque o antigo; a partir da 4.4.3 a atualização volta a ser automática.
 - Servidores Waver também podem oferecer a atualização aos amigos pela rede local, com as mesmas verificações.
 

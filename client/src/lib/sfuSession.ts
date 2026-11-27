@@ -41,6 +41,8 @@ export interface SfuProduceOptions {
   preferCodecs?: string[];
 }
 
+const isScreenSource = (s: SfuSource) => s === 'screen' || s === 'screen-audio';
+
 let supportCache: boolean | null = null;
 
 /** Este runtime consegue usar o SFU? (o servidor só liga o SFU numa call se todos disserem que sim) */
@@ -70,6 +72,8 @@ export class SfuSession {
   private producing = new Map<SfuSource, Promise<ms.Producer | null>>();
   private consumers = new Map<string, ConsumerEntry>();
   private consumedProducers = new Set<string>();
+  /** pessoas cuja transmissão eu parei de assistir */
+  private unwatched = new Set<string>();
   private closed = false;
   private readyPromise: Promise<void> | null = null;
   private iceRestartTimers = new Map<string, number>();
@@ -283,6 +287,34 @@ export class SfuSession {
     return Array.from(this.consumers.values());
   }
 
+  /** Pausa o envio de uma fonte (ninguém está assistindo): o navegador para de codificar e de subir. */
+  setProducerPaused(source: SfuSource, paused: boolean) {
+    const p = this.producers.get(source);
+    if (!p || p.closed || p.paused === paused) return;
+    try {
+      if (paused) p.pause();
+      else p.resume();
+    } catch {}
+  }
+
+  /** Para (ou volta a) receber a tela e o áudio da tela de uma pessoa. Pausado, o servidor não manda nada. */
+  setScreenWatching(socketId: string, watching: boolean) {
+    if (watching === !this.unwatched.has(socketId)) return;
+    if (watching) this.unwatched.delete(socketId);
+    else this.unwatched.add(socketId);
+    for (const entry of this.consumers.values()) {
+      if (entry.socketId !== socketId || !isScreenSource(entry.source)) continue;
+      const id = entry.consumer.id;
+      if (watching) {
+        entry.consumer.resume();
+        this.request('sfu:resume-consumer', { consumerId: id }).catch(() => {});
+      } else {
+        entry.consumer.pause();
+        this.request('sfu:pause-consumer', { consumerId: id }).catch(() => {});
+      }
+    }
+  }
+
   /** Simulcast: escolhe a camada (0 = menor) que o servidor manda desta câmera para mim. */
   setPreferredLayers(consumerId: string, spatialLayer: number) {
     this.request('sfu:set-layers', { consumerId, spatialLayer }).catch(() => {});
@@ -335,6 +367,8 @@ export class SfuSession {
         if (rec && 'jitterBufferTarget' in rec) rec.jitterBufferTarget = 0;
       } catch {}
       this.callbacks.onTrack(res.socketId, res.source, consumer.track, consumer.id);
+      // saiu da transmissão desta pessoa: o consumer fica pausado no servidor (nada chega até eu voltar)
+      if (isScreenSource(res.source) && this.unwatched.has(res.socketId)) return;
       await this.request('sfu:resume-consumer', { consumerId: consumer.id });
     } catch (err) {
       this.consumedProducers.delete(info.producerId);

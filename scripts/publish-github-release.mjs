@@ -76,6 +76,23 @@ for (const [name, kind] of [
   files.push(exe, sigPath);
 }
 if (!files.some((f) => f.endsWith('Waver-Portable.exe'))) fail('falta dist-app/Waver-Portable.exe desta versão (npm run build:exe).');
+// atualização leve (só os arquivos que mudaram): índice assinado + pacote
+{
+  const appPack = require('../electron/appPack.js');
+  const mPath = path.join(distApp, appPack.MANIFEST_NAME);
+  const pPath = path.join(distApp, appPack.PACK_NAME);
+  if (!fs.existsSync(mPath) || !fs.existsSync(pPath)) fail(`falta ${appPack.MANIFEST_NAME}/${appPack.PACK_NAME} em dist-app (gerados no build:win).`);
+  const m = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+  try {
+    appPack.verifyManifest(m, appPack.loadPublicKeyFrom(path.join(root, 'electron', 'release-public-key.json')));
+  } catch (err) {
+    fail(`${appPack.MANIFEST_NAME} inválido: ${err.message}`);
+  }
+  if (m.version !== version) fail(`${appPack.MANIFEST_NAME} é da versão ${m.version}, não da ${version}.`);
+  const packSize = fs.statSync(pPath).size;
+  if (Object.values(m.files).some((f) => f.o + f.c > packSize)) fail(`${appPack.PACK_NAME} não confere com o índice.`);
+  files.push(mPath, pPath);
+}
 for (const ext of ['tar.gz', 'zip']) {
   const p = path.join(root, 'dist-server', `pulsecord-server-${version}.${ext}`);
   if (fs.existsSync(p)) files.push(p);

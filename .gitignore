@@ -19,3 +19,5 @@ dist-server/
 # chave privada de assinatura das atualizações (nunca no repositório)
 .pulsecord-release/
 release-ed25519.json
+# gerado no build (identidade do motor para a atualização leve)
+electron/build-info.json

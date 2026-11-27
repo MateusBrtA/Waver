@@ -4114,6 +4114,12 @@ function sanitizeActivity(a) {
       if (typeof state?.cameraOn === 'boolean') participant.cameraOn = canStreamHere ? state.cameraOn : false;
       if (typeof state?.screenSharing === 'boolean') participant.screenSharing = canStreamHere ? state.screenSharing : false;
       if (typeof state?.screenLabel === 'string') participant.screenLabel = state.screenLabel.slice(0, 64);
+      // de quem eu saí da transmissão (só ids desta call): quem transmite para de me mandar a tela
+      if (Array.isArray(state?.notWatching)) {
+        participant.notWatching = state.notWatching
+          .filter((id) => typeof id === 'string' && id !== socket.id && roomMap.has(id))
+          .slice(0, 32);
+      }
       // aviso para todos quando alguém grava a chamada (ou mantém clipes)
       recConsent.applyRecording(socket, channelId, participant, state);
 

@@ -111,6 +111,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Global Profile & Local Encrypted DM Archive
   loadGlobalProfile: () => ipcRenderer.invoke('profile:load'),
   saveGlobalProfile: (profile) => ipcRenderer.invoke('profile:save', profile),
+  loadMessageCache: (scope, channelId) => ipcRenderer.invoke('msg-cache:load', scope, channelId),
+  saveMessageCache: (scope, channelId, messages) => ipcRenderer.invoke('msg-cache:save', scope, channelId, messages),
+  clearMessageCache: () => ipcRenderer.invoke('msg-cache:clear'),
   loadLocalDmVault: () => ipcRenderer.invoke('dm-vault:load'),
   saveLocalDmVault: (dmMap) => ipcRenderer.invoke('dm-vault:save', dmMap),
   // Automatic Game/App Activity Detector

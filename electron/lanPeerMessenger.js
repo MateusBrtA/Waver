@@ -1123,6 +1123,13 @@ class LanPeerMessenger {
           ...(typeof state.cameraOn === 'boolean' ? { cameraOn: state.cameraOn } : {}),
           ...(typeof state.screenSharing === 'boolean' ? { screenSharing: state.screenSharing } : {}),
           ...(typeof state.screenLabel === 'string' ? { screenLabel: state.screenLabel.slice(0, 64) } : {}),
+          ...(Array.isArray(state.notWatching)
+            ? {
+                notWatching: state.notWatching
+                  .filter((id) => typeof id === 'string' && id !== socket.id && room.has(id))
+                  .slice(0, 32),
+              }
+            : {}),
         });
         this.io.to(`voice:${ch}`).emit('voice:media-updated', { channelId: ch, participant: p });
         this.io.to(`voice:${ch}`).emit('dm:voice-participants', Array.from(room.values()));

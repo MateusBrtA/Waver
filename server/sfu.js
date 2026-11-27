@@ -460,6 +460,18 @@ export function createSfuManager({ emitTo, getSocketChannel, onRoomClosed, optio
       })
     );
 
+    // "Parar de assistir": o servidor deixa de mandar esta mídia para mim (não gasta banda nenhuma)
+    socket.on(
+      'sfu:pause-consumer',
+      handler(async ({ consumerId }) => {
+        const { peer } = getPeer(socket);
+        const consumer = peer?.consumers.get(consumerId);
+        if (!consumer) throw new Error('Consumer não encontrado.');
+        await consumer.pause();
+        return { ok: true };
+      })
+    );
+
     socket.on(
       'sfu:set-layers',
       handler(async ({ consumerId, spatialLayer, temporalLayer }) => {

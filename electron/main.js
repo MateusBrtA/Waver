@@ -10,6 +10,7 @@ const {
   nativeImage,
   net,
   protocol,
+  safeStorage,
   session,
   shell,
   Tray,
@@ -18,6 +19,8 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const releaseVerify = require('./releaseVerify');
 const { GithubUpdater } = require('./githubUpdater');
+const { AppPatcher } = require('./appPatcher');
+const { MessageCache } = require('./messageCache');
 const { buildApplyScript, startApplyScript } = require('./applyUpdate');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -66,7 +69,11 @@ const DIST_DIR = path.join(__dirname, '..', 'client', 'dist');
 app.setPath('userData', path.join(app.getPath('appData'), 'PulseCord'));
 const LIVE_UI_DIR = path.join(app.getPath('userData'), 'live-ui');
 
+// atualização leve que mudou só a interface: aplicada recarregando a janela, sem reiniciar o app
+let hotDistDir = null;
+
 function getActiveDistDir() {
+  if (hotDistDir) return hotDistDir;
   try {
     const manifestPath = path.join(LIVE_UI_DIR, 'manifest.json');
     const htmlPath = path.join(LIVE_UI_DIR, 'index.html');
@@ -767,6 +774,24 @@ function startGithubUpdater() {
     repo = require('../package.json')?.pulsecordUpdate?.githubRepo || '';
   } catch {}
   if (!repo || !releaseVerify.hasReleaseKey()) return;
+  // atualização leve: só os arquivos do código que mudaram (ver appPack.js / boot.js)
+  let patcher = null;
+  try {
+    const runtime = JSON.parse(fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8')).runtime;
+    const publicKey = releaseVerify.getPublicKey();
+    if (runtime && publicKey) {
+      patcher = new AppPatcher({
+        runtime,
+        publicKey,
+        activeRoot: process.env.WAVER_LIVE_APP_DIR || path.join(__dirname, '..'),
+        liveRoot: path.join(app.getPath('userData'), 'app-live'),
+        currentVersion: app.getVersion(),
+        compareVersions: releaseVerify.compareVersions,
+        log: (m) => console.log(m),
+      });
+      patcher.cleanup([app.getVersion()]);
+    }
+  } catch {}
   githubUpdater = new GithubUpdater({
     repo,
     currentVersion: app.getVersion(),
@@ -775,17 +800,19 @@ function startGithubUpdater() {
     verifySignature: (sig, current) => releaseVerify.verifyInstallerSignatureObject(sig, current),
     compareVersions: releaseVerify.compareVersions,
     isBusy: () => updateBusy,
-    maxBytesPerSec: 3 * 1024 * 1024,
+    maxBytesPerSec: 6 * 1024 * 1024,
+    patcher,
     log: (m) => console.log(m),
     onState: (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:github-state', publicGithubState(st));
     },
   });
-  githubUpdater.start({ firstDelayMs: 30_000, intervalMs: 4 * 60 * 60 * 1000 });
+  // confere logo ao abrir (a atualização leve tem poucos KB) e depois a cada hora (com ETag: quase de graça)
+  githubUpdater.start({ firstDelayMs: 3_000, intervalMs: 60 * 60 * 1000 });
 }
 function publicGithubState(st) {
   if (!st) return { status: 'idle' };
-  const { path: _p, ...rest } = st; // o caminho local não vai para a interface
+  const { path: _p, dir: _d, ...rest } = st; // caminhos locais não vão para a interface
   return rest;
 }
 
@@ -1153,6 +1180,27 @@ if (!gotLock) {
 
     ipcMain.handle('update:github-install', () => {
       const st = githubUpdater?.state;
+      if (st?.status === 'ready' && st.mode === 'patch' && st.dir && fs.existsSync(st.dir)) {
+        if (st.renderOnly && mainWindow && !mainWindow.isDestroyed()) {
+          // só a interface mudou: recarrega a janela já com os arquivos novos (1 s). Na próxima vez que o app
+          // abrir, o boot.js já usa a versão nova inteira.
+          hotDistDir = path.join(st.dir, 'client', 'dist');
+          const v = st.version;
+          app.getVersion = () => v;
+          githubUpdater.currentVersion = v;
+          if (githubUpdater.patcher) githubUpdater.patcher.currentVersion = v;
+          githubUpdater.setState({ status: 'idle' });
+          setTimeout(() => mainWindow?.webContents.reloadIgnoringCache(), 150);
+          return { ok: true, reloaded: true };
+        }
+        // código do processo principal mudou: reabre o app (rápido, sem instalador). No portátil, reabre o
+        // Waver-Portable.exe (o .exe extraído na pasta temporária é apagado quando este fecha).
+        const portable = process.env.PORTABLE_EXECUTABLE_FILE;
+        app.relaunch(portable ? { execPath: portable, args: [] } : undefined);
+        isQuitting = true;
+        setTimeout(() => app.quit(), 200);
+        return { ok: true, restarting: true };
+      }
       if (!st || st.status !== 'ready' || !st.path || !fs.existsSync(st.path)) {
         throw new Error('A atualização ainda não está pronta.');
       }
@@ -1366,6 +1414,30 @@ if (!gotLock) {
     ipcMain.handle('profile:save', (_event, profile) => {
       writeEncryptedLocalJson('global-profile.enc', profile || {});
       lanPeerMessenger?.updateIdentity(profile || {});
+      return true;
+    });
+    // Cópia local (cifrada e comprimida) das mensagens dos canais de servidor: abrem na hora
+    const messageCache = new MessageCache({
+      dir: path.join(app.getPath('userData'), 'msg-cache'),
+      safeStorage,
+      fallbackKey: () => getLocalVaultKey(),
+    });
+    ipcMain.handle('msg-cache:load', (_event, scope, channelId) => {
+      try {
+        return messageCache.load(String(scope || ''), String(channelId || ''));
+      } catch {
+        return null;
+      }
+    });
+    ipcMain.handle('msg-cache:save', (_event, scope, channelId, messages) => {
+      try {
+        return messageCache.save(String(scope || ''), String(channelId || ''), messages);
+      } catch {
+        return false;
+      }
+    });
+    ipcMain.handle('msg-cache:clear', () => {
+      messageCache.clearAll();
       return true;
     });
     ipcMain.handle('dm-vault:load', () => readEncryptedLocalJson('dm-archive.enc', {}));

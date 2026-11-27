@@ -60,6 +60,8 @@ class GithubUpdater {
     this.log = o.log || (() => {});
     this.onState = o.onState || (() => {});
     this.busyPollMs = o.busyPollMs ?? 5000;
+    /** AppPatcher (atualização leve); opcional */
+    this.patcher = o.patcher || null;
     this.state = { status: 'idle' };
     this.etag = null;
     this.cachedRelease = null;
@@ -84,7 +86,7 @@ class GithubUpdater {
       return;
     }
     for (const name of names) {
-      const m = /^(?:Waver|PulseCord)-(\d[\w.]*)-(?:portable|setup)\.exe(?:\.part(?:\.json)?)?$/.exec(name);
+      const m = /^(?:Waver|PulseCord)-(\d[\w.]*)-(?:portable|setup)(?:-install)?\.exe(?:\.part(?:\.json)?)?$/.exec(name);
       if (m && this.compareVersions(m[1], this.currentVersion) <= 0) {
         fs.rmSync(path.join(this.downloadDir, name), { force: true });
       }
@@ -120,6 +122,33 @@ class GithubUpdater {
     // filtro rápido pelo nome da tag (evita baixar à toa); a decisão de verdade é a versão ASSINADA
     if (!tagVersion || this.compareVersions(tagVersion, this.currentVersion) <= 0) return this.state;
     if (this.state.status === 'ready' && this.state.version === tagVersion) return this.state;
+
+    // 1º: atualização leve (só os arquivos que mudaram, direto para a última versão). Se não servir, o .exe.
+    if (this.patcher) {
+      try {
+        const p = await this.patcher.prepare(rel, (loaded, total) => {
+          if (total > 0) this.setState({ status: 'downloading', mode: 'patch', version: tagVersion, loaded, total });
+        });
+        if (p) {
+          // a nova está pronta: o resto (leves de antes e .exe baixados) é lixo. Fica só a em uso e a nova.
+          this.patcher.cleanup([this.currentVersion, p.version], { onlyKeep: true });
+          this.removeExeDownloads();
+          this.setState({
+            status: 'ready',
+            mode: 'patch',
+            version: p.version,
+            dir: p.dir,
+            renderOnly: p.renderOnly,
+            bytes: p.bytes,
+            kind: this.kind,
+            notes: String(rel.body || '').slice(0, 4000),
+          });
+          return this.state;
+        }
+      } catch (err) {
+        this.log(`[update] atualização leve da ${tagVersion} falhou, usando o .exe: ${err?.message || err}`);
+      }
+    }
 
     const assets = Array.isArray(rel.assets) ? rel.assets : [];
     const exeName = EXE_NAMES[this.kind].find((n) => assets.some((a) => a?.name === n)) || EXE_NAMES[this.kind][0];
@@ -186,12 +215,27 @@ class GithubUpdater {
     return { version: signed.version, path: finalPath };
   }
 
-  markReady(version, file, notes) {
-    // apaga downloads de versões anteriores
-    for (const name of fs.readdirSync(this.downloadDir)) {
-      const full = path.join(this.downloadDir, name);
-      if (full !== file) fs.rmSync(full, { force: true, recursive: true });
+  /** Apaga os .exe de atualização baixados (e pedaços), menos `except`. O do "Instalar no PC" fica. */
+  removeExeDownloads(except = '') {
+    let names = [];
+    try {
+      names = fs.readdirSync(this.downloadDir);
+    } catch {
+      return;
     }
+    for (const name of names) {
+      const full = path.join(this.downloadDir, name);
+      if (full === except || /-install\.exe$/i.test(name)) continue;
+      try {
+        fs.rmSync(full, { force: true, recursive: true });
+      } catch {}
+    }
+  }
+
+  markReady(version, file, notes) {
+    // apaga downloads de versões anteriores e as atualizações leves que o .exe novo substitui
+    this.removeExeDownloads(file);
+    if (this.patcher) this.patcher.cleanup([this.currentVersion], { onlyKeep: true });
     this.setState({ status: 'ready', version, path: file, kind: this.kind, notes });
     return this.state;
   }

@@ -136,6 +136,8 @@ interface VoiceAudioBridgeProps {
   masterOutputVolume: number;
   localMutedUserIds: Set<string>;
   blockedUserIds: Set<string>;
+  /** transmissões de que eu saí: o áudio da tela delas também para */
+  notWatching?: string[];
   streamAudioVolume: number;
   deafened: boolean;
   outputDeviceId: string;
@@ -148,6 +150,7 @@ export const VoiceAudioBridge: React.FC<VoiceAudioBridgeProps> = ({
   masterOutputVolume,
   localMutedUserIds,
   blockedUserIds,
+  notWatching = [],
   streamAudioVolume,
   deafened,
   outputDeviceId,
@@ -170,7 +173,7 @@ export const VoiceAudioBridge: React.FC<VoiceAudioBridgeProps> = ({
               outputDeviceId={outputDeviceId}
             />
             <PeerStreamAudio
-              stream={peer.screenAudioStream}
+              stream={notWatching.includes(peer.socketId) ? null : peer.screenAudioStream}
               volume={isSilenced ? 0 : streamAudioVolume * masterOutputVolume}
               deafened={deafened || isSilenced}
               outputDeviceId={outputDeviceId}

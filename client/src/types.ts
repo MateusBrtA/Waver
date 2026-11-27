@@ -574,6 +574,8 @@ export interface VoiceParticipant {
   noSpeak?: boolean;
   /** está gravando a chamada ou mantendo clipes */
   recording?: 'record' | 'clips' | null;
+  /** socketIds de quem esta pessoa saiu da transmissão (não recebe a tela deles) */
+  notWatching?: string[];
 }
 
 export interface StreamStats {
@@ -584,6 +586,10 @@ export interface StreamStats {
   codec: string;
   rttMs: number;
   adaptiveTargetMbps?: number;
+  /** por onde a mídia está indo: mesma rede, direto pela internet, pela VPN ou por um relé TURN */
+  path?: 'lan' | 'direct' | 'vpn' | 'relay';
+  /** o PC de quem transmite não está dando conta de codificar (a tela caiu para 30 fps) */
+  limited?: 'cpu';
 }
 
 export interface RemotePeerMedia {
@@ -776,6 +782,12 @@ export interface GithubUpdateState {
   loaded?: number;
   total?: number;
   error?: string;
+  /** 'patch' = atualização leve (só os arquivos que mudaram, sem instalador) */
+  mode?: 'patch';
+  /** só a interface mudou: aplica recarregando a janela, sem reiniciar */
+  renderOnly?: boolean;
+  /** bytes baixados na atualização leve */
+  bytes?: number;
 }
 
 export interface UpdateManifest {
@@ -995,6 +1007,10 @@ export interface ElectronAPI {
   // Global Profile & Local Encrypted DM Archive
   loadGlobalProfile: () => Promise<GlobalProfile | null>;
   saveGlobalProfile: (profile: GlobalProfile) => Promise<boolean>;
+  /** cópia local cifrada das mensagens de um canal de servidor (abre o canal na hora) */
+  loadMessageCache?: (scope: string, channelId: string) => Promise<ChatMessage[] | null>;
+  saveMessageCache?: (scope: string, channelId: string, messages: ChatMessage[]) => Promise<boolean>;
+  clearMessageCache?: () => Promise<boolean>;
   loadLocalDmVault: () => Promise<Record<string, ChatMessage[]>>;
   saveLocalDmVault: (dmMap: Record<string, ChatMessage[]>) => Promise<boolean>;
   // Automatic Game/App Activity Detector

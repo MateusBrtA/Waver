@@ -117,6 +117,12 @@ const Model3DViewerModal = React.lazy(() =>
 const MAX_CACHED_MESSAGES = 400;
 const MAX_CACHED_CHANNELS = 5;
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+
 function compareVersions(a: string, b: string): number {
   const pa = String(a || '0').split('.').map((x) => parseInt(x, 10) || 0);
   const pb = String(b || '0').split('.').map((x) => parseInt(x, 10) || 0);
@@ -744,7 +750,15 @@ export default function App() {
 
   const handleInstallGithubUpdate = useCallback(async () => {
     if (!window.electronAPI?.installGithubUpdate) return;
-    if (activeVoiceChannelIdRef.current && !window.confirm('Atualizar agora vai fechar o Waver e tirar você da chamada. Continuar?')) return;
+    if (
+      activeVoiceChannelIdRef.current &&
+      !window.confirm(
+        githubUpdate?.mode === 'patch' && githubUpdate.renderOnly
+          ? 'Aplicar agora recarrega a janela (1 segundo) e tira você da chamada. Continuar?'
+          : 'Atualizar agora vai reabrir o Waver e tirar você da chamada. Continuar?'
+      )
+    )
+      return;
     setGithubInstalling(true);
     try {
       await window.electronAPI.installGithubUpdate();
@@ -752,7 +766,7 @@ export default function App() {
       setGithubInstalling(false);
       showError((err as Error).message || 'Não foi possível instalar a atualização.');
     }
-  }, [showError]);
+  }, [showError, githubUpdate?.mode, githubUpdate?.renderOnly]);
 
   const checkUpdates = useCallback(async () => {
     if (!token || !api) return;
@@ -2178,12 +2192,53 @@ export default function App() {
     };
   }, [token, user?.id, serverUrl, syncClockWithSocket, showError, showToast, schedulePersistDmArchive]);
 
+  // ---- Cópia local (cifrada) das mensagens dos canais: o canal abre na hora e o servidor atualiza depois
+  const msgCacheScope = user?.id && serverUrl ? `${serverUrl.replace(/\/+$/, '').toLowerCase()}|${user.id}` : '';
+  const msgCacheSavedRef = useRef<Map<string, ChatMessage[]>>(new Map());
+  const msgCacheTimerRef = useRef<number | null>(null);
+  const messagesByChannelRef = useRef(messagesByChannel);
+  messagesByChannelRef.current = messagesByChannel;
+  // canais que já têm a lista do servidor nesta sessão (a cópia local não sobrescreve)
+  const serverLoadedChannelsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    msgCacheSavedRef.current = new Map();
+    serverLoadedChannelsRef.current = new Set();
+  }, [msgCacheScope]);
+  useEffect(() => {
+    const save = window.electronAPI?.saveMessageCache;
+    if (!save || !msgCacheScope) return;
+    if (msgCacheTimerRef.current) window.clearTimeout(msgCacheTimerRef.current);
+    // grava só os canais que mudaram, 1,5 s depois da última mensagem (sem gravar a cada letra/reação)
+    msgCacheTimerRef.current = window.setTimeout(() => {
+      msgCacheTimerRef.current = null;
+      for (const [chId, list] of Object.entries(messagesByChannelRef.current)) {
+        if (!serverLoadedChannelsRef.current.has(chId)) continue; // só o que veio do servidor
+        if (msgCacheSavedRef.current.get(chId) === list) continue;
+        msgCacheSavedRef.current.set(chId, list);
+        save(msgCacheScope, chId, list).catch(() => {});
+      }
+    }, 1500);
+  }, [messagesByChannel, msgCacheScope]);
+
   // Fetch server text channel message history
   useEffect(() => {
     if (!token || !api || !activeTextChannelId || navArea !== 'server') return;
+    const chId = activeTextChannelId;
+    const load = window.electronAPI?.loadMessageCache;
+    // canal fora da memória (nunca aberto ou já descartado): mostra a cópia local até o servidor responder
+    if (!messagesByChannelRef.current[chId]) serverLoadedChannelsRef.current.delete(chId);
+    if (load && msgCacheScope && !messagesByChannelRef.current[chId]) {
+      load(msgCacheScope, chId)
+        .then((cached) => {
+          if (!cached || !cached.length || serverLoadedChannelsRef.current.has(chId)) return;
+          setMessagesByChannel((prev) => (prev[chId] ? prev : { ...prev, [chId]: cached }));
+        })
+        .catch(() => {});
+    }
     api
       .getMessages(activeTextChannelId)
       .then((res) => {
+        serverLoadedChannelsRef.current.add(chId);
         const order = recentTextChannelsRef.current.filter((id) => id !== activeTextChannelId);
         order.unshift(activeTextChannelId);
         recentTextChannelsRef.current = order.slice(0, MAX_CACHED_CHANNELS);
@@ -2198,7 +2253,7 @@ export default function App() {
         });
       })
       .catch(() => {});
-  }, [token, activeTextChannelId, navArea, api]);
+  }, [token, activeTextChannelId, navArea, api, msgCacheScope]);
 
   refetchActiveTextChannelRef.current = () => {
     if (!api || !activeTextChannelId || navArea !== 'server') return;
@@ -2499,6 +2554,8 @@ export default function App() {
     }
     localStorage.removeItem('pulsecord_session');
     localStorage.removeItem('pulsecord_local_identity');
+    // as mensagens salvas no PC ficam: são separadas por servidor + conta e voltam ao entrar de novo nela
+    setMessagesByChannel({});
     clearSavedServers();
     setSavedServers([]);
     setAutoReconnectUrl(null);
@@ -3837,6 +3894,54 @@ export default function App() {
     return voiceRooms[activeVoiceChannelId] || [];
   }, [activeVoiceChannelId, isInDmVoice, dmVoiceParticipants, voiceRooms]);
 
+  // ---- "Parar de assistir" uma transmissão: fico só no áudio da call e não baixo nada da tela dela
+  const [notWatching, setNotWatching] = useState<string[]>([]);
+  const lastNotWatchingSentRef = useRef('');
+  useEffect(() => {
+    setNotWatching([]);
+    lastNotWatchingSentRef.current = '';
+  }, [activeVoiceChannelId]);
+  // quem parou de transmitir sai da lista (na próxima vez que transmitir, assisto de novo)
+  useEffect(() => {
+    if (notWatching.length === 0) return;
+    const sharing = new Set(activeVoiceParticipants.filter((p) => p.screenSharing).map((p) => p.socketId));
+    const gone = notWatching.filter((id) => !sharing.has(id));
+    if (gone.length === 0) return;
+    gone.forEach((id) => rtcRef.current?.setScreenWatching(id, true));
+    setNotWatching((prev) => prev.filter((id) => sharing.has(id)));
+  }, [activeVoiceParticipants, notWatching]);
+  // Compara com o que o servidor tem de mim: depois de reconectar (ou trocar de socket) o participante volta sem
+  // a lista, e quem transmite voltaria a me mandar a tela. Assim a lista é reenviada sozinha.
+  useEffect(() => {
+    if (!activeVoiceChannelId || !selfSocketId) return;
+    const me = activeVoiceParticipants.find((p) => p.socketId === selfSocketId);
+    if (!me) return;
+    const key = notWatching.slice().sort().join(',');
+    const serverKey = (me.notWatching || []).slice().sort().join(',');
+    if (key === serverKey) {
+      lastNotWatchingSentRef.current = '';
+      return;
+    }
+    const sentKey = `${selfSocketId}|${key}`;
+    if (sentKey === lastNotWatchingSentRef.current) return;
+    lastNotWatchingSentRef.current = sentKey;
+    (p2pCallSocketRef.current || socketRef.current)?.emit('voice:media-state', { notWatching });
+  }, [notWatching, activeVoiceChannelId, activeVoiceParticipants, selfSocketId]);
+  // quem saiu da MINHA transmissão não recebe a tela (malha)
+  useEffect(() => {
+    rtcRef.current?.setScreenBlockedPeers(
+      activeVoiceParticipants.filter((p) => p.notWatching?.includes(selfSocketId)).map((p) => p.socketId)
+    );
+  }, [activeVoiceParticipants, selfSocketId, localScreenStream]);
+  const setWatchingStream = useCallback((socketId: string, watching: boolean) => {
+    rtcRef.current?.setScreenWatching(socketId, watching);
+    setNotWatching((prev) => {
+      const has = prev.includes(socketId);
+      if (watching ? !has : has) return prev;
+      return watching ? prev.filter((id) => id !== socketId) : [...prev, socketId];
+    });
+  }, []);
+
   const activeDmIsLanPeer = useMemo(() => {
     if (!activeDmUserId) return false;
     if (members.some((m) => m.id === activeDmUserId)) return false;
@@ -4004,8 +4109,6 @@ export default function App() {
       }
     );
   };
-  const messagesByChannelRef = useRef(messagesByChannel);
-  messagesByChannelRef.current = messagesByChannel;
   const handleSearchJump = (msg: ChatMessage) => {
     setShowSearch(false);
     setNavArea('server');
@@ -4028,7 +4131,7 @@ export default function App() {
     const list: RecSource[] = [{ key: 'self', stream: localMicStreamRef.current }];
     for (const p of Object.values(remotePeers)) {
       list.push({ key: `${p.socketId}:mic`, stream: p.micStream });
-      if (p.screenAudioStream) list.push({ key: `${p.socketId}:screen`, stream: p.screenAudioStream });
+      if (p.screenAudioStream && !notWatching.includes(p.socketId)) list.push({ key: `${p.socketId}:screen`, stream: p.screenAudioStream });
     }
     return list;
   };
@@ -4387,13 +4490,46 @@ export default function App() {
       <div className="relative z-10 flex-1 flex flex-col min-h-0 overflow-hidden">
       {renderTitlebar()}
 
+      {/* Baixando atualização: cartão pequeno com barra, o app continua usável */}
+      {(githubUpdate?.status === 'downloading' || githubUpdate?.status === 'paused') && githubUpdate.version && (
+        <div className="fixed bottom-4 right-4 z-[60] w-72 rounded-lg bg-[#111214]/95 border border-white/10 shadow-2xl px-3.5 py-2.5 text-xs text-[#dbdee1] pointer-events-none">
+          <div className="flex items-center gap-2 mb-1.5">
+            <Download className="w-3.5 h-3.5 text-[#23a55a] shrink-0" />
+            <span className="font-semibold text-white truncate">
+              {githubUpdate.status === 'paused' ? 'Atualização pausada (em chamada)' : `Atualizando para v${githubUpdate.version}`}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+            <div
+              className="h-full bg-[#23a55a] transition-[width] duration-300"
+              style={{
+                width: `${githubUpdate.total ? Math.min(100, Math.round(((githubUpdate.loaded || 0) / githubUpdate.total) * 100)) : 5}%`,
+              }}
+            />
+          </div>
+          <div className="mt-1 text-[10px] text-[#949ba4]">
+            {formatBytes(githubUpdate.loaded || 0)}
+            {githubUpdate.total ? ` de ${formatBytes(githubUpdate.total)}` : ''}
+            {githubUpdate.mode === 'patch' ? ' · só o que mudou' : ''}
+          </div>
+        </div>
+      )}
+
       {/* Automatic LAN Update Available Banner */}
       {githubUpdate?.status === 'ready' && githubUpdate.version && !githubUpdateDismissed && (
         <div className="bg-[#248046] text-white text-sm font-medium px-4 py-1.5 flex items-center justify-center gap-3 shrink-0">
           <Download className="w-4 h-4 shrink-0" />
           <span className="truncate" title={githubUpdate.notes || undefined}>
             {githubInstalling
-              ? 'Instalando a atualização… o Waver vai reabrir sozinho.'
+              ? githubUpdate.mode === 'patch'
+                ? githubUpdate.renderOnly
+                  ? 'Aplicando…'
+                  : 'Reabrindo o Waver na versão nova…'
+                : 'Instalando a atualização… o Waver vai reabrir sozinho.'
+              : githubUpdate.mode === 'patch'
+              ? `Waver v${githubUpdate.version} pronto (${formatBytes(githubUpdate.bytes || 0)} baixados, conferido). ${
+                  githubUpdate.renderOnly ? 'Aplica em 1 segundo, sem reiniciar.' : 'Reabre em poucos segundos, sem instalador.'
+                }`
               : `Waver v${githubUpdate.version} já foi baixado e conferido. Atualize quando quiser.`}
           </span>
           {!githubInstalling && (
@@ -4403,7 +4539,7 @@ export default function App() {
                 onClick={handleInstallGithubUpdate}
                 className="px-3 py-0.5 rounded-full bg-white text-[#111214] font-bold hover:bg-white/90 cursor-pointer shrink-0"
               >
-                Reiniciar e atualizar
+                {githubUpdate.mode === 'patch' && githubUpdate.renderOnly ? 'Aplicar agora' : 'Reiniciar e atualizar'}
               </button>
               <button
                 type="button"
@@ -4662,6 +4798,7 @@ export default function App() {
           masterOutputVolume={audioSettings.outputVolume ?? 1}
           localMutedUserIds={localMutedUserIds}
           blockedUserIds={blockedUserIds}
+          notWatching={notWatching}
           streamAudioVolume={streamAudioVolume}
           deafened={deafened || Boolean(user.serverDeafened)}
           outputDeviceId={audioSettings.outputDeviceId}
@@ -4775,6 +4912,7 @@ export default function App() {
             remoteScreenStreams={remoteScreenStreams}
             onWatchStream={(channelId, socketId) => {
               handleJoinOrFocusVoiceChannel(channelId);
+              setWatchingStream(socketId, true);
               setSpotlightRequest({ key: `screen:${socketId}`, seq: Date.now() });
             }}
             nowPlayingSlot={
@@ -4913,6 +5051,8 @@ export default function App() {
               selfSocketId={selfSocketId}
               remotePeers={remotePeers}
               spotlightRequest={spotlightRequest}
+              notWatching={notWatching}
+              onSetWatching={setWatchingStream}
               localCamStream={localCamStream}
               localScreenStream={localScreenStream}
               localSpeaking={localSpeaking}

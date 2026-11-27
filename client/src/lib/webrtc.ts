@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { createProcessLoopbackAudioTrack, LoopbackBridgeHandle } from './loopbackAudio';
 import { setSpeaking } from './speakingStore';
+import { deprioritizeVpnCandidate, deprioritizeVpnInSdp, readSelectedPath } from './icePath';
 import { SfuJoinInfo, SfuProduceOptions, SfuSession, SfuSource, sfuSupported } from './sfuSession';
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
@@ -168,6 +169,10 @@ export class WebRTCManager {
   private sfuPeers = new Map<string, SfuPeer>();
   private sfuRetryTimer: number | null = null;
   private sfuCamLayers = new Map<string, number>();
+  /** quem saiu da minha transmissão (malha: não mando a tela para essas pessoas) */
+  private screenBlockedPeers = new Set<string>();
+  /** de quem eu saí da transmissão (SFU: pausa a recepção) */
+  private unwatchedScreens = new Set<string>();
 
   constructor(settings: AudioSettings, callbacks: WebRTCManagerCallbacks) {
     this.settings = settings;
@@ -769,6 +774,8 @@ export class WebRTCManager {
     this.stopSfu();
     this.sfuCaps = null;
     this.roomPeers.clear();
+    this.screenBlockedPeers.clear();
+    this.unwatchedScreens.clear();
 
     this.micStream?.getTracks().forEach((t) => t.stop());
     this.camStream?.getTracks().forEach((t) => t.stop());
@@ -975,6 +982,7 @@ export class WebRTCManager {
         audioTrack = rawDisplayStream.getAudioTracks()[0] || null;
       }
 
+      this.resetCpuGuard();
       this.screenStream = stream;
       this.screenConfig = { ...config, resolution: targetRes, fps: targetFps, maxBitrateMbps: startBitrate };
       this.screenLabel = config.label || videoTrack.label || 'Tela Compartilhada';
@@ -995,6 +1003,7 @@ export class WebRTCManager {
           await this.applyAudioSenderParams(ctx.screenAudioSender, 192_000);
         }
       }
+      for (const [id, ctx] of this.peers) if (this.screenBlockedPeers.has(id)) this.applyScreenBlock(id, ctx);
       if (this.sfu) {
         this.produceScreenToSfu().catch((err) => console.warn('[SFU] tela:', err));
       }
@@ -1024,6 +1033,7 @@ export class WebRTCManager {
     this.screenConfig = null;
     this.screenLabel = '';
     this.localScreenStats = null;
+    this.resetCpuGuard();
 
     for (const ctx of this.peers.values()) {
       if (ctx.screenVideoSender) {
@@ -1050,6 +1060,103 @@ export class WebRTCManager {
     this.emitLocalState();
   }
 
+  /**
+   * Quem saiu da minha transmissão. Na malha a tela deixa de ir para essas pessoas (replaceTrack(null): sem
+   * renegociar, zero banda e zero codificação extra); quando voltam, a faixa volta com quadro-chave.
+   */
+  setScreenBlockedPeers(ids: string[]) {
+    const next = new Set(ids);
+    const changed = new Set<string>();
+    for (const id of next) if (!this.screenBlockedPeers.has(id)) changed.add(id);
+    for (const id of this.screenBlockedPeers) if (!next.has(id)) changed.add(id);
+    this.screenBlockedPeers = next;
+    for (const id of changed) {
+      const ctx = this.peers.get(id);
+      if (ctx) this.applyScreenBlock(id, ctx);
+    }
+    this.applySfuScreenPause();
+  }
+
+  /** SFU: ninguém da call está assistindo a minha tela -> pausa o envio (não codifica nem sobe nada). */
+  private applySfuScreenPause() {
+    const s = this.sfu;
+    if (!s) return;
+    const ids = Array.from(this.roomPeers.keys());
+    const nobody = ids.length > 0 && ids.every((id) => this.screenBlockedPeers.has(id));
+    s.setProducerPaused('screen', nobody);
+    s.setProducerPaused('screen-audio', nobody);
+  }
+
+  private applyScreenBlock(id: string, ctx: PeerContext) {
+    const blocked = this.screenBlockedPeers.has(id);
+    const v = this.screenStream?.getVideoTracks()[0] || null;
+    const a = this.screenStream?.getAudioTracks()[0] || null;
+    if (ctx.screenVideoSender) ctx.screenVideoSender.replaceTrack(blocked ? null : v).catch(() => {});
+    if (ctx.screenAudioSender) ctx.screenAudioSender.replaceTrack(blocked ? null : a).catch(() => {});
+  }
+
+  /** Eu parei (ou voltei) de assistir a tela de alguém. No SFU o servidor para de me mandar a tela. */
+  setScreenWatching(socketId: string, watching: boolean) {
+    if (watching) this.unwatchedScreens.delete(socketId);
+    else this.unwatchedScreens.add(socketId);
+    this.sfu?.setScreenWatching(socketId, watching);
+  }
+
+  // ---- PC fraco: o codificador da tela sem CPU (qualityLimitationReason = "cpu") ----
+  private cpuLimitedSince = 0;
+  private cpuOkSince = 0;
+  private cpuFpsCap = 0;
+  private cpuCapRetried = false;
+
+  private resetCpuGuard() {
+    this.cpuLimitedSince = 0;
+    this.cpuOkSince = 0;
+    this.cpuFpsCap = 0;
+    this.cpuCapRetried = false;
+  }
+
+  /**
+   * Em vez de travar (quadros acumulando, atraso crescendo), a tela cai para 30 fps quando o PC não dá conta
+   * de codificar, e a captura também (gasta metade). Tenta voltar ao fps escolhido uma vez, depois de 1 min.
+   */
+  private noteEncoderLimit(reason: string | undefined) {
+    const cfg = this.screenConfig;
+    if (!cfg || cfg.fps <= 30) return;
+    const now = performance.now();
+    if (reason === 'cpu') {
+      this.cpuOkSince = 0;
+      if (!this.cpuLimitedSince) this.cpuLimitedSince = now;
+      if (!this.cpuFpsCap && now - this.cpuLimitedSince > 4000) this.setCpuFpsCap(30);
+      return;
+    }
+    this.cpuLimitedSince = 0;
+    if (!this.cpuFpsCap || this.cpuCapRetried) return;
+    if (!this.cpuOkSince) this.cpuOkSince = now;
+    else if (now - this.cpuOkSince > 60_000) {
+      this.cpuCapRetried = true;
+      this.setCpuFpsCap(0);
+    }
+  }
+
+  private setCpuFpsCap(cap: number) {
+    const cfg = this.screenConfig;
+    if (!cfg) return;
+    this.cpuFpsCap = cap;
+    const fps = cap || cfg.fps;
+    this.screenStream
+      ?.getVideoTracks()[0]
+      ?.applyConstraints({ frameRate: { ideal: fps, max: fps } })
+      .catch(() => {});
+    if (this.sfu) {
+      const pr = this.sfu.getProducer('screen');
+      if (pr?.rtpSender) {
+        this.applyVideoSenderParams(pr.rtpSender, Math.min(this.adaptiveBitrateMbps, this.sfuScreenCapMbps()), cfg.fps, cfg.contentMode);
+      }
+    } else {
+      this.scheduleMeshRebalance();
+    }
+  }
+
   private async applyVideoSenderParams(
     sender: RTCRtpSender,
     bitrateMbps: number,
@@ -1061,7 +1168,7 @@ export class WebRTCManager {
       const params = sender.getParameters();
       if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
       params.encodings[0].maxBitrate = Math.round(bitrateMbps * 1_000_000);
-      params.encodings[0].maxFramerate = fps;
+      params.encodings[0].maxFramerate = this.cpuFpsCap && fps > this.cpuFpsCap ? this.cpuFpsCap : fps;
       params.encodings[0].scaleResolutionDownBy = scaleDown;
       params.degradationPreference =
         contentMode === 'detail'
@@ -1261,6 +1368,7 @@ export class WebRTCManager {
         ctx.screenAudioSender = pc.addTrack(aTrack, this.screenStream);
         this.applyAudioSenderParams(ctx.screenAudioSender, 192_000);
       }
+      if (this.screenBlockedPeers.has(remoteSocketId)) this.applyScreenBlock(remoteSocketId, ctx);
     }
 
     pc.onicecandidate = ({ candidate }) => {
@@ -1580,6 +1688,7 @@ export class WebRTCManager {
       );
     }
     await Promise.all(jobs);
+    this.applySfuScreenPause();
   }
 
   /** Envia ao SFU tudo o que já está ligado (microfone, câmera, tela). */
@@ -1648,6 +1757,7 @@ export class WebRTCManager {
       },
     });
     this.sfu = session;
+    for (const id of this.unwatchedScreens) session.setScreenWatching(id, false);
     for (const id of this.roomPeers.keys()) this.ensureSfuPeer(id);
     this.emitPeersState();
 
@@ -1802,11 +1912,13 @@ export class WebRTCManager {
             packetsLost += Number(r.packetsLost || 0);
             if (typeof r.roundTripTime === 'number') rttMs = Math.round(r.roundTripTime * 1000);
           }
-          if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated !== false) {
-            if (typeof r.currentRoundTripTime === 'number') rttMs = Math.round(r.currentRoundTripTime * 1000);
-            if (r.localCandidateId && localCandidates.get(r.localCandidateId) === 'host') isLan = true;
-          }
         });
+        const sel = readSelectedPath(stats);
+        if (sel.path) {
+          rttMs = sel.rttMs || rttMs;
+          isLan = sel.isLan;
+        }
+        const mediaPath = sel.path || undefined;
         stats.forEach((r) => {
           if (updated || r.type !== 'outbound-rtp' || r.kind !== 'video') return;
           const packetsSent = Number(r.packetsSent || 0);
@@ -1838,13 +1950,16 @@ export class WebRTCManager {
           }
           this.prevPacketsSent = packetsSent;
           this.prevPacketsLost = packetsLost;
+          this.noteEncoderLimit(r.qualityLimitationReason);
           this.localScreenStats = {
+            limited: r.qualityLimitationReason === 'cpu' || this.cpuFpsCap ? 'cpu' : undefined,
             width: Number(r.frameWidth || trackSettings?.width || 0),
             height: Number(r.frameHeight || trackSettings?.height || 0),
             fps: Math.round(Number(r.framesPerSecond || trackSettings?.frameRate || 0)),
             bitrateMbps: mbps,
             codec: ((r.codecId && codecs.get(r.codecId)) || 'VIDEO') + ' · SFU',
             rttMs,
+            path: mediaPath,
             adaptiveTargetMbps: this.screenConfig?.qualityMode === 'auto' ? this.adaptiveBitrateMbps : undefined,
           };
           updated = true;
@@ -1873,10 +1988,10 @@ export class WebRTCManager {
       let rttMs = 0;
       stats.forEach((r) => {
         if (r.type === 'codec' && r.mimeType) codecs.set(r.id, String(r.mimeType).replace('video/', '').toUpperCase());
-        if (r.type === 'candidate-pair' && r.state === 'succeeded' && typeof r.currentRoundTripTime === 'number') {
-          rttMs = Math.round(r.currentRoundTripTime * 1000);
-        }
       });
+      const sel = readSelectedPath(stats);
+      rttMs = sel.rttMs;
+      const mediaPath = sel.path || undefined;
       stats.forEach((r) => {
         if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
         const bytes = Number(r.bytesReceived || 0);
@@ -1896,6 +2011,7 @@ export class WebRTCManager {
           bitrateMbps: mbps,
           codec: ((r.codecId && codecs.get(r.codecId)) || 'VIDEO') + ' · SFU',
           rttMs,
+          path: mediaPath,
         };
         if (isScreen) {
           p.prevScreenBytes = bytes;
@@ -1984,6 +2100,8 @@ export class WebRTCManager {
     description: RTCSessionDescriptionInit;
   }) => {
     if (!this.activeChannelId || this.sfuCaps) return;
+    // endereço de VPN (Radmin/Hamachi) do outro lado fica atrás do caminho direto pela internet (ver icePath.ts)
+    if (description?.sdp) description = { ...description, sdp: deprioritizeVpnInSdp(description.sdp) };
     const ctx = this.createPeerConnection(fromSocketId, null, false);
     ctx.awaitingInitialOffer = false;
     const { pc } = ctx;
@@ -2041,6 +2159,7 @@ export class WebRTCManager {
     candidate: RTCIceCandidateInit;
   }) => {
     if (!candidate || this.sfuCaps) return;
+    candidate = deprioritizeVpnCandidate(candidate);
     const ctx = this.peers.get(fromSocketId);
     if (!ctx || !ctx.pc.remoteDescription || !ctx.pc.localDescription) {
       const list = this.pendingIceCandidates.get(fromSocketId) || [];
@@ -2094,7 +2213,8 @@ export class WebRTCManager {
       let updatedOutbound = false;
 
       for (const ctx of this.peers.values()) {
-        if (!ctx.screenVideoSender) continue;
+        // quem saiu da transmissão não recebe nada: medir ali daria 0 Mbps e derrubaria a qualidade de todos
+        if (!ctx.screenVideoSender || !ctx.screenVideoSender.track) continue;
         const stats = await ctx.pc.getStats();
         let rttMs = 0;
         let packetsLost = 0;
@@ -2109,13 +2229,13 @@ export class WebRTCManager {
             packetsLost += Number(r.packetsLost || 0);
             if (typeof r.roundTripTime === 'number') rttMs = Math.round(r.roundTripTime * 1000);
           }
-          if (r.type === 'candidate-pair' && r.state === 'succeeded') {
-            if (typeof r.currentRoundTripTime === 'number') rttMs = Math.round(r.currentRoundTripTime * 1000);
-            if (r.localCandidateId && localCandidates.get(r.localCandidateId) === 'host') {
-              isLocalLanCandidate = true;
-            }
-          }
         });
+        const sel = readSelectedPath(stats);
+        if (sel.path) {
+          rttMs = sel.rttMs || rttMs;
+          isLocalLanCandidate = sel.isLan;
+        }
+        const mediaPath = sel.path || undefined;
 
         const senderStats = await ctx.screenVideoSender.getStats();
         let packetsSent = 0;
@@ -2157,14 +2277,17 @@ export class WebRTCManager {
             }
             this.prevPacketsSent = packetsSent;
             this.prevPacketsLost = packetsLost;
+            this.noteEncoderLimit(r.qualityLimitationReason);
 
             this.localScreenStats = {
+              limited: r.qualityLimitationReason === 'cpu' || this.cpuFpsCap ? 'cpu' : undefined,
               width: Number(r.frameWidth || trackSettings?.width || 0),
               height: Number(r.frameHeight || trackSettings?.height || 0),
               fps: Math.round(Number(r.framesPerSecond || trackSettings?.frameRate || 0)),
               bitrateMbps: mbps,
               codec: (r.codecId && codecs.get(r.codecId)) || 'H264/VP9',
               rttMs,
+              path: mediaPath,
               adaptiveTargetMbps: this.screenConfig?.qualityMode === 'auto' ? this.adaptiveBitrateMbps : undefined,
             };
             updatedOutbound = true;
@@ -2195,10 +2318,10 @@ export class WebRTCManager {
 
       stats.forEach((r) => {
         if (r.type === 'codec' && r.mimeType) codecs.set(r.id, r.mimeType.replace('video/', '').toUpperCase());
-        if (r.type === 'candidate-pair' && r.state === 'succeeded' && typeof r.currentRoundTripTime === 'number') {
-          rttMs = Math.round(r.currentRoundTripTime * 1000);
-        }
       });
+      const sel = readSelectedPath(stats);
+      rttMs = sel.rttMs;
+      const mediaPath = sel.path || undefined;
 
       const screenTrackId = ctx.media.screenStream?.getVideoTracks()[0]?.id;
       const camTrackId = ctx.media.camStream?.getVideoTracks()[0]?.id;
@@ -2226,6 +2349,7 @@ export class WebRTCManager {
               bitrateMbps: mbps,
               codec,
               rttMs,
+              path: mediaPath,
             };
             peersDirty = true;
           } else if (camTrackId && trackId === camTrackId) {
@@ -2244,6 +2368,7 @@ export class WebRTCManager {
               bitrateMbps: mbps,
               codec,
               rttMs,
+              path: mediaPath,
             };
             peersDirty = true;
           }

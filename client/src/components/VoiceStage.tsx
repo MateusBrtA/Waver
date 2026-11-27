@@ -9,6 +9,8 @@ import {
   CameraOff,
   Clapperboard,
   Crosshair,
+  Eye,
+  EyeOff,
   Gamepad2,
   HeadphoneOff,
   Headphones,
@@ -16,6 +18,7 @@ import {
   Keyboard,
   Maximize2,
   MessageSquare,
+  Minimize2,
   Mic,
   MicOff,
   MonitorCog,
@@ -29,6 +32,7 @@ import {
   PhoneOff,
   PictureInPicture2,
   Pin,
+  PinOff,
   Play,
   RefreshCw,
   RotateCcw,
@@ -56,7 +60,16 @@ import {
   VideoState,
   VoiceParticipant,
 } from '../types';
-import { useIsSpeaking } from '../lib/speakingStore';
+import { isSpeaking, subscribeAnySpeaking, useIsSpeaking } from '../lib/speakingStore';
+import { StageGrid } from './StageGrid';
+import { PATH_LABEL } from '../lib/icePath';
+
+const PATH_HINT: Record<'lan' | 'direct' | 'vpn' | 'relay', string> = {
+  lan: 'Mesma rede: o caminho mais curto possível.',
+  direct: 'Direto pela internet entre os dois PCs (sem passar por VPN nem servidor).',
+  vpn: 'Passando pela VPN (Radmin/Hamachi). Se o ping estiver alto, a VPN está usando um servidor dela no meio: o Waver tenta o caminho direto sozinho, mas o roteador de um dos lados pode estar bloqueando (CGNAT).',
+  relay: 'Passando por um servidor TURN (relé): mais lento que o direto.',
+};
 import { Avatar } from './Avatar';
 import { MusicPlayerPanel } from './MusicPlayerPanel';
 import { SoundboardPanel } from './SoundboardPanel';
@@ -144,6 +157,19 @@ const StatsBadge: React.FC<{ stats: StreamStats | null; label?: string }> = ({ s
       {stats.adaptiveTargetMbps && <span className="text-[#a5b4fc]">• AUTO</span>}
       {stats.codec && <span className="text-[#949ba4]">• {stats.codec}</span>}
       {stats.rttMs > 0 && <span className="text-[#949ba4]">• {stats.rttMs}ms</span>}
+      {stats.path && (
+        <span
+          className={stats.path === 'vpn' || stats.path === 'relay' ? 'text-[#f0b232]' : 'text-[#4ade80]'}
+          title={PATH_HINT[stats.path]}
+        >
+          • {PATH_LABEL[stats.path]}
+        </span>
+      )}
+      {stats.limited === 'cpu' && (
+        <span className="text-[#f0b232]" title="O PC está no limite para codificar a tela: o Waver baixou para 30 fps para não travar.">
+          • CPU
+        </span>
+      )}
     </span>
   );
 };
@@ -253,6 +279,9 @@ interface VoiceStageProps {
   onVideoRate?: (rate: number) => void;
   /** pedido externo para focar uma transmissão (ex.: clique na miniatura da barra lateral) */
   spotlightRequest?: { key: string; seq: number } | null;
+  /** de quem eu saí da transmissão (não baixo nada da tela dessas pessoas) */
+  notWatching?: string[];
+  onSetWatching?: (socketId: string, watching: boolean) => void;
   onVideoNext: () => void;
   onVideoPrev: () => void;
   onVideoEnded: (queueId: string, durationSec?: number) => void;
@@ -349,6 +378,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   onVideoSeek,
   onVideoRate,
   spotlightRequest,
+  notWatching = [],
+  onSetWatching,
   onVideoNext,
   onVideoPrev,
   onVideoEnded,
@@ -357,7 +388,20 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   topBanner,
   extraControls,
 }) => {
+  // quadro em foco: 'watch-party' | 'screen:<sid>' | 'user:<sid>'; null = grade com todos do mesmo tamanho
   const [spotlightKey, setSpotlightKey] = useState<string | null>(null);
+  // fixado: o foco não troca sozinho (quem fala, etc.)
+  const [focusPinned, setFocusPinned] = useState(false);
+  const [stageWeights, setStageWeights] = useState<Record<string, number>>({});
+  // altura do palco escolhida arrastando a borda de baixo (null = automática); o resto da call ocupa o que sobra
+  const [stageHeight, setStageHeight] = useState<number | null>(null);
+  const stageScrollRef = useRef<HTMLDivElement>(null);
+  const changeStageHeight = useCallback((px: number | null) => {
+    if (px === null) return setStageHeight(null);
+    const box = stageScrollRef.current?.clientHeight || 800;
+    // sobra espaço para a faixa de participantes (e o palco nunca fica minúsculo)
+    setStageHeight(Math.round(Math.max(200, Math.min(px, box - 32 - 130))));
+  }, []);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
 
   const canSpeak = isPrivateCall ? true : permissions?.speakVoice !== false;
@@ -587,6 +631,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
       stream: MediaStream;
       stats: StreamStats | null;
       hasAudio: boolean;
+      /** false = saí desta transmissão: o quadro não aparece e nada da tela é baixado */
+      watching: boolean;
     }> = [];
 
     if (localScreenStream) {
@@ -599,6 +645,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
         stream: localScreenStream,
         stats: localScreenStats,
         hasAudio: localScreenStream.getAudioTracks().length > 0,
+        watching: true,
       });
     }
 
@@ -607,6 +654,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
       const media = remotePeers[p.socketId];
       if (media?.screenStream) {
         list.push({
+          watching: !notWatching.includes(p.socketId),
           key: `screen:${p.socketId}`,
           socketId: p.socketId,
           ownerName: p.displayName,
@@ -619,28 +667,50 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
       }
     }
     return list;
-  }, [localScreenStream, localScreenLabel, localScreenStats, participants, remotePeers, selfSocketId, user.displayName]);
+  }, [localScreenStream, localScreenLabel, localScreenStats, participants, remotePeers, selfSocketId, user.displayName, notWatching]);
 
+  const watchedStreams = useMemo(() => activeStreams.filter((s) => s.watching), [activeStreams]);
+  // quadros do palco (vídeo sincronizado + telas que estou assistindo), na ordem da grade
+  const stageKeys = useMemo(() => {
+    const keys: string[] = [];
+    if (hasWatchVideo) keys.push('watch-party');
+    for (const s of watchedStreams) keys.push(s.key);
+    return keys;
+  }, [hasWatchVideo, watchedStreams]);
+  const stageKeysSig = stageKeys.join('|');
+
+  // foco que deixou de existir (a transmissão acabou, a pessoa saiu da call): volta para a grade
   useEffect(() => {
-    const validKeys = new Set(activeStreams.map((s) => s.key));
-    if (hasWatchVideo) validKeys.add('watch-party');
-
-    // Auto-focus Watch-Party square right when the first video is added!
-    if (hasWatchVideo && !prevHasWatchVideoRef.current) {
-      prevHasWatchVideoRef.current = true;
-      setSpotlightKey('watch-party');
-      return;
-    }
-    prevHasWatchVideoRef.current = hasWatchVideo;
-
-    if (validKeys.size > 0) {
-      if (!spotlightKey || !validKeys.has(spotlightKey)) {
-        setSpotlightKey(hasWatchVideo ? 'watch-party' : activeStreams[0]?.key || null);
-      }
-    } else if (spotlightKey) {
+    if (!spotlightKey) return;
+    const valid = spotlightKey.startsWith('user:')
+      ? participants.some((p) => `user:${p.socketId}` === spotlightKey)
+      : stageKeys.includes(spotlightKey);
+    if (!valid) {
       setSpotlightKey(null);
+      setFocusPinned(false);
     }
-  }, [activeStreams, hasWatchVideo, spotlightKey]);
+  }, [spotlightKey, stageKeysSig, participants]);
+  useEffect(() => {
+    prevHasWatchVideoRef.current = hasWatchVideo;
+  }, [hasWatchVideo]);
+
+  const focusTile = useCallback((key: string | null) => {
+    setSpotlightKey(key);
+    if (!key) setFocusPinned(false);
+  }, []);
+  // clicar no quadro em foco desfoca (volta à grade com os tamanhos que a pessoa tinha deixado)
+  const toggleFocusTile = useCallback(
+    (key: string) => {
+      setSpotlightKey((cur) => {
+        if (cur === key) {
+          setFocusPinned(false);
+          return null;
+        }
+        return key;
+      });
+    },
+    []
+  );
 
   // pedido de foco que chegou antes da tela (ex.: acabou de entrar na call) fica pendente até ela aparecer
   const pendingSpotlightRef = useRef<{ key: string; seq: number } | null>(null);
@@ -650,18 +720,81 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
   useEffect(() => {
     const req = pendingSpotlightRef.current;
     if (!req) return;
-    if (activeStreams.some((s) => s.key === req.key)) {
+    if (watchedStreams.some((s) => s.key === req.key)) {
       setSpotlightKey(req.key);
       pendingSpotlightRef.current = null;
     }
-  }, [activeStreams, spotlightRequest?.seq]);
+  }, [watchedStreams, spotlightRequest?.seq]);
 
-  const focusedWatchParty = hasWatchVideo && spotlightKey === 'watch-party';
-  const focusedStream = !focusedWatchParty ? activeStreams.find((s) => s.key === spotlightKey) || null : null;
-  const totalStageCount = activeStreams.length + (hasWatchVideo ? 1 : 0);
-  const hasAnySpotlight = Boolean(focusedStream || focusedWatchParty);
-  const isActivelyControllingFocused =
-    Boolean(rcControllingPeer && focusedStream && !focusedStream.isSelf && focusedStream.socketId === rcControllingPeer.socketId);
+  // Controle remoto: os eventos do mouse/teclado vão no quadro da tela que eu controlo (em qualquer layout)
+  const rcStream =
+    (rcControllingPeer && watchedStreams.find((s) => !s.isSelf && s.socketId === rcControllingPeer.socketId)) || null;
+  const isActivelyControllingFocused = Boolean(rcStream);
+  // ao começar a controlar, a tela dessa pessoa vai para o foco e fica fixada
+  const prevRcKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = rcStream?.key || null;
+    if (key && key !== prevRcKeyRef.current) {
+      setSpotlightKey(key);
+      setFocusPinned(true);
+    }
+    prevRcKeyRef.current = key;
+  }, [rcStream?.key]);
+
+  const userFocusSid = spotlightKey?.startsWith('user:') ? spotlightKey.slice(5) : null;
+  const userFocusParticipant = userFocusSid ? participants.find((p) => p.socketId === userFocusSid) || null : null;
+  const stageFocusKey = spotlightKey && stageKeys.includes(spotlightKey) ? spotlightKey : null;
+  /** tem algo no palco (telas, vídeo ou uma pessoa em foco): as pessoas da call vão para a faixa de baixo */
+  const hasAnySpotlight = stageKeys.length > 0 || Boolean(userFocusParticipant);
+  const anyFocus = Boolean(stageFocusKey || userFocusParticipant);
+
+  // Foco numa pessoa, sem telas nem vídeo: o foco acompanha quem está falando. Se alguém está com a câmera
+  // ligada, alterna só entre essas pessoas. Fixar (pin) desliga.
+  const followRef = useRef({ participants, selfSocketId, remotePeers, localCamStream });
+  followRef.current = { participants, selfSocketId, remotePeers, localCamStream };
+  const followActive = Boolean(userFocusParticipant) && stageKeys.length === 0 && !focusPinned;
+  useEffect(() => {
+    if (!followActive) return;
+    let candidate: string | null = null;
+    let candidateTimer: number | null = null;
+    let lastSwitch = performance.now();
+    const pick = () => {
+      const { participants: ps, selfSocketId: me, remotePeers: rp } = followRef.current;
+      const others = ps.filter((p) => p.socketId !== me);
+      const withCam = others.filter((p) => p.cameraOn || rp[p.socketId]?.camStream);
+      const pool = withCam.length > 0 ? withCam : others;
+      return pool.find((p) => isSpeaking(p.socketId))?.socketId || null;
+    };
+    const check = () => {
+      const sid = pick();
+      if (!sid) return;
+      if (`user:${sid}` === spotlightKeyRef.current) {
+        candidate = null;
+        return;
+      }
+      if (candidate === sid) return;
+      candidate = sid;
+      if (candidateTimer) window.clearTimeout(candidateTimer);
+      // só troca depois de ~0,7 s falando, e o quadro atual fica pelo menos 2 s (sem piscar a cada respiro)
+      const wait = Math.max(700, 2000 - (performance.now() - lastSwitch));
+      candidateTimer = window.setTimeout(() => {
+        candidateTimer = null;
+        if (candidate && isSpeaking(candidate)) {
+          lastSwitch = performance.now();
+          setSpotlightKey(`user:${candidate}`);
+        }
+        candidate = null;
+      }, wait);
+    };
+    const unsub = subscribeAnySpeaking(check);
+    check();
+    return () => {
+      unsub();
+      if (candidateTimer) window.clearTimeout(candidateTimer);
+    };
+  }, [followActive]);
+  const spotlightKeyRef = useRef(spotlightKey);
+  spotlightKeyRef.current = spotlightKey;
 
   const otherParticipants = participants.filter((p) => p.socketId !== selfSocketId);
 
@@ -851,20 +984,487 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     onSendRemoteInput(rcControllingPeer.socketId, { type: 'keyup', code: e.code });
   };
 
-  const handleFullscreen = () => {
-    const el = spotlightContainerRef.current;
+  // cada quadro do palco tem seus botões: a tela cheia / PiP vale para o quadro onde o botão foi clicado
+  const tileOf = (e?: React.SyntheticEvent) =>
+    ((e?.currentTarget as HTMLElement | undefined)?.closest('[data-stage-tile]') as HTMLElement | null) || null;
+
+  const handleFullscreen = (e?: React.SyntheticEvent) => {
+    const el = tileOf(e) || spotlightContainerRef.current;
     if (!el) return;
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     else el.requestFullscreen().catch(() => {});
   };
 
-  const handlePip = async () => {
-    const vid = spotlightVideoRef.current;
+  const handlePip = async (e?: React.SyntheticEvent) => {
+    const vid = (tileOf(e)?.querySelector('video') as HTMLVideoElement | null) || spotlightVideoRef.current;
     if (!vid) return;
     try {
       if (document.pictureInPictureElement) await document.exitPictureInPicture();
       else await vid.requestPictureInPicture();
     } catch {}
+  };
+
+  const focusedKeyAll = stageFocusKey || (userFocusParticipant ? `user:${userFocusParticipant.socketId}` : null);
+
+  /** botões do canto superior direito de cada quadro: fixar (pin) e focar / voltar para a grade */
+  const renderTileCorner = (key: string) => {
+    const focused = focusedKeyAll === key;
+    const canFocus = stageKeys.length > 1 || key.startsWith('user:') || focused;
+    if (!canFocus) return null;
+    const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+    return (
+      <div
+        onClick={stop}
+        onMouseDown={stop}
+        onMouseUp={stop}
+        className={`absolute top-3 right-3 z-20 flex items-center gap-1.5 transition ${
+          focused && focusPinned ? 'opacity-100' : 'opacity-95 sm:opacity-0 sm:group-hover:opacity-100'
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => {
+            if (focused) setFocusPinned((v) => !v);
+            else {
+              setSpotlightKey(key);
+              setFocusPinned(true);
+            }
+          }}
+          className={`p-1.5 rounded-lg cursor-pointer shadow ${
+            focused && focusPinned ? 'bg-[#5865f2] text-white' : 'bg-black/70 text-[#dbdee1] hover:bg-black'
+          }`}
+          title={focused && focusPinned ? 'Soltar (o foco volta a trocar sozinho)' : 'Fixar em tela cheia (o foco não troca sozinho)'}
+        >
+          {focused && focusPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
+        </button>
+        <button
+          type="button"
+          onClick={() => toggleFocusTile(key)}
+          className="p-1.5 rounded-lg bg-black/70 text-[#dbdee1] hover:bg-black cursor-pointer shadow"
+          title={focused ? 'Voltar para a grade' : 'Focar'}
+        >
+          {focused ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+        </button>
+      </div>
+    );
+  };
+
+  /** quadros do palco escondidos pelo foco: atalhos na faixa de baixo para trocar o foco */
+  const renderHiddenStageChips = () =>
+    stageKeys
+      .filter((k) => k !== focusedKeyAll)
+      .map((k) => {
+        const st = k === 'watch-party' ? null : watchedStreams.find((s) => s.key === k);
+        return (
+          <button
+            key={`chip:${k}`}
+            type="button"
+            onClick={() => focusTile(k)}
+            className="w-44 shrink-0 h-full rounded-lg bg-[#111214] border-2 border-[#2b2d31] hover:border-[#5865f2] flex flex-col items-center justify-center gap-1.5 text-xs font-semibold text-white cursor-pointer px-2"
+            title="Focar este quadro"
+          >
+            {k === 'watch-party' ? (
+              <>
+                <Clapperboard className="w-6 h-6 text-[#ff4d6d]" />
+                <span className="truncate max-w-full">{currentWatchVideo?.title || 'Vídeo sincronizado'}</span>
+              </>
+            ) : (
+              <>
+                <MonitorPlay className="w-6 h-6 text-[#f23f42]" />
+                <span className="truncate max-w-full">Tela: {st?.ownerName}</span>
+              </>
+            )}
+          </button>
+        );
+      });
+
+  const renderScreenTile = (st: (typeof activeStreams)[number]) => {
+    const controlling = rcStream?.key === st.key;
+    const focused = stageFocusKey === st.key;
+    const viewers = participants.filter((p) => p.socketId !== st.socketId && !(p.notWatching || []).includes(st.socketId));
+    const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+    return (
+      <div
+        ref={controlling ? spotlightContainerRef : undefined}
+        tabIndex={controlling ? 0 : -1}
+        onMouseMove={controlling ? handleRemoteMouseMove : undefined}
+        onMouseDown={controlling ? handleRemoteMouseDown : undefined}
+        onMouseUp={controlling ? handleRemoteMouseUp : undefined}
+        onWheel={controlling ? handleRemoteWheel : undefined}
+        onKeyDown={controlling ? handleRemoteKeyDown : undefined}
+        onKeyUp={controlling ? handleRemoteKeyUp : undefined}
+        // clicar na tela foca; clicar de novo desfoca (no controle remoto o clique vai para o PC da pessoa)
+        onClick={controlling ? undefined : () => toggleFocusTile(st.key)}
+        onContextMenu={(e) => {
+          if (controlling) e.preventDefault();
+        }}
+        className={`relative w-full h-full bg-black rounded-lg overflow-hidden border-2 shadow-2xl group flex items-center justify-center outline-none ${
+          controlling
+            ? 'border-[#23a55a] cursor-crosshair ring-2 ring-[#23a55a]/40'
+            : focused
+            ? 'border-[#5865f2]/60 cursor-pointer'
+            : 'border-[#2b2d31] hover:border-[#5865f2]/60 cursor-pointer'
+        }`}
+      >
+        <VideoView
+          stream={st.stream}
+          muted={true}
+          videoRefExternal={controlling ? spotlightVideoRef : undefined}
+          className="w-full h-full object-contain pointer-events-none"
+        />
+
+        {controlling && rcRemoteHostBusy && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 pointer-events-none px-3 py-1.5 rounded-md bg-[#111214]/90 text-xs text-[#dbdee1] shadow-lg">
+            <strong className="text-[#f0b232]">{rcControllingPeer?.name}</strong> está mexendo no PC agora. Você volta a controlar quando ele parar.
+          </div>
+        )}
+        {controlling && focusMode && (
+          <div className="pc-focus-hint absolute top-14 right-3 z-10 pointer-events-none px-2.5 py-1 rounded bg-black/70 text-[11px] text-[#b5bac1]">
+            Modo foco: segure <kbd className="px-1 rounded bg-[#2b2d31] text-white">Esc</kbd> para sair
+          </div>
+        )}
+
+        {/* Top-left Stats & Owner Badge */}
+        <div className="absolute top-3 left-3 right-24 flex flex-wrap items-center gap-2 pointer-events-none min-w-0">
+          {showStatsOverlay && <StatsBadge stats={st.stats} label={st.label} />}
+          <span className="px-2.5 py-1 rounded-full bg-black/65 text-xs font-semibold text-white truncate max-w-full">
+            {st.ownerName}
+          </span>
+        </div>
+
+        {renderTileCorner(st.key)}
+
+        {/* quem está assistindo esta transmissão */}
+        <div
+          onClick={stop}
+          className="absolute bottom-3 left-3 z-10 group/viewers"
+        >
+          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-black/70 text-[11px] font-semibold text-white">
+            <Eye className="w-3.5 h-3.5" />
+            {viewers.length}
+          </span>
+          {viewers.length > 0 && (
+            <div className="hidden group-hover/viewers:block absolute bottom-8 left-0 w-48 max-h-48 overflow-y-auto bg-[#111214] border border-[#2b2d31] rounded-lg shadow-2xl p-1.5">
+              <div className="px-1.5 py-1 text-[10px] font-bold uppercase text-[#949ba4]">Assistindo</div>
+              {viewers.map((v) => (
+                <div key={v.socketId} className="px-1.5 py-1 text-xs text-white truncate">
+                  {v.displayName}
+                  {v.socketId === selfSocketId ? ' (você)' : ''}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Stream Controls Overlay */}
+        <div
+          onMouseDown={stop}
+          onMouseUp={stop}
+          onClick={stop}
+          className="absolute bottom-3 right-3 flex items-center gap-2 bg-black/80 px-3 py-2 rounded-lg border border-white/10 opacity-95 sm:opacity-0 sm:group-hover:opacity-100 transition max-w-[calc(100%-5rem)] flex-wrap justify-end"
+        >
+          {st.isSelf ? (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowInviteRcMenu((v) => !v)}
+                disabled={otherParticipants.length === 0}
+                className="px-2.5 py-1.5 rounded-lg bg-[#23a55a] hover:bg-[#1e8e4c] disabled:opacity-40 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                title="Convidar alguém da call para controlar sua tela (AnyDesk)"
+              >
+                <MonitorCog className="w-4 h-4" />
+                Controle Remoto
+              </button>
+              {showInviteRcMenu && otherParticipants.length > 0 && (
+                <div className="absolute bottom-11 right-0 w-52 bg-[#111214] border border-[#2b2d31] rounded-lg shadow-2xl p-1.5 space-y-1 z-30">
+                  <div className="px-2 py-1 text-[10px] font-bold uppercase text-[#949ba4]">Convidar para mexer na tela:</div>
+                  {otherParticipants.map((p) => (
+                    <button
+                      key={p.socketId}
+                      type="button"
+                      onClick={() => {
+                        onInviteRemoteControl(p.socketId);
+                        setShowInviteRcMenu(false);
+                      }}
+                      className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[#5865f2] text-xs font-semibold text-white cursor-pointer truncate"
+                    >
+                      🖱️ {p.displayName}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => (controlling ? onRevokeRemoteControl() : onRequestRemoteControl(st.socketId))}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer ${
+                  controlling ? 'bg-[#da373c] hover:bg-[#b92d31] text-white' : 'bg-[#5865f2] hover:bg-[#4752c4] text-white'
+                }`}
+                title="Pedir permissão para controlar mouse e teclado (AnyDesk)"
+              >
+                <MonitorCog className="w-4 h-4" />
+                {controlling ? 'Parar Controle' : 'Pedir Controle'}
+              </button>
+              {!controlling && onSetWatching && (
+                <button
+                  type="button"
+                  onClick={() => onSetWatching(st.socketId, false)}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer bg-[#4e5058] hover:bg-[#6d6f78] text-white"
+                  title="Sair da transmissão: você continua só no áudio da call e não baixa nada desta tela"
+                >
+                  <EyeOff className="w-4 h-4" />
+                  Parar de assistir
+                </button>
+              )}
+            </>
+          )}
+
+          {!st.isSelf && st.hasAudio && (
+            <div className="flex items-center gap-2 px-2 border-l border-r border-white/15">
+              <Volume2 className="w-4 h-4 text-[#23a55a]" />
+              <input
+                type="range"
+                min={0}
+                max={1.5}
+                step={0.05}
+                value={streamAudioVolume}
+                onChange={(e) => onStreamAudioVolumeChange(Number(e.target.value))}
+                className="w-20 accent-[#23a55a] cursor-pointer"
+              />
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setShowStatsOverlay((v) => !v)}
+            className={`p-1.5 rounded-lg cursor-pointer ${showStatsOverlay ? 'bg-[#5865f2] text-white' : 'text-[#dbdee1] hover:bg-white/10'}`}
+            title="Estatísticas da transmissão"
+          >
+            <Activity className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={handlePip}
+            className="p-1.5 rounded-lg text-[#dbdee1] hover:bg-white/10 cursor-pointer"
+            title="Picture-in-Picture"
+          >
+            <PictureInPicture2 className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={handleFullscreen}
+            className="p-1.5 rounded-lg text-[#dbdee1] hover:bg-white/10 cursor-pointer"
+            title="Tela cheia"
+          >
+            <Maximize2 className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  /** card de uma pessoa da call: na grade, na faixa de baixo ou em foco (grande, no palco) */
+  const renderParticipantCard = (p: VoiceParticipant, variant: 'grid' | 'strip' | 'focus') => {
+    const isSelf = p.socketId === selfSocketId;
+    const remote = remotePeers[p.socketId];
+    const camStream = isSelf ? localCamStream : remote?.camStream || null;
+    const isSoundboardActive = soundboardActiveUserIds.has(p.userId);
+    const vol = peerVolumes[p.socketId] ?? peerVolumes[p.userId] ?? 1;
+    const memberObj = members.find((m) => m.id === p.userId);
+    const focusKeyOfCard = `user:${p.socketId}`;
+    const isFocusedCard = focusedKeyAll === focusKeyOfCard;
+    const unwatchedLive = !isSelf && p.screenSharing && notWatching.includes(p.socketId);
+    const watchedLive = !isSelf && p.screenSharing && !unwatchedLive && stageKeys.includes(`screen:${p.socketId}`);
+    const big = variant !== 'strip';
+
+    return (
+      <div
+        key={variant === 'focus' ? `focus:${p.socketId}` : p.socketId}
+        // clicar foca o card (clicar de novo desfoca); o perfil abre clicando no nome ou com o botão direito
+        onClick={() => toggleFocusTile(focusKeyOfCard)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          if (memberObj) {
+            onUserContextMenu(memberObj, e, {
+              socketId: p.socketId,
+              isSharingScreen: p.screenSharing,
+            });
+          }
+        }}
+        className={`relative rounded-lg bg-[#2b2d31] border-2 overflow-hidden flex flex-col items-center justify-center transition select-none cursor-pointer group ${
+          variant === 'strip'
+            ? stageHeight
+              ? 'shrink-0 h-full aspect-video min-w-[13rem]'
+              : 'w-52 shrink-0 h-full'
+            : variant === 'focus'
+            ? 'w-full h-full'
+            : 'min-h-[200px] aspect-video max-h-[60vh]'
+        } ${
+          isSoundboardActive
+            ? 'border-[#f0b232]'
+            : isFocusedCard && variant === 'strip'
+            ? 'border-[#5865f2]'
+            : 'border-transparent hover:border-white/10'
+        }`}
+      >
+        <SpeakingOutline socketId={p.socketId} />
+        {camStream ? (
+          <VideoView
+            stream={camStream}
+            muted={true}
+            mirror={isSelf}
+            className={`w-full h-full ${variant === 'focus' ? 'object-contain bg-black' : 'object-cover'}`}
+          />
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-2 p-4">
+            <Avatar
+              name={p.displayName}
+              avatarUrl={p.avatarUrl}
+              color={p.avatarColor}
+              decoration={p.avatarDecoration}
+              serverUrl={serverUrl}
+              size={big ? 'xl' : 'md'}
+              speakingId={p.socketId}
+              soundboardActive={isSoundboardActive}
+            />
+          </div>
+        )}
+
+        {isSoundboardActive && (
+          <span className="absolute top-2 left-2 text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#22c55e] text-[#051109] shadow animate-pulse flex items-center gap-1">
+            <Zap className="w-3 h-3" />
+            Soundboard
+          </span>
+        )}
+
+        {/* saiu da transmissão desta pessoa: volta a assistir com um clique */}
+        {unwatchedLive && onSetWatching && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSetWatching(p.socketId, true);
+              pendingSpotlightRef.current = { key: `screen:${p.socketId}`, seq: Date.now() };
+            }}
+            className={`absolute left-1/2 -translate-x-1/2 z-20 px-2.5 py-1 rounded-lg bg-[#f23f42] hover:bg-[#d83c3e] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow ${
+              big ? 'top-1/2 translate-y-8' : 'top-2'
+            }`}
+            title="Voltar a assistir a transmissão"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            Assistir
+          </button>
+        )}
+
+        {variant === 'focus' && renderTileCorner(focusKeyOfCard)}
+
+        <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-1">
+          <div className="flex items-center gap-1.5 bg-black/65 px-2 py-1 rounded-lg max-w-[75%]">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (memberObj) onUserClick(memberObj, e);
+              }}
+              className="text-xs font-semibold text-white truncate hover:underline cursor-pointer"
+              title="Ver perfil"
+            >
+              {p.displayName}
+              {isSelf ? ' (você)' : ''}
+            </button>
+            {p.screenSharing && (
+              <span
+                onClick={(e) => {
+                  if (!watchedLive) return;
+                  e.stopPropagation();
+                  focusTile(`screen:${p.socketId}`);
+                }}
+                className={`text-[9px] font-bold bg-[#f23f42] text-white px-1.5 py-0.5 rounded ${watchedLive ? 'cursor-pointer' : ''}`}
+                title={watchedLive ? 'Focar a transmissão' : undefined}
+              >
+                AO VIVO
+              </span>
+            )}
+            {p.recording && (
+              <span
+                className="text-[9px] font-bold bg-black/80 text-[#f23f42] px-1.5 py-0.5 rounded flex items-center gap-1"
+                title={p.recording === 'record' ? 'Gravando a chamada' : 'Guardando clipes da chamada'}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-[#f23f42] animate-pulse" />
+                {p.recording === 'record' ? 'REC' : 'CLIPES'}
+              </span>
+            )}
+            {p.handRaised && <span title="Levantou a mão">✋</span>}
+            {p.stageRole === 'audience' && (
+              <span className="text-[9px] font-bold bg-[#4e5058] text-white px-1.5 py-0.5 rounded">PLATEIA</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1">
+            {p.deafened || p.serverDeafened ? (
+              <span className="p-1 rounded-md bg-[#f23f42]/85 text-white">
+                <HeadphoneOff className="w-3 h-3" />
+              </span>
+            ) : p.muted || p.serverMuted ? (
+              <span className="p-1 rounded-md bg-[#f23f42]/85 text-white">
+                <MicOff className="w-3 h-3" />
+              </span>
+            ) : null}
+
+            {!isSelf && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setVolumePopoverId((cur) => (cur === p.socketId ? null : p.socketId));
+                }}
+                className="p-1 rounded-md bg-black/65 hover:bg-black/90 text-[#dbdee1] cursor-pointer"
+                title="Volume deste amigo"
+              >
+                <Volume2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {!isSelf && volumePopoverId === p.socketId && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="absolute inset-x-2 top-2 z-20 bg-[#2b2d31]/95 border border-[#4e5058] rounded-lg p-2.5 shadow-xl space-y-1.5"
+          >
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-semibold text-white truncate">Volume: {p.displayName}</span>
+              <span className="font-mono text-[#4ade80]">{Math.round(vol * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={2}
+              step={0.05}
+              value={vol}
+              onChange={(e) => onPeerVolumeChange(p.socketId, Number(e.target.value))}
+              className="w-full accent-[#23a55a] cursor-pointer"
+            />
+          </div>
+        )}
+
+        {!isSelf && remote && remote.connectionState !== 'connected' && (
+          <span
+            className={`absolute right-2 text-[10px] px-2 py-0.5 rounded-full bg-black/70 text-[#f0b232] ${
+              variant === 'focus' ? 'top-14' : 'top-2'
+            }`}
+          >
+            {remote.connectionState === 'connecting'
+              ? remote.viaSfu
+                ? 'Conectando ao servidor...'
+                : 'Conectando P2P...'
+              : remote.connectionState}
+          </span>
+        )}
+      </div>
+    );
   };
 
   const currentMusic = musicState && musicState.currentIndex >= 0 ? musicState.queue[musicState.currentIndex] : null;
@@ -1216,7 +1816,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                   {focusMode ? 'Sair do modo foco' : 'Modo foco'}
                 </button>
               )}
-              {canSendMouse && focusedStream && !focusedStream.isSelf && (
+              {canSendMouse && rcStream && (
                 <button
                   type="button"
                   onClick={() => {
@@ -1262,7 +1862,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
         )}
 
         {/* Main Video / Screen / Watch-Party / Whiteboard Stage */}
-        <div className="flex-1 flex flex-col p-4 gap-3 overflow-y-auto min-h-0">
+        <div ref={stageScrollRef} className="flex-1 flex flex-col p-4 gap-3 overflow-y-auto min-h-0">
           {showWhiteboard && !backgrounded && (
             socket ? (
               // mesma altura do palco (igual ao player de vídeo); o resto da call fica abaixo, rolando
@@ -1286,10 +1886,23 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
               </div>
             )
           )}
-          {focusedWatchParty && currentWatchVideo && (
+          {hasAnySpotlight && (
+            <StageGrid
+              className="flex-1 min-h-[300px] -m-1"
+              focusKey={stageFocusKey || (userFocusParticipant ? `user:${userFocusParticipant.socketId}` : null)}
+              weights={stageWeights}
+              onWeightsChange={setStageWeights}
+              onCollapseTo={focusTile}
+              heightPx={stageHeight}
+              onHeightChange={changeStageHeight}
+              tiles={[
+                ...(currentWatchVideo
+                  ? [
+                      {
+                        key: 'watch-party',
+                        content: (
             <div
-              ref={spotlightContainerRef}
-              className="relative flex-1 min-h-[300px] bg-black rounded-lg overflow-hidden border-2 border-[#ff0033]/65 shadow-2xl group flex flex-col items-center justify-center"
+              className="relative w-full h-full bg-black rounded-lg overflow-hidden border-2 border-[#ff0033]/65 shadow-2xl group flex flex-col items-center justify-center"
             >
               {useYouTubeWatchPlayer && currentWatchVideo.youtubeId ? (
                 <YouTubeSyncPlayer
@@ -1498,30 +2111,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                 </span>
               </div>
 
-              {/* Switch between Watch-Party & any Screen Shares */}
-              <div className="absolute top-3 right-3 flex flex-wrap gap-1.5 z-10">
-                {totalStageCount > 1 && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => setSpotlightKey('watch-party')}
-                      className="px-2.5 py-1 rounded-lg text-xs font-bold bg-[#ff0033] text-white cursor-pointer"
-                    >
-                      🎬 Vídeo Sync
-                    </button>
-                    {activeStreams.map((st) => (
-                      <button
-                        key={st.key}
-                        type="button"
-                        onClick={() => setSpotlightKey(st.key)}
-                        className="px-2.5 py-1 rounded-lg text-xs font-bold bg-black/70 text-[#dbdee1] hover:bg-black cursor-pointer"
-                      >
-                        Tela: {st.ownerName}
-                      </button>
-                    ))}
-                  </>
-                )}
-              </div>
+              {renderTileCorner('watch-party')}
 
               {/* Bottom Interactive YouTube-Style Watch-Party Controls Bar */}
               <div className="absolute bottom-3 left-3 right-3 bg-gradient-to-t from-black/95 via-black/85 to-black/70 border border-white/10 rounded-lg px-3.5 py-2 flex flex-col gap-1.5 opacity-95 sm:opacity-0 sm:group-hover:opacity-100 transition z-10">
@@ -1778,182 +2368,16 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                 </div>
               </div>
             </div>
-          )}
-
-          {focusedStream && (
-            <div
-              ref={spotlightContainerRef}
-              tabIndex={isActivelyControllingFocused ? 0 : -1}
-              onMouseMove={handleRemoteMouseMove}
-              onMouseDown={handleRemoteMouseDown}
-              onMouseUp={handleRemoteMouseUp}
-              onWheel={handleRemoteWheel}
-              onKeyDown={handleRemoteKeyDown}
-              onKeyUp={handleRemoteKeyUp}
-              onContextMenu={(e) => {
-                if (isActivelyControllingFocused) e.preventDefault();
-              }}
-              className={`relative flex-1 min-h-[300px] bg-black rounded-lg overflow-hidden border-2 shadow-2xl group flex items-center justify-center outline-none ${
-                isActivelyControllingFocused
-                  ? 'border-[#23a55a] cursor-crosshair ring-2 ring-[#23a55a]/40'
-                  : 'border-[#2b2d31]'
-              }`}
-            >
-              <VideoView
-                stream={focusedStream.stream}
-                muted={true}
-                videoRefExternal={spotlightVideoRef}
-                className="w-full h-full object-contain pointer-events-none"
-              />
-
-              {isActivelyControllingFocused && rcRemoteHostBusy && (
-                <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 pointer-events-none px-3 py-1.5 rounded-md bg-[#111214]/90 text-xs text-[#dbdee1] shadow-lg">
-                  <strong className="text-[#f0b232]">{rcControllingPeer?.name}</strong> está mexendo no PC agora. Você volta a controlar quando ele parar.
-                </div>
-              )}
-              {isActivelyControllingFocused && focusMode && (
-                <div className="pc-focus-hint absolute top-3 right-3 z-10 pointer-events-none px-2.5 py-1 rounded bg-black/70 text-[11px] text-[#b5bac1]">
-                  Modo foco: segure <kbd className="px-1 rounded bg-[#2b2d31] text-white">Esc</kbd> para sair
-                </div>
-              )}
-
-              {/* Top-left Stats & Owner Badge */}
-              <div className="absolute top-3 left-3 flex flex-wrap items-center gap-2 pointer-events-none">
-                {showStatsOverlay && <StatsBadge stats={focusedStream.stats} label={focusedStream.label} />}
-                <span className="px-2.5 py-1 rounded-full bg-black/65 text-xs font-semibold text-white">
-                  {focusedStream.ownerName}
-                </span>
-              </div>
-
-              {/* Stream Controls Overlay */}
-              <div
-                onMouseDown={(e) => e.stopPropagation()}
-                onMouseUp={(e) => e.stopPropagation()}
-                className="absolute bottom-3 right-3 flex items-center gap-2 bg-black/80 px-3 py-2 rounded-lg border border-white/10 opacity-95 sm:opacity-0 sm:group-hover:opacity-100 transition"
-              >
-                {/* AnyDesk Remote Control Button */}
-                {focusedStream.isSelf ? (
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setShowInviteRcMenu((v) => !v)}
-                      disabled={otherParticipants.length === 0}
-                      className="px-2.5 py-1.5 rounded-lg bg-[#23a55a] hover:bg-[#1e8e4c] disabled:opacity-40 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                      title="Convidar alguém da call para controlar sua tela (AnyDesk)"
-                    >
-                      <MonitorCog className="w-4 h-4" />
-                      Controle Remoto
-                    </button>
-                    {showInviteRcMenu && otherParticipants.length > 0 && (
-                      <div className="absolute bottom-11 right-0 w-52 bg-[#111214] border border-[#2b2d31] rounded-lg shadow-2xl p-1.5 space-y-1">
-                        <div className="px-2 py-1 text-[10px] font-bold uppercase text-[#949ba4]">
-                          Convidar para mexer na tela:
-                        </div>
-                        {otherParticipants.map((p) => (
-                          <button
-                            key={p.socketId}
-                            type="button"
-                            onClick={() => {
-                              onInviteRemoteControl(p.socketId);
-                              setShowInviteRcMenu(false);
-                            }}
-                            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[#5865f2] text-xs font-semibold text-white cursor-pointer truncate"
-                          >
-                            🖱️ {p.displayName}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      isActivelyControllingFocused
-                        ? onRevokeRemoteControl()
-                        : onRequestRemoteControl(focusedStream.socketId)
-                    }
-                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer ${
-                      isActivelyControllingFocused
-                        ? 'bg-[#da373c] hover:bg-[#b92d31] text-white'
-                        : 'bg-[#5865f2] hover:bg-[#4752c4] text-white'
-                    }`}
-                    title="Pedir permissão para controlar mouse e teclado (AnyDesk)"
-                  >
-                    <MonitorCog className="w-4 h-4" />
-                    {isActivelyControllingFocused ? 'Parar Controle' : 'Pedir Controle'}
-                  </button>
-                )}
-
-                {!focusedStream.isSelf && focusedStream.hasAudio && (
-                  <div className="flex items-center gap-2 px-2 border-l border-r border-white/15">
-                    <Volume2 className="w-4 h-4 text-[#23a55a]" />
-                    <input
-                      type="range"
-                      min={0}
-                      max={1.5}
-                      step={0.05}
-                      value={streamAudioVolume}
-                      onChange={(e) => onStreamAudioVolumeChange(Number(e.target.value))}
-                      className="w-20 accent-[#23a55a] cursor-pointer"
-                    />
-                  </div>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setShowStatsOverlay((v) => !v)}
-                  className={`p-1.5 rounded-lg cursor-pointer ${
-                    showStatsOverlay ? 'bg-[#5865f2] text-white' : 'text-[#dbdee1] hover:bg-white/10'
-                  }`}
-                  title="Estatísticas da transmissão"
-                >
-                  <Activity className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handlePip}
-                  className="p-1.5 rounded-lg text-[#dbdee1] hover:bg-white/10 cursor-pointer"
-                  title="Picture-in-Picture"
-                >
-                  <PictureInPicture2 className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleFullscreen}
-                  className="p-1.5 rounded-lg text-[#dbdee1] hover:bg-white/10 cursor-pointer"
-                  title="Tela cheia"
-                >
-                  <Maximize2 className="w-4 h-4" />
-                </button>
-              </div>
-
-              {totalStageCount > 1 && (
-                <div className="absolute top-3 right-3 flex flex-wrap gap-1.5">
-                  {hasWatchVideo && (
-                    <button
-                      type="button"
-                      onClick={() => setSpotlightKey('watch-party')}
-                      className="px-2.5 py-1 rounded-lg text-xs font-bold bg-black/70 text-[#fda4af] hover:bg-[#f43f5e] hover:text-white cursor-pointer"
-                    >
-                      🎬 Vídeo Sync
-                    </button>
-                  )}
-                  {activeStreams.map((st) => (
-                    <button
-                      key={st.key}
-                      type="button"
-                      onClick={() => setSpotlightKey(st.key)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer ${
-                        st.key === focusedStream.key ? 'bg-[#5865f2] text-white' : 'bg-black/70 text-[#dbdee1]'
-                      }`}
-                    >
-                      Tela: {st.ownerName}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+                        ),
+                      },
+                    ]
+                  : []),
+                ...watchedStreams.map((st) => ({ key: st.key, content: renderScreenTile(st) })),
+                ...(userFocusParticipant
+                  ? [{ key: `user:${userFocusParticipant.socketId}`, content: renderParticipantCard(userFocusParticipant, 'focus') }]
+                  : []),
+              ]}
+            />
           )}
 
           {topBanner}
@@ -1962,7 +2386,9 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
           <div
             className={
               hasAnySpotlight
-                ? 'flex gap-3 overflow-x-auto pb-1 shrink-0 h-36'
+                ? stageHeight
+                  ? 'flex gap-3 overflow-x-auto pb-1 flex-1 min-h-[9rem]'
+                  : 'flex gap-3 overflow-x-auto pb-1 shrink-0 h-36'
                 : 'flex-1 grid gap-3 auto-rows-fr place-content-center'
             }
             style={
@@ -1978,144 +2404,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                 : undefined
             }
           >
-            {participants.map((p) => {
-              const isSelf = p.socketId === selfSocketId;
-              const remote = remotePeers[p.socketId];
-              const camStream = isSelf ? localCamStream : remote?.camStream || null;
-              const isSoundboardActive = soundboardActiveUserIds.has(p.userId);
-              const vol = peerVolumes[p.socketId] ?? peerVolumes[p.userId] ?? 1;
-              const memberObj = members.find((m) => m.id === p.userId);
-
-              return (
-                <div
-                  key={p.socketId}
-                  onClick={(e) => memberObj && onUserClick(memberObj, e)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (memberObj) {
-                      onUserContextMenu(memberObj, e, {
-                        socketId: p.socketId,
-                        isSharingScreen: p.screenSharing,
-                      });
-                    }
-                  }}
-                  className={`relative rounded-lg bg-[#2b2d31] border-2 overflow-hidden flex flex-col items-center justify-center transition select-none cursor-pointer ${
-                    hasAnySpotlight ? 'w-52 shrink-0 h-full' : 'min-h-[200px] aspect-video max-h-[60vh]'
-                  } ${
-                    isSoundboardActive ? 'border-[#f0b232]' : 'border-transparent'
-                  }`}
-                >
-                  <SpeakingOutline socketId={p.socketId} />
-                  {camStream ? (
-                    <VideoView stream={camStream} muted={true} mirror={isSelf} className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center gap-2 p-4">
-                      <Avatar
-                        name={p.displayName}
-                        avatarUrl={p.avatarUrl}
-                        color={p.avatarColor}
-                        decoration={p.avatarDecoration}
-                        serverUrl={serverUrl}
-                        size={hasAnySpotlight ? 'md' : 'xl'}
-                        speakingId={p.socketId}
-                        soundboardActive={isSoundboardActive}
-                      />
-                    </div>
-                  )}
-
-                  {isSoundboardActive && (
-                    <span className="absolute top-2 left-2 text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#22c55e] text-[#051109] shadow animate-pulse flex items-center gap-1">
-                      <Zap className="w-3 h-3" />
-                      Soundboard
-                    </span>
-                  )}
-
-                  <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-1">
-                    <div className="flex items-center gap-1.5 bg-black/65 px-2 py-1 rounded-lg max-w-[75%]">
-                      <span className="text-xs font-semibold text-white truncate">
-                        {p.displayName}
-                        {isSelf ? ' (você)' : ''}
-                      </span>
-                      {p.screenSharing && (
-                        <span className="text-[9px] font-bold bg-[#f23f42] text-white px-1.5 py-0.5 rounded">
-                          AO VIVO
-                        </span>
-                      )}
-                      {p.recording && (
-                        <span
-                          className="text-[9px] font-bold bg-black/80 text-[#f23f42] px-1.5 py-0.5 rounded flex items-center gap-1"
-                          title={p.recording === 'record' ? 'Gravando a chamada' : 'Guardando clipes da chamada'}
-                        >
-                          <span className="w-1.5 h-1.5 rounded-full bg-[#f23f42] animate-pulse" />
-                          {p.recording === 'record' ? 'REC' : 'CLIPES'}
-                        </span>
-                      )}
-                      {p.handRaised && <span title="Levantou a mão">✋</span>}
-                      {p.stageRole === 'audience' && (
-                        <span className="text-[9px] font-bold bg-[#4e5058] text-white px-1.5 py-0.5 rounded">PLATEIA</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-1">
-                      {p.deafened || p.serverDeafened ? (
-                        <span className="p-1 rounded-md bg-[#f23f42]/85 text-white">
-                          <HeadphoneOff className="w-3 h-3" />
-                        </span>
-                      ) : p.muted || p.serverMuted ? (
-                        <span className="p-1 rounded-md bg-[#f23f42]/85 text-white">
-                          <MicOff className="w-3 h-3" />
-                        </span>
-                      ) : null}
-
-                      {!isSelf && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setVolumePopoverId((cur) => (cur === p.socketId ? null : p.socketId));
-                          }}
-                          className="p-1 rounded-md bg-black/65 hover:bg-black/90 text-[#dbdee1] cursor-pointer"
-                          title="Volume deste amigo"
-                        >
-                          <Volume2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {!isSelf && volumePopoverId === p.socketId && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      className="absolute inset-x-2 top-2 z-20 bg-[#2b2d31]/95 border border-[#4e5058] rounded-lg p-2.5 shadow-xl space-y-1.5"
-                    >
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="font-semibold text-white truncate">Volume: {p.displayName}</span>
-                        <span className="font-mono text-[#4ade80]">{Math.round(vol * 100)}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min={0}
-                        max={2}
-                        step={0.05}
-                        value={vol}
-                        onChange={(e) => onPeerVolumeChange(p.socketId, Number(e.target.value))}
-                        className="w-full accent-[#23a55a] cursor-pointer"
-                      />
-                    </div>
-                  )}
-
-                  {!isSelf && remote && remote.connectionState !== 'connected' && (
-                    <span className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full bg-black/70 text-[#f0b232]">
-                      {remote.connectionState === 'connecting'
-                        ? remote.viaSfu
-                          ? 'Conectando ao servidor...'
-                          : 'Conectando P2P...'
-                        : remote.connectionState}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
+            {anyFocus && renderHiddenStageChips()}
+            {participants.map((p) => renderParticipantCard(p, hasAnySpotlight ? 'strip' : 'grid'))}
           </div>
         </div>
 

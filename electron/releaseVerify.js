@@ -7,13 +7,21 @@ const path = require('node:path');
 const UI_SIG_NAME = 'pulsecord-ui.sig.json';
 
 function loadPublicKey() {
-  try {
-    const j = JSON.parse(fs.readFileSync(path.join(__dirname, 'release-public-key.json'), 'utf8'));
-    const k = crypto.createPublicKey({ key: Buffer.from(String(j.pub), 'base64'), format: 'der', type: 'spki' });
-    return k.asymmetricKeyType === 'ed25519' ? k : null;
-  } catch {
-    return null;
+  // A chave vale sempre a de dentro do .exe: rodando uma atualização leve (app-live), este arquivo está fora do
+  // .exe e a pasta baixada nem traz a chave (appPack.isSafeRel não deixa).
+  const candidates = [];
+  if (process.env.WAVER_LIVE_APP_DIR && process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, 'app.asar', 'electron', 'release-public-key.json'));
   }
+  candidates.push(path.join(__dirname, 'release-public-key.json'));
+  for (const file of candidates) {
+    try {
+      const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const k = crypto.createPublicKey({ key: Buffer.from(String(j.pub), 'base64'), format: 'der', type: 'spki' });
+      if (k.asymmetricKeyType === 'ed25519') return k;
+    } catch {}
+  }
+  return null;
 }
 
 function compareVersions(a, b) {
@@ -98,4 +106,12 @@ function verifyInstallerSignatureObject(sig, currentVersion, publicKey = loadPub
   return { kind: sig.kind, version: String(sig.version), sha256: sig.sha256 };
 }
 
-module.exports = { verifyUiBundle, verifyInstallerSignature, verifyInstallerSignatureObject, compareVersions, UI_SIG_NAME, hasReleaseKey: () => Boolean(loadPublicKey()) };
+module.exports = {
+  verifyUiBundle,
+  verifyInstallerSignature,
+  verifyInstallerSignatureObject,
+  compareVersions,
+  UI_SIG_NAME,
+  hasReleaseKey: () => Boolean(loadPublicKey()),
+  getPublicKey: () => loadPublicKey(),
+};
