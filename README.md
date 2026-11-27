@@ -144,6 +144,8 @@ journalctl -u pulsecord -f     # logs ao vivo
 - **Blocos de código** com detecção da linguagem.
 - **GIFs** pelo KLIPY ou GIPHY (com a chave do dono do servidor) mais os GIFs enviados pelo próprio grupo, e favoritos.
 - **Mensagens diretas e grupos** com ícone e nome próprios.
+- **Mensagens novas:** uma bolinha branca à direita do canal e no canto do ícone do servidor (também dos outros servidores salvos) mostra onde chegou mensagem que você ainda não viu. Dentro do chat, se você subiu ou chegou mensagem lá embaixo, uma seta leva de volta ao fim.
+- **Rolagem:** o chat abre sempre no fim (mesmo com o app abrindo minimizado ou imagens ainda carregando) e, ao trocar de conversa e voltar, continua onde você parou.
 - **Mensagens salvas no PC:** as últimas 150 de cada canal ficam guardadas comprimidas e criptografadas (AES-256-GCM, chave protegida pelo Windows), separadas por servidor e conta. O canal abre na hora e o servidor atualiza em seguida. Sair da conta não apaga: ao entrar de novo, as conversas voltam.
 
 ### Voz e vídeo

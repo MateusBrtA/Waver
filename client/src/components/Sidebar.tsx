@@ -86,6 +86,8 @@ interface SidebarProps {
   pinnedChannelIds?: Set<string>;
   mutedChannelIds?: Set<string>;
   hideMutedChannels?: boolean;
+  /** canais de texto com mensagens novas (bolinha branca à direita) */
+  unreadChannelIds?: Set<string>;
   activeTextChannelId: string;
   activeVoiceChannelId: string | null;
   activeVoiceLabel: string;
@@ -178,6 +180,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   favoriteChannelIds,
   pinnedChannelIds,
   mutedChannelIds,
+  unreadChannelIds,
   hideMutedChannels = false,
   activeTextChannelId,
   activeVoiceChannelId,
@@ -802,6 +805,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 const isPinned = Boolean(pinnedChannelIds?.has(ch.id));
                 if (ch.type === 'text') {
                   const selected = viewMode === 'chat' && activeTextChannelId === ch.id;
+                  const hasUnread = !selected && !isMuted && Boolean(unreadChannelIds?.has(ch.id));
                   const canDelete =
                     channels.filter((x) => x.type === 'text').length > 1 &&
                     (canManageChannels || ch.createdBy === user.displayName);
@@ -824,6 +828,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           ? 'bg-[#404249] text-white font-medium'
                           : isMuted
                           ? 'text-[#6d6f78] hover:bg-[#35373c] hover:text-[#b5bac1]'
+                          : hasUnread
+                          ? 'text-white font-semibold hover:bg-[#35373c]'
                           : 'text-[#949ba4] hover:bg-[#35373c] hover:text-[#dbdee1]'
                       }`}
                     >
@@ -865,6 +871,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
+                        )}
+                        {hasUnread && (
+                          <span className="w-2 h-2 ml-1 mr-0.5 rounded-full bg-white shrink-0" title="Mensagens novas" />
                         )}
                       </div>
                     </div>

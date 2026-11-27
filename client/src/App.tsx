@@ -30,6 +30,16 @@ import {
   serverKey,
   upsertSavedServer,
 } from './lib/savedServers';
+import {
+  ChannelActivity,
+  ReadMap,
+  loadReadMap,
+  loadSelfId,
+  rememberSelfId,
+  saveReadMap,
+  seedReadMap,
+  unreadChannels,
+} from './lib/readState';
 import { WebRTCManager } from './lib/webrtc';
 import { SfuJoinInfo, sfuSupported } from './lib/sfuSession';
 import {
@@ -366,6 +376,11 @@ export default function App() {
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
   const [groupMessagesById, setGroupMessagesById] = useState<Record<string, ChatMessage[]>>({});
   const [unreadByGroup, setUnreadByGroup] = useState<Record<string, number>>({});
+  // mensagens novas nos canais do servidor: última mensagem de cada canal x até onde li (neste PC)
+  const [channelActivity, setChannelActivity] = useState<ChannelActivity>({});
+  const [channelActivitySeq, setChannelActivitySeq] = useState(0);
+  const [readMap, setReadMap] = useState<ReadMap | null>(null);
+  const [otherServerUnread, setOtherServerUnread] = useState<Record<string, boolean>>({});
   const [typingByChannel, setTypingByChannel] = useState<Record<string, Record<string, string>>>({});
   const [sounds, setSounds] = useState<SoundItem[]>([]);
   const [savedGifs, setSavedGifs] = useState<GifItem[]>([]);
@@ -1666,6 +1681,7 @@ export default function App() {
       (data: {
         server: ServerInfo;
         channels: Channel[];
+        channelActivity?: ChannelActivity;
         categories?: ChannelCategory[];
         roles?: Role[];
         members: User[];
@@ -1676,6 +1692,9 @@ export default function App() {
       }) => {
         setServer(data.server);
         setChannels(data.channels);
+        // servidor antigo (sem channelActivity): só as mensagens que chegarem com o app aberto acendem a bolinha
+        setChannelActivity(data.channelActivity && typeof data.channelActivity === 'object' ? data.channelActivity : {});
+        setChannelActivitySeq((n) => n + 1);
         if (Array.isArray(data.categories)) setCategories(data.categories);
         if (Array.isArray(data.roles)) setRoles(data.roles);
         if (Array.isArray(data.dmGroups)) setDmGroups((prev) => mergePrivateGroups(prev, data.dmGroups || []));
@@ -1799,6 +1818,13 @@ export default function App() {
         return { ...prev, [msg.channelId]: nextList };
       });
       desktopNotifyRef.current(msg, 'channel');
+      if (msg?.channelId && Number(msg.createdAt)) {
+        setChannelActivity((prev) => {
+          const cur = prev[msg.channelId];
+          if (cur && cur.at >= Number(msg.createdAt)) return prev;
+          return { ...prev, [msg.channelId]: { at: Number(msg.createdAt), authorId: msg.authorId } };
+        });
+      }
     });
 
     socket.on('chat:message-updated', ({ channelId, message }: { channelId: string; message: ChatMessage }) => {
@@ -2219,6 +2245,102 @@ export default function App() {
       }
     }, 1500);
   }, [messagesByChannel, msgCacheScope]);
+
+  // ---- Mensagens novas (bolinha nos canais e no ícone do servidor) ----
+  useEffect(() => {
+    setChannelActivity({});
+    setReadMap(null);
+  }, [serverUrl]);
+  useEffect(() => {
+    if (user?.id && serverUrl) rememberSelfId(serverUrl, user.id);
+  }, [user?.id, serverUrl]);
+  // chegou a lista do servidor: carrega até onde li (na 1ª vez neste servidor, o que já existe conta como lido)
+  useEffect(() => {
+    if (!channelActivitySeq || !serverUrl) return;
+    setReadMap(() => {
+      const cur = loadReadMap(serverUrl);
+      if (cur) return cur;
+      const seeded = seedReadMap(channelActivity);
+      saveReadMap(serverUrl, seeded);
+      return seeded;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channelActivitySeq, serverUrl]);
+  const [windowFocused, setWindowFocused] = useState(() => (typeof document !== 'undefined' ? document.hasFocus() : true));
+  useEffect(() => {
+    const on = () => setWindowFocused(true);
+    const off = () => setWindowFocused(false);
+    window.addEventListener('focus', on);
+    window.addEventListener('blur', off);
+    return () => {
+      window.removeEventListener('focus', on);
+      window.removeEventListener('blur', off);
+    };
+  }, []);
+  const readingChannelId =
+    server && navArea === 'server' && !(viewMode === 'voice' && activeVoiceChannelId) && windowFocused
+      ? activeTextChannelId || ''
+      : '';
+  // o canal aberto na tela (com o app em foco) conta como lido
+  useEffect(() => {
+    if (!readingChannelId || !readMap || !serverUrl) return;
+    const a = channelActivity[readingChannelId];
+    if (!a || (readMap[readingChannelId] ?? 0) >= a.at) return;
+    const next = { ...readMap, [readingChannelId]: a.at };
+    setReadMap(next);
+    saveReadMap(serverUrl, next);
+  }, [readingChannelId, channelActivity, readMap, serverUrl]);
+  const unreadChannelIds = useMemo(() => {
+    const set = unreadChannels(channelActivity, readMap, user?.id);
+    for (const id of mutedChannelIds) set.delete(id);
+    if (readingChannelId) set.delete(readingChannelId);
+    return set;
+  }, [channelActivity, readMap, user?.id, mutedChannelIds, readingChannelId]);
+  // os outros servidores salvos: uma consulta pequena a cada minuto
+  useEffect(() => {
+    if (!user?.id) return;
+    let stopped = false;
+    const activeKey = serverKey(serverUrl || '');
+    const check = async () => {
+      const result: Record<string, boolean> = {};
+      await Promise.all(
+        savedServers
+          .filter((s) => s.token && serverKey(s.serverUrl) !== activeKey)
+          .map(async (s) => {
+            try {
+              const resp = await fetch(`${s.serverUrl.replace(/\/+$/, '')}/api/channels`, {
+                headers: { Authorization: `Bearer ${s.token}` },
+                signal: AbortSignal.timeout(8000),
+              });
+              if (!resp.ok) return;
+              const data = await resp.json();
+              const act = data?.channelActivity as ChannelActivity | undefined;
+              if (!act || typeof act !== 'object') return;
+              let read = loadReadMap(s.serverUrl);
+              if (!read) {
+                read = seedReadMap(act);
+                saveReadMap(s.serverUrl, read);
+              }
+              result[serverKey(s.serverUrl)] = unreadChannels(act, read, loadSelfId(s.serverUrl)).size > 0;
+            } catch {
+              // servidor fora do ar: sem bolinha
+            }
+          })
+      );
+      if (!stopped) setOtherServerUnread(result);
+    };
+    check();
+    const t = window.setInterval(check, 60_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+    };
+  }, [user?.id, serverUrl, savedServers]);
+  const unreadServerKeys = useMemo(() => {
+    const set = new Set(Object.keys(otherServerUnread).filter((k) => otherServerUnread[k]));
+    if (serverUrl && unreadChannelIds.size > 0) set.add(serverKey(serverUrl));
+    return set;
+  }, [otherServerUnread, unreadChannelIds, serverUrl]);
 
   // Fetch server text channel message history
   useEffect(() => {
@@ -4814,6 +4936,7 @@ export default function App() {
           serverUrl={serverUrl}
           navArea={navArea}
           unreadDmCount={totalUnreadDms}
+          unreadServerKeys={unreadServerKeys}
           inVoice={Boolean(activeVoiceChannelId)}
           onSelectDms={() => {
             setNavArea('dms');
@@ -4871,6 +4994,7 @@ export default function App() {
             favoriteChannelIds={favoriteChannelIds}
             pinnedChannelIds={pinnedChannelIds}
             mutedChannelIds={mutedChannelIds}
+            unreadChannelIds={unreadChannelIds}
             hideMutedChannels={hideMutedChannels}
             activeTextChannelId={activeTextChannel?.id || ''}
             activeVoiceChannelId={activeVoiceChannelId}

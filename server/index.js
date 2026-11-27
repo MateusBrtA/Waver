@@ -459,6 +459,18 @@ export function createPulseCordServer(options = {}) {
     return (dbObj.channels || []).filter((ch) => computeChannelPermissions(dbObj, user, ch).viewChannels);
   }
 
+  /** Última mensagem de cada canal de texto que a pessoa vê (para a bolinha de "mensagens novas"). */
+  function getChannelActivity(dbObj, visibleChannels) {
+    const out = {};
+    for (const ch of visibleChannels) {
+      if (ch.type !== 'text') continue;
+      const list = (dbObj.messages || {})[ch.id];
+      const last = Array.isArray(list) && list.length ? list[list.length - 1] : null;
+      if (last && Number(last.createdAt)) out[ch.id] = { at: Number(last.createdAt), authorId: String(last.authorId || '') };
+    }
+    return out;
+  }
+
   function isModerator(user) {
     if (!user) return false;
     const p = computeServerPermissions(getDb(), user);
@@ -2293,10 +2305,12 @@ function sanitizeActivity(a) {
   // Channels
   app.get('/api/channels', requireAuth, (req, res) => {
     const db = getDb();
+    const channels = getVisibleChannelsForUser(db, req.user);
     res.json({
-      channels: getVisibleChannelsForUser(db, req.user),
+      channels,
       categories: db.categories || [],
       voiceRooms: getVoiceRoomsSnapshot(),
+      channelActivity: getChannelActivity(db, channels),
     });
   });
 
@@ -3505,9 +3519,11 @@ function sanitizeActivity(a) {
       (g) => Array.isArray(g.memberIds) && g.memberIds.includes(user.id)
     );
 
+    const visibleChannels = getVisibleChannelsForUser(db, user);
     socket.emit('bootstrap', {
       server: getPublicServerInfo(),
-      channels: getVisibleChannelsForUser(db, user),
+      channels: visibleChannels,
+      channelActivity: getChannelActivity(db, visibleChannels),
       categories: db.categories || [],
       roles: db.roles,
       members: getMembersPayload(user.id),

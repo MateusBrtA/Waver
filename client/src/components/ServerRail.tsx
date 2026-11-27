@@ -11,6 +11,8 @@ interface ServerRailProps {
   serverUrl: string;
   navArea: 'server' | 'dms';
   unreadDmCount: number;
+  /** servidores (serverKey) com mensagens novas em algum canal */
+  unreadServerKeys?: Set<string>;
   inVoice: boolean;
   onSelectDms: () => void;
   onSelectServer: () => void;
@@ -30,6 +32,7 @@ export const ServerRail: React.FC<ServerRailProps> = ({
   serverUrl,
   navArea,
   unreadDmCount,
+  unreadServerKeys,
   inVoice,
   onSelectDms,
   onSelectServer,
@@ -89,8 +92,16 @@ export const ServerRail: React.FC<ServerRailProps> = ({
         const iconColor = (active && server ? server.iconColor : entry.iconColor) || '#5865F2';
         const hostingThis = entry.mode === 'host' && Boolean(hostStatus?.running);
         const busy = switchingKey === serverKey(entry.serverUrl);
+        const hasUnread = Boolean(unreadServerKeys?.has(serverKey(entry.serverUrl)));
         return (
           <div key={serverKey(entry.serverUrl)} className="group/srv relative flex items-center justify-center w-full">
+            {hasUnread && (
+              // bolinha de mensagens novas no canto de cima à direita do ícone
+              <span
+                className="absolute top-0 left-1/2 ml-[13px] -mt-[3px] z-10 w-[14px] h-[14px] rounded-full bg-white border-[3px] border-[#1e1f22] pointer-events-none"
+                title="Mensagens novas"
+              />
+            )}
             <span
               className={`absolute left-0 w-1 bg-white rounded-r-full transition-all ${
                 active && navArea === 'server' ? 'h-10' : active ? 'h-2' : 'h-0 group-hover/srv:h-5'

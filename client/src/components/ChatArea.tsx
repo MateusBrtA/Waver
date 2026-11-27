@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowDown,
   Box,
   Code2,
   Download,
@@ -63,6 +64,12 @@ const Model3DInlinePreview = React.lazy(() => import('./Model3DInlinePreview'));
 
 
 const DIRECT_IMAGE_URL_REGEX = /^https?:\/\/\S+\.(gif|png|jpe?g|webp)(\?\S*)?$/i;
+
+// Onde cada conversa estava enquanto o app fica aberto: ao voltar para ela, volta ao mesmo ponto. Ao abrir o app
+// (mapa vazio) toda conversa abre no fim.
+const savedChatScroll = new Map<string, { top: number; limit: number; atBottom: boolean }>();
+/** distância do fim (px) que ainda conta como "no fim" */
+const BOTTOM_SLACK = 48;
 
 interface ChatAreaProps {
   api?: ApiClient | null;
@@ -261,10 +268,143 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const visibleMessages = useMemo(() => messages.slice(-visibleLimit), [messages, visibleLimit]);
 
   useEffect(() => {
-    setVisibleLimit(80);
     setShowPinsPopover(false);
     setSlowModeLeftSec(0);
   }, [channel?.id, dmPeer?.id, dmGroup?.id]);
+
+  // ---- Rolagem: abre no fim, fica no fim enquanto você está lá (mesmo com imagens carregando, a janela mudando
+  // de tamanho ou o app abrindo minimizado) e lembra onde você estava em cada conversa.
+  const chatKey = channel?.id ? `c:${channel.id}` : dmGroup?.id ? `g:${dmGroup.id}` : dmPeer?.id ? `d:${dmPeer.id}` : '';
+  const feedRef = useRef<HTMLDivElement>(null);
+  const feedContentRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
+  const [newBelow, setNewBelow] = useState(0);
+  const restoreRef = useRef<{ key: string; top: number; limit: number } | null>(null);
+  const lastSeenRef = useRef<{ key: string; id: string | null }>({ key: '', id: null });
+  const prependAnchorRef = useRef<{ height: number; top: number } | null>(null);
+  // quando foi a última vez que VOCÊ mexeu na rolagem (roda, arrastar, teclado): só isso tira o chat do fim
+  const userScrollAtRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  const markUserScroll = () => {
+    userScrollAtRef.current = Date.now();
+  };
+  const visibleLimitRef = useRef(visibleLimit);
+  visibleLimitRef.current = visibleLimit;
+
+  const scrollToBottom = (smooth = false) => {
+    const el = feedRef.current;
+    if (!el) return;
+    stickRef.current = true;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (smooth && dist < 4000) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    else el.scrollTop = el.scrollHeight;
+    setNewBelow(0);
+    setAwayFromBottom(false);
+  };
+
+  const handleFeedScroll = () => {
+    const el = feedRef.current;
+    if (!el || !chatKey) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = dist <= BOTTOM_SLACK;
+    const grew = el.scrollHeight !== lastScrollHeightRef.current;
+    lastScrollHeightRef.current = el.scrollHeight;
+    // a conversa cresceu (imagem carregou, mensagem nova) sem você mexer: continua no fim
+    if (stickRef.current && !atBottom && grew && Date.now() - userScrollAtRef.current > 700) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    stickRef.current = atBottom;
+    setAwayFromBottom(!atBottom);
+    if (atBottom) setNewBelow(0);
+    if (!restoreRef.current) savedChatScroll.set(chatKey, { top: el.scrollTop, limit: visibleLimitRef.current, atBottom });
+  };
+
+  // trocou de conversa: volta para onde estava nela (se você tinha subido) ou abre no fim
+  useLayoutEffect(() => {
+    const saved = chatKey ? savedChatScroll.get(chatKey) : undefined;
+    setNewBelow(0);
+    lastSeenRef.current = { key: chatKey, id: null };
+    prependAnchorRef.current = null;
+    if (saved && !saved.atBottom) {
+      const limit = Math.max(80, saved.limit);
+      setVisibleLimit(limit);
+      restoreRef.current = { key: chatKey, top: saved.top, limit };
+      stickRef.current = false;
+      setAwayFromBottom(true);
+    } else {
+      setVisibleLimit(80);
+      restoreRef.current = null;
+      stickRef.current = true;
+      setAwayFromBottom(false);
+      const el = feedRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [chatKey]);
+
+  // depois de cada render: aplica a posição guardada / mantém no fim / segura o lugar ao carregar as anteriores
+  useLayoutEffect(() => {
+    const el = feedRef.current;
+    if (!el) return;
+    const r = restoreRef.current;
+    if (r) {
+      if (r.key === chatKey && visibleLimit === r.limit && messages.length > 0) {
+        el.scrollTop = r.top;
+        restoreRef.current = null;
+        handleFeedScroll();
+      }
+      return;
+    }
+    const anchor = prependAnchorRef.current;
+    if (anchor) {
+      prependAnchorRef.current = null;
+      el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+      return;
+    }
+    if (stickRef.current) el.scrollTop = el.scrollHeight;
+  });
+
+  // mensagem nova: segue para o fim se você está lá (ou se foi você que mandou); senão mostra a seta com o número
+  useLayoutEffect(() => {
+    const last = messages[messages.length - 1];
+    const prev = lastSeenRef.current;
+    lastSeenRef.current = { key: chatKey, id: last?.id || null };
+    if (prev.key !== chatKey || !prev.id || !last || last.id === prev.id || restoreRef.current) return;
+    if (stickRef.current || last.authorId === user.id) {
+      scrollToBottom();
+      return;
+    }
+    const idx = messages.findIndex((m) => m.id === prev.id);
+    const added = idx >= 0 ? messages.length - 1 - idx : 1;
+    if (added > 0) setNewBelow((n) => Math.min(999, n + added));
+  }, [messages, chatKey]);
+
+  // imagens/prévias que terminam de carregar, a janela mudando de tamanho ou saindo do minimizado: se você
+  // estava no fim, continua no fim
+  useEffect(() => {
+    const el = feedRef.current;
+    const content = feedContentRef.current;
+    if (!el || !content) return;
+    const keep = () => {
+      if (stickRef.current && !restoreRef.current) el.scrollTop = el.scrollHeight;
+    };
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(keep) : null;
+    ro?.observe(el);
+    ro?.observe(content);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') keep();
+    };
+    window.addEventListener('focus', keep);
+    window.addEventListener('resize', keep);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('focus', keep);
+      window.removeEventListener('resize', keep);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [chatKey]);
 
   useEffect(() => {
     if (slowModeLeftSec <= 0) return;
@@ -274,9 +414,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     return () => window.clearInterval(t);
   }, [slowModeLeftSec > 0]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, channel?.id, dmPeer?.id]);
 
   // Insert @mention from right-click context menu!
   useEffect(() => {
@@ -303,6 +440,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const id = pendingJumpRef.current;
     if (!id || !messages.some((m) => m.id === id)) return;
     pendingJumpRef.current = null;
+    stickRef.current = false;
     setVisibleLimit((prev) => Math.max(prev, messages.length));
     setHighlightedMsgId(id);
     window.setTimeout(() => document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 60);
@@ -813,6 +951,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               <button
                                 type="button"
                                 onClick={() => {
+                                  stickRef.current = false;
                                   setVisibleLimit((prev) => Math.max(prev, messages.length));
                                   setShowPinsPopover(false);
                                   setHighlightedMsgId(pm.id);
@@ -945,7 +1084,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       ) : (
         <>
       {/* Messages Feed */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-1">
+      <div className="relative flex-1 min-h-0 flex flex-col">
+      <div
+        ref={feedRef}
+        onScroll={handleFeedScroll}
+        onWheel={markUserScroll}
+        onPointerDown={markUserScroll}
+        onTouchMove={markUserScroll}
+        onKeyDown={markUserScroll}
+        className="flex-1 overflow-y-auto px-4 py-4"
+        style={{ overflowAnchor: 'none' }}
+      >
+      <div ref={feedContentRef} className="space-y-1">
         <div className="pb-4 mb-3 border-b border-[#3f4147]/60">
           {isGroup && dmGroup ? (
             <>
@@ -1000,7 +1150,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <div className="flex justify-center py-2">
             <button
               type="button"
-              onClick={() => setVisibleLimit((prev) => prev + 80)}
+              onClick={() => {
+                // segura o ponto onde você está (as mensagens entram em cima)
+                const el = feedRef.current;
+                if (el) prependAnchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
+                setVisibleLimit((prev) => prev + 80);
+              }}
               className="px-3.5 py-1.5 rounded-full bg-[#383a40] hover:bg-[#5865f2] text-xs font-bold text-[#dbdee1] hover:text-white transition cursor-pointer"
             >
               Carregar mensagens anteriores (+{Math.min(80, hiddenCount)} de {hiddenCount})
@@ -1410,6 +1565,24 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           );
         })}
         <div ref={messagesEndRef} />
+      </div>
+      </div>
+      {/* seta para o fim: aparece quando você subiu (não dá para ver o fim) ou chegou mensagem nova lá embaixo */}
+      {(awayFromBottom || newBelow > 0) && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom(true)}
+          title="Ir para as mensagens mais recentes"
+          className={`absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 rounded-full shadow-lg border transition cursor-pointer ${
+            newBelow > 0
+              ? 'px-3.5 py-1.5 bg-[#5865f2] hover:bg-[#4752c4] border-white/10 text-white text-xs font-bold'
+              : 'p-2 bg-[#2b2d31] hover:bg-[#383a40] border-white/10 text-[#dbdee1]'
+          }`}
+        >
+          {newBelow > 0 && <span>{newBelow === 1 ? '1 mensagem nova' : `${newBelow > 99 ? '99+' : newBelow} mensagens novas`}</span>}
+          <ArrowDown className="w-4 h-4" />
+        </button>
+      )}
       </div>
 
       {/* Typing Indicator */}
